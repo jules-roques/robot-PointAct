@@ -29,9 +29,7 @@ lerobot_datasets:
     # architecture fits with no change).
     converted_rot_type: rot6d  # euler, rot6d
 
-    # TODO(verify): RoboCasa365 PandaOmron eef actions — absolute pose vs delta. Libero uses
-    # delta. Set this to match how the source actions are defined, and keep the client
-    # (run_robocasa365_client.py) consistent.
+    # RoboCasa365 PandaOmron eef actions are absolute pose targets (not deltas, unlike Libero).
     is_delta_action: False
 
     # Robot-base-frame workspace from RoboCasa365Env.get_points_workspace(). The replay

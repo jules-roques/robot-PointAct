@@ -36,11 +36,14 @@ BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/OpenDrawer/202
 OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer"
 
 cd "$REPO"
-echo "host=$(hostname) cache=$BASE/replay_cache out=$OUT"
+echo "host=$(hostname) cache=$BASE/replay_cache out=$OUT episodes=${EPISODES:+subset}"
 
+# EPISODES (optional, space-separated) restricts conversion to a subset — e.g. only the
+# successful replays. Unset converts every cached episode.
 srun uv run --no-sync \
   data_prep/robocasa365_to_lerobot/convert.py \
   --cache-dir "$BASE/replay_cache" \
   --output-dir "$OUT" \
   --repo-id OpenDrawer \
-  --overwrite
+  --overwrite \
+  ${EPISODES:+--episodes $EPISODES}

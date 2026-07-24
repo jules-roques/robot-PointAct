@@ -20,27 +20,41 @@ RoboCasa365 tasks, starting with **OpenDrawer**. Scaffolded from `experiments/2_
    ln -s $SCRATCH/datasets/robot_data robot_data
    ```
 
-3. **Pretrained backbones** — Qwen2.5-VL-3B and the PTv3 checkpoints (Concerto / Utonia), per
-   `INSTALLATION.md`.
+3. **Pretrained backbones** — the train scripts point at:
+   - VLM: `$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct` (IDRIS shared models).
+   - PTv3: `$SCRATCH/models/Pointcept-Concerto/concerto_large.pth` (Concerto). The Utonia
+     variant expects `$SCRATCH/models/Pointcept-Utonia/utonia.pth` — download it (see
+     `INSTALLATION.md`) only if you use `train_pointact_utonia.sh`.
+
+   Adjust these paths in the train scripts if your copies live elsewhere.
 
 ## State / action statistics
 
-Training needs a normalization file (referenced by the data config). Generate it like Libero;
-the eef rotation quat is at index `[3:7]` in both state and action:
+Training needs a normalization file (referenced by the data config). The eef rotation quat is
+at index `[3:7]` in both state and action. Two flags differ from the Libero command and are
+**required** here:
+
+- `--point_cloud_dir points_3views` — mandatory whenever `--*_xyz_slice` is given (position
+  stats are computed in the point-cloud frame, as for RLBench).
+- `--replace_zero_std` — RoboCasa365 tasks like OpenDrawer are fixed-base, so the state's base
+  pose (and the action's base-motion) dims are constant → zero std. PointAct's state
+  normalization (`processor_base.py`, `(state - mean) / std`) has no zero-std guard, so without
+  this flag those dims produce NaN and training diverges immediately.
 
 ```bash
 python data_prep/prepare_robot_state_action_stats.py \
     --dataset_dirs robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer \
     --output_file  robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json \
-    --state_rotation_slice 3 7 \
-    --action_rotation_slice 3 7 \
-    --rotation_type quat \
-    --target_rotation_type rot6d
+    --point_cloud_dir points_3views \
+    --state_xyz_slice 0 3 --action_xyz_slice 0 3 \
+    --state_rotation_slice 3 7 --action_rotation_slice 3 7 \
+    --rotation_type quat --target_rotation_type rot6d \
+    --replace_zero_std
 ```
 
-TODO(verify): the RoboCasa365 state also carries a **base** rotation quat at `[12:16]` that a
-single `--state_rotation_slice` does not convert. Confirm this matches how you want the state
-normalized (Libero has a single, fixed-base arm and no base rotation).
+Note: only the eef rotation quat at `[3:7]` is converted to rot6d; the base rotation quat at
+`[12:16]` passes through unchanged. Fine for fixed-base tasks like OpenDrawer — revisit for
+navigation tasks where the base actually turns.
 
 ## Training
 

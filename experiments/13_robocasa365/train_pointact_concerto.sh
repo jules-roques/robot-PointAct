@@ -5,8 +5,10 @@ export HF_DATASETS_OFFLINE=1
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
-GPUS=1
-PER_DEVICE_BATCH_SIZE=128
+# Paper: total batch size 128 across 2 H100 -> 2 GPUs x 64 per device (effective 128).
+GPUS=2
+PER_DEVICE_BATCH_SIZE=64
+NUM_NODES=${NUM_NODES:-1}
 
 # Build accelerate arguments based on GPU count
 if [ $GPUS -eq 1 ]; then
@@ -53,7 +55,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --model_class VLAEncDec3DWithActionRegressionModel \
     --output_dir ${output_dir} \
     ${model_name_or_path:+--model-name-or-path $model_name_or_path} \
-    --vlm-name-or-path Qwen/Qwen2.5-VL-3B-Instruct \
+    --vlm-name-or-path $DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct \
     --data-path ${dataset} \
     --chunk-size ${chunk_size} \
     --dataloader-num-workers 8 \
@@ -95,4 +97,4 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --regression_head_heatmap_temp 0.1 \
     --action_head_pos_center zero \
     --ptv3_apply_point_ca False \
-    --ptv3_init_ckpt_file $SCRATCH/datasets/pretrained/Pointcept-Concerto/concerto_large.pth
+    --ptv3_init_ckpt_file $SCRATCH/models/Pointcept-Concerto/concerto_large.pth
