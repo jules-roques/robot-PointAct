@@ -52,7 +52,7 @@ This repository currently supports three simulators:
 | --- | --- | --- |
 | [LIBERO](experiments/2_libero/README.md) | [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) | [`experiments/2_libero`](experiments/2_libero) |
 | [RLBench](experiments/10_rlbench/README.md) | [RLBench](https://github.com/stepjam/RLBench) | [`experiments/10_rlbench`](experiments/10_rlbench) |
-| [RoboCASA365](experiments/13_robocasa365/README.md) | [RoboCASA](https://github.com/robocasa/robocasa) | [`experiments/13_robocasa365`](experiments/13_robocasa365) |
+| [RoboCASA365](envs/robocasa365/README.md) | [RoboCASA](https://github.com/robocasa/robocasa) | [`envs/robocasa365`](envs/robocasa365) |
 
 
 ## Supported Models

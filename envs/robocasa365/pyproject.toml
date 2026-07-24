@@ -1,0 +1,48 @@
+[project]
+name = "pointact-robocasa365"
+version = "0.1.0"
+description = "RoboCasa365 simulator environment for PointAct: dataset replay and the evaluation client."
+readme = "README.md"
+# RoboCasa365 targets Python 3.11 (see its installation instructions). Do not widen this:
+# its numba/numpy pins are only satisfiable on 3.11.
+requires-python = ">=3.11,<3.12"
+
+# This environment is intentionally separate from the root `pointact` project. RoboCasa365
+# pins numpy==2.2.5 / mujoco==3.3.1 / scipy==1.15.3, while the training stack is held at
+# numpy==1.26.4 by open3d 0.18 — the two cannot share a resolution. `pointact` is pulled in
+# as a path dependency and contributes only its lightweight base dependencies (numpy, scipy,
+# pillow, msgpack, pyzmq, ...), never torch or transformers.
+dependencies = [
+    "pointact",
+    "robocasa",
+    "robosuite",
+    # data_prep/robocasa365_to_lerobot/replay.py reads the source episodes with pyarrow.
+    "pyarrow",
+]
+
+[tool.uv]
+# Dependency container only — there is nothing to build or install from this directory.
+package = false
+
+[tool.uv.sources]
+pointact = { path = "../..", editable = true }
+
+# robocasa is an editable checkout, not a git dependency, because its own scripts write into
+# the installed package directory (robocasa.__path__[0]) with no way to redirect them:
+#   - download_kitchen_assets.py writes ~5GB into robocasa/models/assets/
+#   - setup_macros.py writes robocasa/macros_private.py, which holds DATASET_BASE_PATH
+# As a git dependency those land in .venv/lib/python3.11/site-packages/ and are destroyed by
+# any `uv sync` that reinstalls robocasa. In a checkout they persist.
+#
+# The checkout is vendored as the git submodule at ./robocasa (see ../../.gitmodules), which
+# also pins the revision that a path dependency alone cannot record in uv.lock. Everything the
+# download scripts write is covered by robocasa's own .gitignore, so the submodule stays clean.
+# Populate it with:  git submodule update --init envs/robocasa365/robocasa
+# pointact/robot_envs/robocasa365_utils/environments.py depends on TASK_SET_REGISTRY,
+# get_task_horizon and create_env, which are not stable across revisions — move the submodule
+# pointer deliberately.
+robocasa = { path = "robocasa", editable = true }
+
+# robosuite stays a pinned git dependency: nothing writes into its package directory.
+# RoboCasa365 requires the robosuite master branch, not a tagged release.
+robosuite = { git = "https://github.com/ARISE-Initiative/robosuite", rev = "5ce6643f3092639d08f7b0f90ed1c6a84f50552c" }

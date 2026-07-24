@@ -24,57 +24,98 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+# Base dependencies: the lightweight "client core" shared by the policy server and by
+# every simulator environment (see envs/). This set is deliberately kept free of torch,
+# transformers, lerobot and open3d so that a simulator env can depend on `pointact` via a
+# path dependency without inheriting the training stack. It covers exactly the modules a
+# simulator client imports: pointact.utils.{server_client,rotation,depth} and
+# pointact.robot_envs.*.
+#
+# Keep version ranges wide here. Simulator environments resolve this set against their own
+# hard pins (RoboCasa365 requires numpy==2.2.5, while the training stack below is stuck on
+# numpy==1.26.4 via open3d 0.18), so any pin added here leaks across the boundary and makes
+# the two environments unresolvable.
 dependencies = [
+    # Numeric and image primitives
+    "numpy",
+    "scipy",
+    "pillow",
+    # Server-client IPC
+    "msgpack",
+    "msgpack_numpy",
+    "pyzmq",
+    "easydict",
+    # CLI, logging and IO helpers used by the simulator clients
+    "tyro",
+    "tqdm",
+    "termcolor",
+    "imageio",
+    "jsonlines>=4.0.0",
+]
+# Optional dependencies
+[project.optional-dependencies]
+
+# Training, data preprocessing and the policy server. Everything that must not reach a
+# simulator environment lives here. Install with: uv sync --extra train
+train = [
     # Hugging Face, LeRobot, and training framework
     "datasets>=2.19.0,<=3.6.0",
     "huggingface-hub[cli]>=1.0.0",
     "lerobot>=0.3.3,<=0.3.4",
     "transformers==5.5.4",
     "accelerate>=1.10.1",
-
     # Numeric, vision, and point-cloud utilities
     "einops>=0.8.0",
     "numpy==1.26.4",
     "opencv-python-headless>=4.9.0",
     "open3d==0.18.0",
     "av>=14.2.0",
-    "scipy",
     "torchvision>=0.21.0",
-
-    # Data formats, CLI, and server-client IPC
-    "jsonlines>=4.0.0",
+    "scikit-learn",
+    # Data formats
     "lmdb",
-    "msgpack",
-    "msgpack_numpy",
-    "pyzmq",
-    "tyro",
-
+    "ujson>=5.11.0",
     # PyTorch runtime
     "torch==2.7.0",
     "torchcodec>=0.2.1; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
-
     # Model and processor helpers
     "packaging>=24.2",
     "qwen_vl_utils>=0.0.11",
     "timm==1.0.9",
-    "ujson>=5.11.0",
-    "easydict",
-
     # TensorBoard logging for training scripts
     "tensorboardX",
+    "evdev>=1.9.3",
+    "ipython>=8.39.0",
 ]
-# Optional dependencies
-[project.optional-dependencies]
+
+# CUDA-only accelerators for the PointAct 3D backbone. These ship as prebuilt wheels tied
+# to a specific CPython / torch / CUDA combination, hence the markers. Requires `train`.
+# Install with: uv sync --extra train --extra cuda
+cuda = [
+    "spconv-cu120; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch-scatter; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.10' and python_full_version < '3.11'",
+]
 
 # Development
 test = ["pytest>=8.1.0", "pytest-timeout>=2.4.0", "pytest-cov>=5.0.0", "mock-serial>=0.0.1 ; sys_platform != 'win32'"]
 
 # All
 all = [
-    "pointact[test]"
+    "pointact[train,cuda,test]"
 ]
 
 # ---------------- Tool Configurations ----------------
+# torch-scatter is published on the PyG wheel index, not PyPI.
+[[tool.uv.index]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.7.0+cu126.html"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+torch-scatter = { index = "pyg" }
+
 [tool.setuptools.packages.find]
 exclude = [
     "*.tests",

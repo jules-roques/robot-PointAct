@@ -1,0 +1,54 @@
+# PointAct point-cloud data config for RoboCasa365 OpenDrawer (target/human split).
+# Mirrors experiments/2_libero/data_configs/data-libero-*-point-frontview.yaml, adapted to
+# the RoboCasa365 PandaOmron dataset produced by data_prep/robocasa365_to_lerobot.
+#
+# `root` is resolved relative to the training CWD (repo root). Create the symlink once:
+#   ln -s $SCRATCH/datasets/robot_data robot_data
+# so that robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer resolves.
+
+mm_datasets:
+
+lerobot_datasets:
+
+  - repo_id: OpenDrawer
+    root: robot_data/robocasa365/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+
+    # RoboCasa365 saves three cameras: left / right / wrist (agentview_left,
+    # agentview_right, eye_in_hand). Libero feeds a single frontal view to the VLM; the
+    # closest equivalent here is the left agentview. Switch/extend if you want both externals.
+    select_video_keys: [observation.images.left_image]
+    video_key_ids_for_vlm: [0]
+
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+
+    # Action layout (13-d, from pointact/robot_envs/robocasa365_utils/environments.py):
+    #   [eef_pos(3), eef_quat_xyzw(4), gripper_close(1), base_motion(4), control_mode(1)]
+    # After quat->rot6d the action head sees 15-d (< max_action_dim=32, so the same model
+    # architecture fits with no change).
+    converted_rot_type: rot6d  # euler, rot6d
+
+    # TODO(verify): RoboCasa365 PandaOmron eef actions — absolute pose vs delta. Libero uses
+    # delta. Set this to match how the source actions are defined, and keep the client
+    # (run_robocasa365_client.py) consistent.
+    is_delta_action: False
+
+    # Robot-base-frame workspace from RoboCasa365Env.get_points_workspace(). The replay
+    # already crops/voxelizes points into the points_3views LMDB; re-cropping here to the
+    # same box is a safe no-op and documents the volume. Use null to skip re-cropping.
+    points_workspace: {
+      'X_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Y_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Z_BBOX': [0.0, 1.0],    # 0 = floor
+    }
+
+    max_npoints: 4096
+    augment_pc_rot: 30
+    point_cloud_dirname: points_3views
+
+    # Generate with data_prep/prepare_robot_state_action_stats.py (see README). The eef
+    # rotation quat sits at action[3:7] and state[3:7]; note the state ALSO carries a base
+    # rotation quat at [12:16] that a single --state_rotation_slice does not convert — verify
+    # this matches how you want the state normalized.
+    state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
