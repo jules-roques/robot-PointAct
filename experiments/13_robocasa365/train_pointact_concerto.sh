@@ -39,6 +39,12 @@ run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH
 
 output_dir=$SCRATCH/datasets/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
 
+# Weights & Biases. On Jean Zay compute nodes (no internet) this logs offline; sync from a
+# login node with `wandb sync` (WANDB_MODE / WANDB_DIR are set by train.slurm).
+export WANDB_ENTITY=diffusion4robots
+export WANDB_PROJECT=pointact-robocasa365
+export WANDB_NAME=concerto-${run_name}
+
 # Determine TF32 support
 TF32_SUPPORT="False"
 COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
@@ -81,7 +87,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --run-name ${run_name} \
     --attn-implementation flash_attention_2 \
     --log_level info \
-    --report-to tensorboard \
+    --report-to wandb tensorboard \
     --color_aug True \
     --max_grad_norm 3 \
     --use_robot_state True \
