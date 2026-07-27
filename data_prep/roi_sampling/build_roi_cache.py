@@ -63,10 +63,10 @@ def decode_video(path: Path) -> list[np.ndarray]:
 def detect_boxes(model, images_rgb: list[np.ndarray], conf: float, max_det: int) -> list[np.ndarray]:
     """Run YOLO-World on a batch of RGB frames; return (K,4) xyxy boxes per frame.
 
-    ultralytics treats numpy inputs as BGR, so we swap channels on the way in.
+    Frames are passed as RGB: on these sim renders RGB gives markedly higher
+    open-vocab confidence than the usual BGR convention (verified on OpenDrawer).
     """
-    bgr = [img[..., ::-1] for img in images_rgb]
-    results = model.predict(bgr, conf=conf, max_det=max_det, verbose=False)
+    results = model.predict(images_rgb, conf=conf, max_det=max_det, imgsz=256, verbose=False)
     out = []
     for r in results:
         if r.boxes is None or len(r.boxes) == 0:
@@ -86,8 +86,10 @@ def main() -> None:
     ap.add_argument("--out-dirname", default="points_3views_roi")
     ap.add_argument("--points-dirname", default="points_3views")
     ap.add_argument("--episodes", nargs="*", type=int, default=None)
-    ap.add_argument("--conf", type=float, default=0.005)
-    ap.add_argument("--max-det", type=int, default=5)
+    # "drawer" fires reliably at ~0.1-0.16 conf on these sim renders; keep the single
+    # most-confident box per camera to anchor the halo.
+    ap.add_argument("--conf", type=float, default=0.02)
+    ap.add_argument("--max-det", type=int, default=1)
     ap.add_argument("--halo-scale", type=float, default=2.0)
     ap.add_argument("--min-radius", type=float, default=0.05)
     ap.add_argument("--max-radius", type=float, default=0.6)

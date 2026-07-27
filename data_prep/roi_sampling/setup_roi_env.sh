@@ -12,7 +12,7 @@ cd "$REPO"
 
 VENV="$REPO/.venv-roi"
 WEIGHTS_DIR="$SCRATCH/models/YOLO-World"
-BAKED="$WEIGHTS_DIR/yoloworld_s_drawerhandle.pt"
+BAKED="$WEIGHTS_DIR/yoloworld_s_drawer.pt"
 
 echo "== creating $VENV =="
 uv venv "$VENV" --python 3.10
@@ -25,6 +25,6 @@ echo "== baking YOLO-World prompt -> $BAKED =="
 mkdir -p "$WEIGHTS_DIR"
 cd "$WEIGHTS_DIR"   # let ultralytics drop its auto-downloads here
 PYTHONPATH="$REPO" "$VENV/bin/python" "$REPO/data_prep/roi_sampling/bake_yoloworld.py" \
-    --prompt "drawer handle" --out "$BAKED"
+    --prompt "drawer" --out "$BAKED"
 
 echo "== done. venv=$VENV baked=$BAKED =="

@@ -29,7 +29,7 @@ export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 VENV="$REPO/.venv-roi/bin/python"
 DATA="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer"
 CALIB="$DATA/roi_meta/camera_calib.npz"
-WEIGHTS="$SCRATCH/models/YOLO-World/yoloworld_s_drawerhandle.pt"
+WEIGHTS="$SCRATCH/models/YOLO-World/yoloworld_s_drawer.pt"
 
 nvidia-smi -L || true
 
