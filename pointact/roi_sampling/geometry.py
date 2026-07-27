@@ -149,14 +149,12 @@ class HaloResult:
     n_in_box: int  # number of points that fell inside any detection box
 
 
-#: Sign of the robot-base Y axis that the instruction's "left" refers to.
-#: Calibrated from the demonstrations themselves: taking observation.state[0:3]
-#: (base_to_eef_pos, the same frame as the point cloud) at the frame the gripper closes
-#: — i.e. the handle actually grasped — "left" episodes average Y=+0.156 and "right"
-#: episodes Y=-0.148 over 80 episodes. So "left" is the HIGHER-Y drawer.
-#: NOTE: an image-space "leftmost box" rule is wrong here (it picks the opposite drawer),
-#: and an absolute Y threshold is unreliable per-episode because the robot base pose
-#: varies; comparing candidates *within a frame* is what makes this robust.
+#: Weak statistical tendency only — DO NOT use as a per-episode rule.
+#: Over 80 episodes the eef-at-grasp averages Y=+0.156 for "left" and Y=-0.148 for
+#: "right", but individual episodes contradict it freely (left-drawer episodes grasp at
+#: Y=-0.607, -0.459, +0.473, ...): the robot parks at a different yaw in each kitchen, so
+#: no fixed base-frame axis — and no image-space side — decodes the instruction.
+#: Selection therefore uses the demonstration's grasp point (see select_anchor_by_grasp).
 LEFT_IS_HIGHER_Y = True
 
 
@@ -198,6 +196,37 @@ def candidate_anchors(
             anchor = np.median(np.asarray(points_base, dtype=np.float64)[mask], axis=0)
             out.append((anchor, mask))
     return out
+
+
+def select_anchor_by_grasp(
+    cands: list[tuple[np.ndarray, np.ndarray]],
+    grasp_point: np.ndarray | None,
+    max_dist: float = 0.45,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Choose the detected drawer the demonstration actually grasped.
+
+    ``grasp_point`` is the end-effector position (robot-base frame, i.e. the point-cloud
+    frame) at the frame the gripper closes — the handle the demonstration reached for.
+    It is a per-episode constant, so it disambiguates every frame of that episode,
+    including the first, without making the ROI follow the arm around.
+
+    This replaces instruction-side heuristics, which do not work on this dataset: the
+    robot parks at a different yaw per kitchen, so neither a base-frame axis nor an
+    image side maps consistently onto "left"/"right" (see LEFT_IS_HIGHER_Y).
+
+    Falls back to the best-supported candidate when no grasp point is available (e.g.
+    at eval time) or when every candidate is implausibly far from it.
+    """
+    if not cands:
+        return None
+    if grasp_point is None:
+        return max(cands, key=lambda c: int(c[1].sum()))
+    g = np.asarray(grasp_point, dtype=np.float64).reshape(3)
+    dists = np.array([float(np.linalg.norm(c[0] - g)) for c in cands])
+    best = int(np.argmin(dists))
+    if dists[best] > max_dist:
+        return max(cands, key=lambda c: int(c[1].sum()))
+    return cands[best]
 
 
 def select_anchor_by_side(

@@ -4,7 +4,7 @@ Runs in the ROI preproc env (torch + ultralytics, H100). For each stored frame:
   1. load the base-frame point cloud from the points LMDB (same key/order as training),
   2. decode the left/right RGB frame from the episode mp4,
   3. detect drawers with a YOLO-World checkpoint pre-baked for "drawer",
-  4. build a 3D anchor per box and keep the drawer the instruction names (3D side test),
+  4. build a 3D anchor per box and keep the drawer the demonstration actually grasps,
   5. reproject the cloud, take the in-box epicenter, size the halo,
   6. write (anchor_xyz, radius, n_in_box) under the identical `ep-frame` key.
 
@@ -31,8 +31,7 @@ from tqdm.auto import tqdm
 from pointact.roi_sampling.geometry import (
     candidate_anchors,
     halo_from_candidate,
-    parse_task_side,
-    select_anchor_by_side,
+    select_anchor_by_grasp,
 )
 
 msgpack_numpy.patch()
@@ -76,6 +75,30 @@ def episode_sides(meta_dir: Path) -> dict[int, str | None]:
             tasks = row.get("tasks") or []
             sides[int(row["episode_index"])] = parse_task_side(tasks[0] if tasks else None)
     return sides
+
+
+def episode_grasp_point(dataset_dir: Path, ep: int, chunks_size: int) -> np.ndarray | None:
+    """End-effector position (robot-base frame) at the frame the gripper closes.
+
+    observation.state[0:3] is base_to_eef_pos — the same frame as the stored point cloud.
+    action[7] is gripper_close. The first closing frame is where the demonstration grasps
+    the handle, which identifies the target drawer for the whole episode.
+    """
+    import pyarrow.parquet as pq
+
+    p = dataset_dir / "data" / f"chunk-{ep // chunks_size:03d}" / f"episode_{ep:06d}.parquet"
+    try:
+        tb = pq.read_table(p, columns=["observation.state", "action"])
+    except Exception:
+        return None
+    S = np.array([np.asarray(x, np.float32) for x in tb.column("observation.state").to_pylist()])
+    A = np.array([np.asarray(x, np.float32) for x in tb.column("action").to_pylist()])
+    if S.ndim != 2 or S.shape[1] < 3 or A.ndim != 2 or A.shape[1] < 8:
+        return None
+    idx = np.flatnonzero(A[:, 7] > 0.5)
+    if len(idx) == 0:
+        return None
+    return S[idx[0], 0:3].astype(np.float64)
 
 
 def decode_video(path: Path) -> list[np.ndarray]:
@@ -130,7 +153,6 @@ def main() -> None:
     dataset_dir = args.dataset_dir.expanduser().resolve()
     cams, image_hw = load_calib(args.calib)
     lengths = episode_lengths(dataset_dir / "meta")
-    sides = episode_sides(dataset_dir / "meta")
     info = json.loads((dataset_dir / "meta" / "info.json").read_text())
     chunks_size = int(info.get("chunks_size", 1000))
 
@@ -153,7 +175,8 @@ def main() -> None:
     with points_env.begin(buffers=True) as ptxn:
         for ep in tqdm(episodes, desc="episodes", unit="ep"):
             n = lengths[ep]
-            side = sides.get(ep)  # "left"/"right" from the episode instruction
+            # Per-episode ground truth: where the demonstration grasps the handle.
+            grasp = episode_grasp_point(dataset_dir, ep, chunks_size)
             left = decode_video(video_path("left", ep))
             right = decode_video(video_path("right", ep))
             n_use = min(n, len(left), len(right))
@@ -181,7 +204,7 @@ def main() -> None:
                     cands = candidate_anchors(
                         pts, cams, dets, image_hw, min_in_box=args.min_in_box
                     )
-                    cand = select_anchor_by_side(cands, side)
+                    cand = select_anchor_by_grasp(cands, grasp)
                     res = halo_from_candidate(
                         pts, cand,
                         halo_scale=args.halo_scale,
