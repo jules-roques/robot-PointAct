@@ -7,6 +7,14 @@ __pycache__/
 .codex
 debug/
 
+# Claude Code: harness-managed worktrees and per-machine settings.
+# .claude/settings.json IS tracked (shared project config).
+.claude/worktrees/
+.claude/settings.local.json
+
+# Model checkpoints: keep these on scratch storage, never in git.
+weights/
+
 # C extensions
 *.so
 
