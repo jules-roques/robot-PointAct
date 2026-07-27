@@ -60,10 +60,14 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--samples", nargs="*", default=None,
                     help="Explicit 'ep-frame' ids; default auto-picks a spread.")
+    ap.add_argument("--episodes", nargs="*", type=int, default=None,
+                    help="Restrict auto-picking to these episodes (e.g. a built subset).")
     ap.add_argument("--num-samples", type=int, default=8)
     ap.add_argument("--max-points", type=int, default=9000, help="Cap points drawn per frame.")
     ap.add_argument("--roi-ratio", type=float, default=0.6)
     ap.add_argument("--max-npoints", type=int, default=4096)
+    ap.add_argument("--fragment", action="store_true",
+                    help="Write body-only HTML (for embedding, e.g. an Artifact) instead of a full page.")
     args = ap.parse_args()
 
     dataset_dir = args.dataset_dir.expanduser().resolve()
@@ -80,6 +84,8 @@ def main() -> None:
                 row = json.loads(line)
                 lengths[int(row["episode_index"])] = int(row["length"])
         eps = sorted(lengths)
+        if args.episodes:
+            eps = [e for e in eps if e in set(args.episodes)]
         step = max(1, len(eps) // args.num_samples)
         cand_eps = eps[::step][: args.num_samples]
         samples = []
@@ -160,7 +166,7 @@ def main() -> None:
         legend=dict(itemsizing="constant"),
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(args.out), include_plotlyjs=True, full_html=True)
+    fig.write_html(str(args.out), include_plotlyjs=True, full_html=not args.fragment)
     print(f"wrote interactive viz ({len(samples)} frames) -> {args.out}")
 
 
