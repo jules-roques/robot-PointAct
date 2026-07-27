@@ -214,8 +214,13 @@ def select_anchor_by_grasp(
     robot parks at a different yaw per kitchen, so neither a base-frame axis nor an
     image side maps consistently onto "left"/"right" (see LEFT_IS_HIGHER_Y).
 
-    Falls back to the best-supported candidate when no grasp point is available (e.g.
-    at eval time) or when every candidate is implausibly far from it.
+    When a grasp point is available but no candidate lies within ``max_dist`` of it, the
+    detector did not find the target drawer — so this returns None and the caller falls
+    back to uniform sampling. Guessing the best-supported candidate there would
+    concentrate the budget on the *wrong* drawer, which is worse than not concentrating
+    at all; uniform keeps such frames merely baseline-equivalent.
+
+    With no grasp point at all (e.g. eval time) it returns the best-supported candidate.
     """
     if not cands:
         return None
@@ -225,7 +230,7 @@ def select_anchor_by_grasp(
     dists = np.array([float(np.linalg.norm(c[0] - g)) for c in cands])
     best = int(np.argmin(dists))
     if dists[best] > max_dist:
-        return max(cands, key=lambda c: int(c[1].sum()))
+        return None
     return cands[best]
 
 
