@@ -60,32 +60,7 @@ the module attribute. Left at `None`, datasets default to a `datasets/` director
 package. The value above is what makes downloaded data land where
 `data_prep/robocasa365_to_lerobot/README.md` expects it.
 
-### 4. Redirect heavy storage off $WORK
-
-On Jean Zay, `$WORK` has a hard ~500k **inode** quota. RoboCasa writes ~5GB of many small
-asset files into `robocasa/models/assets/` (the `objects/` tree alone is >100k files), and
-`hf_hub_download` stages multi-GB zips/tars in the HF cache, which defaults to the tiny
-`$HOME`. Both must go to `$SCRATCH` (`/lustre/fsn1`, no tight inode cap).
-
-Stage the HF cache with an env var, exported for every command below:
-
-```bash
-export HF_HOME="$SCRATCH/.cache/huggingface"
-```
-
-Redirect the inode-heavy, fully-untracked asset directories into `$SCRATCH` with symlinks.
-The download scripts extract through the symlinks, so files land on `$SCRATCH` while the
-package layout is unchanged. Do **not** symlink `fixtures/` — it holds git-tracked files.
-
-```bash
-A=envs/robocasa365/robocasa/robocasa/models/assets
-for d in objects textures generative_textures; do
-  mkdir -p "$SCRATCH/robocasa_assets/$d"
-  ln -s "$SCRATCH/robocasa_assets/$d" "$A/$d"
-done
-```
-
-### 5. Download kitchen assets
+### 4. Download kitchen assets
 
 Required to instantiate any environment (~5GB), independent of demonstration data:
 

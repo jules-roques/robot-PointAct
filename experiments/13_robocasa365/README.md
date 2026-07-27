@@ -21,12 +21,13 @@ RoboCasa365 tasks, starting with **OpenDrawer**. Scaffolded from `experiments/2_
    ```
 
 3. **Pretrained backbones** — the train scripts point at:
-   - VLM: `$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct` (IDRIS shared models).
+   - VLM: `$SCRATCH/models/Qwen2.5-VL-3B-Instruct`.
    - PTv3: `$SCRATCH/models/Pointcept-Concerto/concerto_large.pth` (Concerto). The Utonia
      variant expects `$SCRATCH/models/Pointcept-Utonia/utonia.pth` — download it (see
      `INSTALLATION.md`) only if you use `train_pointact_utonia.sh`.
 
-   Adjust these paths in the train scripts if your copies live elsewhere.
+   Adjust these paths in the train scripts if your copies live elsewhere. (On Jean Zay the VLM
+   path was `$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct`; CLEPS has no `$DSDIR`.)
 
 ## State / action statistics
 
@@ -67,13 +68,31 @@ dependency, so it runs in the `pointact` (root) env and can use H100.
 bash experiments/13_robocasa365/train_pointact_concerto.sh
 # PTv3 = Utonia
 bash experiments/13_robocasa365/train_pointact_utonia.sh
+# PTv3 = Concerto, EEF-density point sampling ablation (see below)
+bash experiments/13_robocasa365/train_pointact_concerto_eefdensity.sh
 ```
+
+On CLEPS, submit via `sbatch experiments/13_robocasa365/train.slurm [concerto|concerto_eefdensity]`
+(`--account=willow --partition=gpu --gres=gpu:h100:4`; see `train.slurm` for details — CLEPS has
+no `module load cuda`/`ffmpeg`, so `LD_LIBRARY_PATH` points at a dedicated
+`conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1` env instead).
 
 Both take an optional data-config path as `$1` (default: the OpenDrawer config). Outputs land
 in `$SCRATCH/PointAct_exprs/robocasa365/pointact/...` (see "Storing results" below).
 
 The 13-D PandaOmron action becomes 15-D after quat→rot6d, well under `max_action_dim=32`, so
 the model architecture is unchanged from Libero — only the data differs.
+
+### EEF-density point sampling (ablation)
+
+Simpler alternative to the (parked) ROI-guided detector pipeline: instead of a uniform random
+subsample, points are drawn with probability proportional to
+`floor + (1 - floor) * exp(-d^2 / (2*sigma^2))`, `d` = distance to the frame's end-effector
+position. No preprocessing/cache needed — the anchor is `observation.state[:3]`, already in the
+point-cloud frame every frame. See `pointact/roi_sampling/geometry.py:eef_density_weights` and
+`pointact/data/schema.py` (`eef_sampling`, `eef_sampling_sigma`, `eef_sampling_floor`). Config:
+`data_configs/data-robocasa365-opendrawer-point-eefdensity.yaml` (`sigma=0.08`, `floor=0.05`,
+both easy to sweep — no rebuild required, unlike the ROI halo cache).
 
 ## Evaluation
 
@@ -84,11 +103,11 @@ because RoboCasa365 does not run correctly there.
 
 ```bash
 # Full 50-trial success rate (default checkpoint = the OpenDrawer concerto run):
-sbatch experiments/13_robocasa365/eval.slurm
+sbatch --export=ALL,CKPT_STEP=final-48750 experiments/13_robocasa365/eval.slurm
 
-# Smoke (3 trials + videos, short dev QoS):
-sbatch --qos=qos_gpu_a100-dev --time=01:00:00 \
-       --export=ALL,NUM_TRIALS=3,OPTS="--args.save_video --args.verbose" \
+# Smoke (3 trials + videos, short walltime):
+sbatch --time=01:00:00 \
+       --export=ALL,CKPT_STEP=1000,NUM_TRIALS=3,OPTS="--args.save_video --args.verbose" \
        experiments/13_robocasa365/eval.slurm
 ```
 
@@ -107,17 +126,17 @@ steps the returned 13-D action directly.
 Run outputs live on `$SCRATCH` (fast, large) but SCRATCH is **purged after ~30 days of no
 access**, so anything worth keeping must be copied off it:
 
-- **Training curves** — logged to Weights & Biases (offline on compute nodes). `wandb sync
-  $SCRATCH/wandb/wandb/offline-run-*` from a login node uploads them to the `diffusion4robots`
-  cloud project (durable).
-- **Final checkpoint + eval results + configs** — archive to `$STORE` (permanent, backed up):
+- **Training curves** — logged to Weights & Biases (`WANDB_MODE=offline` in the slurm scripts).
+  `wandb sync $SCRATCH/wandb/wandb/offline-run-*` from the login node uploads them to the
+  `diffusion4robots` cloud project (durable).
+- **Final checkpoint + eval results + configs** — archive to `$HOME` (durable, not purged; CLEPS
+  has no `$STORE`):
   ```bash
   bash experiments/13_robocasa365/archive_run.sh <run_dir>
   ```
   This tars the *final* checkpoint, the `results/` tree and the run config into
-  `$STORE/PointAct/robocasa365/<run>.tar`. `$STORE` has a low inode quota, so keep it to a few
-  large tars — do **not** rsync loose files there (and avoid `$WORK`, whose inode quota is
-  ~90% full).
+  `$HOME/archives/PointAct/robocasa365/<run>.tar`. `$HOME` has a 100GB space quota, so keep it
+  to a few large tars, not loose files.
 - **Intermediate checkpoints** stay on SCRATCH; they exist for resume and are regenerable, so
   let the purge reclaim them.
 

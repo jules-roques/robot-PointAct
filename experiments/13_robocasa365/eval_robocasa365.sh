@@ -3,10 +3,9 @@
 # (robocasa365 env). Adapted from experiments/2_libero/eval_libero.sh to uv environments.
 #
 # Both processes need the SAME GPU (server = model inference, client = MuJoCo/EGL rendering).
-# RoboCasa365 does not run on H100 — allocate a V100, e.g.:
-#   srun -A rgx@v100 -C v100-32g --gres=gpu:1 --cpus-per-task=10 --hint=nomultithread \
-#        --qos=qos_gpu-dev --time=02:00:00 --pty \
-#        experiments/13_robocasa365/eval_robocasa365.sh OpenDrawer <ckpt_dir> <ckpt_step> rot6d
+# Needs Ampere+ (A100): both the Qwen VLM and the PTv3 backbone use FlashAttention, which fails
+# on V100/pre-Ampere; H100 is avoided separately because RoboCasa365 sim misbehaves there. See
+# experiments/13_robocasa365/eval.slurm for the CLEPS sbatch invocation.
 #
 # Usage: eval_robocasa365.sh <env_name> <ckpt_dir> <ckpt_step> <pred_rot_type> [client_opts]
 
@@ -21,17 +20,20 @@ port=$((10000 + RANDOM % 10000))
 seed=7
 num_denoise_steps=10
 
-REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
+REPO=/home/jroques/code/robot-PointAct
 cd "$REPO"
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
-# Client-side rendering + offline (compute node has no network).
+# Client-side rendering + offline (treat compute nodes as if they had no network, for
+# reproducibility with Jean Zay even though CLEPS compute nodes do have internet access).
 export MUJOCO_GL=egl
 export HF_HOME="$SCRATCH/.cache/huggingface"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
-module load ffmpeg/6.1.1 2>/dev/null || true
+# CLEPS has no ffmpeg module (unlike Jean Zay) — torchcodec/av's libav* come from a dedicated
+# conda env instead: conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1
+export LD_LIBRARY_PATH="/home/jroques/miniforge3/envs/ffmpeg-libs/lib:${LD_LIBRARY_PATH:-}"
 
 set -euo pipefail
 
