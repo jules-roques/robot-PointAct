@@ -1,5 +1,5 @@
 #!/bin/bash
-# ROI-guided-sampling PointAct training on RoboCASA OpenDrawer (2 H100, effective batch 128).
+# ROI-guided-sampling PointAct training on RoboCASA OpenDrawer (4 H100, effective batch 128).
 # Runs the WORKTREE code (roi_sampling + dataloader change) against the main checkout's
 # training .venv. Auto-resumes from output_dir like the baseline train.slurm.
 #
@@ -14,7 +14,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_h100-t3
-#SBATCH --time=04:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 

@@ -2,7 +2,7 @@ ulimit -u 2048
 
 # ROI-guided-sampling training run. IDENTICAL to train_pointact_concerto.sh except:
 #   - default data config is the ROI variant (guarded ROI/background subsample),
-#   - epoch defaults to 5 (PoC),
+#   - epoch defaults to 20 (5 epochs underfits: the uniform baseline reaches only 8%),
 # so the ONLY substantive difference vs. the uniform baseline is the point selection.
 # The run_name (derived from the config basename) contains "roi", giving a distinct
 # output_dir that will not collide with the baseline run.
@@ -38,7 +38,7 @@ mlr=5e-5
 vlr=2e-5
 
 chunk_size=16
-epoch=${EPOCH:-5}
+epoch=${EPOCH:-20}
 
 model_name_or_path=
 run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}
