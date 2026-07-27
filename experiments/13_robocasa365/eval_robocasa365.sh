@@ -20,7 +20,9 @@ port=$((10000 + RANDOM % 10000))
 seed=7
 num_denoise_steps=10
 
-REPO=/home/jroques/code/robot-PointAct
+# $HOME differs per cluster but "code/robot-PointAct" underneath it doesn't, so this resolves
+# correctly on both Jean Zay and CLEPS without editing this file per-cluster.
+REPO="$HOME/code/robot-PointAct"
 cd "$REPO"
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
@@ -31,9 +33,12 @@ export HF_HOME="$SCRATCH/.cache/huggingface"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
-# CLEPS has no ffmpeg module (unlike Jean Zay) — torchcodec/av's libav* come from a dedicated
-# conda env instead: conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1
-export LD_LIBRARY_PATH="/home/jroques/miniforge3/envs/ffmpeg-libs/lib:${LD_LIBRARY_PATH:-}"
+# Jean Zay provides ffmpeg via `module load ffmpeg/6.1.1` (done by the submitting slurm script).
+# CLEPS has no such module — torchcodec/av's libav* come from a dedicated conda env instead:
+# conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1. Detect via $DSDIR (Jean Zay-only).
+if [ -z "${DSDIR:-}" ]; then
+  export LD_LIBRARY_PATH="$HOME/miniforge3/envs/ffmpeg-libs/lib:${LD_LIBRARY_PATH:-}"
+fi
 
 set -euo pipefail
 

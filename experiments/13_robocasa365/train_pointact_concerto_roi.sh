@@ -12,6 +12,11 @@ export HF_DATASETS_OFFLINE=1
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
+# Jean Zay sets $DSDIR (IDRIS shared models) globally; CLEPS does not, so fall back to a
+# $SCRATCH copy there. Portable across both clusters without editing this file per-cluster.
+VLM_PATH=${DSDIR:+$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct}
+VLM_PATH=${VLM_PATH:-$SCRATCH/models/Qwen2.5-VL-3B-Instruct}
+
 # Effective batch 128 = 4 GPUs x 32 (matches the live uniform baseline exactly).
 GPUS=4
 PER_DEVICE_BATCH_SIZE=32
@@ -63,7 +68,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --model_class VLAEncDec3DWithActionRegressionModel \
     --output_dir ${output_dir} \
     ${model_name_or_path:+--model-name-or-path $model_name_or_path} \
-    --vlm-name-or-path $SCRATCH/models/Qwen2.5-VL-3B-Instruct \
+    --vlm-name-or-path $VLM_PATH \
     --data-path ${dataset} \
     --chunk-size ${chunk_size} \
     --dataloader-num-workers 8 \

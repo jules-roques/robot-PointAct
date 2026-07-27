@@ -3,10 +3,10 @@
 # of no access). Training is the expensive, hard-to-reproduce part; eval is cheap and can be
 # re-run, so results/ is deliberately NOT archived. Tars the FINAL checkpoint (weights + config
 # + norm stats) into:
-#   $HOME/archives/PointAct/robocasa365/<run>.tar
-# CLEPS has no $STORE (unlike Jean Zay); $HOME is the durable, non-purged storage here (100GB
-# quota), hence one tar per run (not loose files) to conserve it. Training curves are kept
-# separately via `wandb sync` (see README).
+#   $STORE/PointAct/robocasa365/<run>.tar   (Jean Zay, permanent+backed-up, low inode quota)
+#   $HOME/archives/PointAct/robocasa365/<run>.tar   (CLEPS, no $STORE; $HOME is durable instead)
+# Either way, one tar per run (not loose files) to conserve inode/space quota. Training curves
+# are kept separately via `wandb sync` (see README).
 #
 # Usage: bash experiments/13_robocasa365/archive_run.sh [run_dir]
 #   run_dir defaults to the concerto OpenDrawer run.
@@ -17,7 +17,8 @@ RUN_DIR="${1:-$DEFAULT_RUN}"
 [ -d "$RUN_DIR" ] || { echo "run dir not found: $RUN_DIR" >&2; exit 1; }
 
 RUN_NAME=$(basename "$RUN_DIR")
-DEST_DIR="$HOME/archives/PointAct/robocasa365"
+DEST_DIR="${STORE:+$STORE/PointAct/robocasa365}"
+DEST_DIR="${DEST_DIR:-$HOME/archives/PointAct/robocasa365}"
 mkdir -p "$DEST_DIR"
 DEST="$DEST_DIR/$RUN_NAME.tar"
 

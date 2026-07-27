@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-REPO=/home/jroques/code/robot-PointAct
+REPO="$HOME/code/robot-PointAct"
 cd "$REPO"
 
 export SVT_LOG=1

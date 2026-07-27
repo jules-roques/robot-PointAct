@@ -75,7 +75,10 @@ bash experiments/13_robocasa365/train_pointact_concerto_eefdensity.sh
 On CLEPS, submit via `sbatch experiments/13_robocasa365/train.slurm [concerto|concerto_eefdensity]`
 (`--account=willow --partition=gpu --gres=gpu:h100:4`; see `train.slurm` for details — CLEPS has
 no `module load cuda`/`ffmpeg`, so `LD_LIBRARY_PATH` points at a dedicated
-`conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1` env instead).
+`conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1` env instead). On Jean Zay, use
+`train_jeanzay.slurm` instead — same payload scripts, but Jean Zay and CLEPS are separate SLURM
+controllers so the `#SBATCH` account/partition/module directives can't be shared between them.
+Check GPU availability/queue depth on both clusters (`squeue`) before deciding where to submit.
 
 Both take an optional data-config path as `$1` (default: the OpenDrawer config). Outputs land
 in `$SCRATCH/PointAct_exprs/robocasa365/pointact/...` (see "Storing results" below).
@@ -97,9 +100,10 @@ both easy to sweep — no rebuild required, unlike the ROI halo cache).
 ## Evaluation
 
 Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) on the **same
-A100** GPU, driven by `eval.slurm`. A100 (not V100) is required because the model uses
-FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only); H100 is avoided
-because RoboCasa365 does not run correctly there.
+A100** GPU, driven by `eval.slurm` (CLEPS) / `eval_jeanzay.slurm` (Jean Zay) — same payload
+(`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. A100 (not V100) is required
+because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only);
+H100 is avoided because RoboCasa365 does not run correctly there.
 
 ```bash
 # Full 50-trial success rate (default checkpoint = the OpenDrawer concerto run):

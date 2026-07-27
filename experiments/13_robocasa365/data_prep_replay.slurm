@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REPO=/home/jroques/code/robot-PointAct
+REPO="$HOME/code/robot-PointAct"
 cd "$REPO"
 
 export MUJOCO_GL=egl

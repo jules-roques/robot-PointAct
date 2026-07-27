@@ -37,7 +37,7 @@ export WANDB_MODE=offline
 export WANDB_DIR="$SCRATCH/wandb"
 mkdir -p "$WANDB_DIR"
 
-REPO=/home/jroques/code/robot-PointAct
+REPO="$HOME/code/robot-PointAct"
 cd "$REPO"
 
 VARIANT="${1:-concerto}"
