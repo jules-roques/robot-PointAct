@@ -17,7 +17,7 @@ effectively lost to the uniform draw.
 ## Goal
 
 Reallocate the **same 4096-point budget** toward task-relevant regions (drawer,
-especially the handle) using a 2D segmentation model to identify the region of
+especially the handle) using a lightweight 2D open-vocab detector to localize the region of
 interest (ROI), while keeping some coverage of the surroundings. **Every other
 training hyperparameter and architecture detail stays identical to the baseline**
 so the comparison isolates a single variable: the sampling distribution.
@@ -26,7 +26,7 @@ so the comparison isolates a single variable: the sampling distribution.
 
 - No re-running of data acquisition. We operate on the existing stored clouds
   (LMDB, xyzrgb, voxelized at 1 cm) and existing RGB frames.
-- No change to the trained policy architecture. The segmentation model is a
+- No change to the trained policy architecture. The detector is a
   **perception/preprocessing module**; it never enters the PointAct network.
   This is what keeps the A/B comparison fair.
 - No multi-task generalization in this PoC (openDrawer only).
@@ -52,36 +52,50 @@ so the comparison isolates a single variable: the sampling distribution.
 
 ## Chosen approach
 
-**(A) Fully consistent path:** SAM 3.1-guided sampling runs at **both** training and
+**(A) Fully consistent path:** ROI-guided sampling runs at **both** training and
 evaluation, so train/eval see identically-distributed points. This is the honest
-apples-to-apples test and the reason the segmentation models must be lightweight
-(they run live in the rollout loop).
+apples-to-apples test and the reason the localizer must be lightweight (it runs
+live in the rollout loop).
 
-### Section 1 — Perception (per episode)
+**Detector + halo, not segmentation.** We never consume a mask boundary — only
+"where roughly is the object." So the primary design uses a lightweight
+open-vocab **detector** to find the object's *epicenter*, then draws a 3D
+**halo** around it. This is far lighter than any SAM variant and avoids SAM 3's
+python-3.12 requirement in the eval simulator.
 
-- **Cameras:** `left` + `right` (static). Wrist excluded from *segmentation*
-  (camera motion) but wrist *points* are still ROI-labeled by reprojection into
-  left/right masks.
-- **Model:** **SAM 3.1** (Promptable Concept Segmentation). A single model takes
-  the open-vocab text prompt `"drawer handle"` directly and detects + segments +
-  **tracks** the object across the episode's video frames — replacing the earlier
-  two-model stack (Grounding-DINO box prompt + SAM2 mask/propagation). No box
-  handoff, no task-string parsing.
-  - **Footprint note:** SAM 3 is *not* a tiny model (~840M params: 450M vision +
-    300M text encoder; the "30 ms" figure is one image on an H200, video latency
-    scales with object count). It is used here for a **single** tracked object
-    (the drawer), well within its near-real-time envelope. Offline preprocessing
-    is a one-time batched pass, so size is irrelevant there.
-  - **Fallback (documented, not built):** if SAM 3.1 proves too heavy in the live
-    eval loop alongside Qwen2.5-VL + PTv3, revert to Grounding-DINO-tiny (box) +
-    SAM2.1-tiny (mask/propagation), which have genuinely small checkpoints.
-- **Robustness:** empty / low-confidence segmentation on a frame → that frame
-  falls back to **uniform** sampling (never worse than baseline).
+### Section 1 — Perception (per frame)
+
+- **Cameras:** `left` + `right` (static). Wrist excluded from *detection*
+  (camera motion) but wrist *points* are still ROI-labeled by the 3D halo test.
+- **Model:** **YOLO-World** (small variant) — open-vocab, text-promptable,
+  real-time (tens of M params), shipped in `ultralytics`. Fixed prompt
+  `"drawer handle"` (single task). Run **per frame** on left/right → 2D box(es).
+  Per-frame detection is cheap, so no video tracking is needed (the drawer moving
+  as it opens is handled by simply re-detecting).
+- **Fallbacks (documented, not built):** if detection quality is too poor,
+  escalate to (a) SAM 3.1 (single text-promptable model, ~840M params, needs
+  python 3.12) or (b) Grounding-DINO-tiny (box) + SAM2.1-tiny (mask/propagation).
+- **Robustness:** empty / low-confidence detection on a frame → that frame falls
+  back to **uniform** sampling (never worse than baseline).
 
 ### Section 2 — Lift + sample (count-matched to baseline)
 
-- **Lift:** reproject each stored 3D point into left/right via
-  intrinsics+extrinsics; point is **ROI** if it lands inside either mask.
+- **2D box → 3D epicenter (robust):** reproject the stored cloud into the camera
+  (intrinsics + extrinsics), keep points whose (u,v) fall inside the box, and take
+  their **3D centroid** as the anchor. Robust to a sloppy box and to depth holes
+  (uses many points, not one back-projected pixel). Left/right anchors are merged.
+- **Halo → ROI (sphere):** a point is **ROI** if it lies within radius `r` of the
+  3D anchor. `r` is auto-scaled from the spread of the in-box points
+  (`r = halo_scale · std_of_in_box_points`), so it adapts to object size. Wrist
+  points inside the halo are included; nothing is discarded.
+  - *Halo-shape alternatives (flagged, not built):* frustum from the 2D box +
+    depth band (hugs an elongated drawer front better); soft Gaussian falloff
+    (continuous weight instead of hard in/out).
+- **Camera calibration:** intrinsics/extrinsics are **not** stored in the dataset.
+  Offline, fetch them once via a RoboCASA env reset per episode (cameras are
+  static for fixed-base OpenDrawer; `_get_camera_matrices`, robot-base frame via
+  `robot0_base_pos/quat`). Online, they arrive for free in the eval obs
+  (`observation.camera_intrinsics.*` / `camera_extrinsics.*`).
 - **Count parity:** preserve the baseline total-count rule exactly —
   `N = min(int(len(cloud) · U(0.8, 1.0)), 4096)` — so the *number* of points is
   identically distributed; only *which* points are selected changes.
@@ -89,26 +103,28 @@ apples-to-apples test and the reason the segmentation models must be lightweight
   `roi_ratio = 0.6`) to ROI points and the remainder to background, each sampled
   **without replacement**. If a pool has fewer points than its quota, top up from
   the other pool so the total is always exactly `N`.
-- **Config knob:** `roi_ratio` (single new hyperparameter).
-- **Extension (flagged, not built):** 3-tier weighting (handle > drawer > table)
-  by keeping the two prompt masks separate. Trivial change to the weight vector.
+- **Config knobs:** `roi_ratio` (budget split, default 0.6) and `halo_scale`
+  (radius multiplier).
 
 ### Section 3 — Wiring + fair-comparison controls
 
-- **Offline cache:** a preprocessing pass runs SAM 3.1 over the existing
-  episodes, computes a per-point ROI flag **aligned to each stored
-  `ep-frame` cloud**, and writes it to a **parallel LMDB** (keyed identically:
+- **Offline cache:** a preprocessing pass runs YOLO-World over the existing
+  episodes' left/right frames, computes the halo, and derives a per-point ROI
+  flag **aligned to each stored `ep-frame` cloud**, written to a **parallel
+  LMDB** (keyed identically:
   `f"{ep_idx}-{frame_idx}"`). Stored as a per-point `uint8`/bit-packed array in
   the same point order as the source cloud.
 - **Training path:** `augment_point_cloud` (`data_3d.py:208`) loads the ROI flag
   alongside the cloud, applies the workspace filter to **both in lockstep**, then
   replaces the uniform `np.random.choice` with the guarded split. Near-zero
-  training overhead (SAM 3.1 already ran offline).
-- **Eval path:** the same SAM 3.1→lift→split runs live in the RoboCASA
-  rollout obs pipeline (novel scenes each episode → cannot be cached). Exact
-  insertion point to be pinned during planning (candidate:
+  training overhead (YOLO-World already ran offline).
+- **Eval path (follow-up, not required for the first training):** the same
+  YOLO-World→epicenter→halo→split runs live in the RoboCASA rollout obs pipeline
+  (novel scenes each episode → cannot be cached; camera matrices come from the
+  obs). Exact insertion point to be pinned during planning (candidate:
   `processing_vla_pointact.py::_prepare_robot_inputs`, `line 85`, and/or the
-  rollout env obs assembly).
+  rollout env obs assembly). The first 5-epoch training run exercises only the
+  offline cache + dataloader change; the online path is wired before eval.
 - **Frozen for fairness:** identical PTv3 backbone, action heads, all
   hyperparameters, seeds, color/rotation augmentation, and the 4096 budget. The
   only difference vs. baseline is the selection distribution.
@@ -118,8 +134,8 @@ apples-to-apples test and the reason the segmentation models must be lightweight
 After the offline ROI cache is built, a verification script runs on a handful of
 sample frames/episodes and produces:
 
-1. **2D mask overlays** — SAM 3.1 masks drawn on left/right RGB frames (PNG) to
-   confirm segmentation quality.
+1. **2D box + halo overlays** — YOLO-World boxes (and the projected halo circle)
+   drawn on left/right RGB frames (PNG) to confirm localization quality.
 2. **3D ROI-colored cloud** — the stored cloud rendered with ROI vs. background
    highlighted, as a **self-contained interactive HTML** (rotate/zoom on a
    headless cluster, open locally), plus a `.ply` export.
@@ -127,8 +143,8 @@ sample frames/episodes and produces:
    the final density the model trains on.
 
 **Go/no-go:** a human reviews these before any training run. If wrist-only
-surfaces are systematically missed, the flagged extension (run SAM 3.1 on the wrist
-stream too) is reconsidered.
+surfaces are systematically missed, the flagged extension (also detect on the
+wrist stream) is reconsidered.
 
 ## Success criteria
 
@@ -136,15 +152,28 @@ stream too) is reconsidered.
   relative to uniform sampling, with background still represented.
 - A training run with ROI-guided sampling (all else frozen) completes and is
   compared A/B against the uniform baseline on RoboCASA `openDrawer` success rate.
-- Eval rollout runs the online path within acceptable latency (tiny models).
+- Eval rollout runs the online path within acceptable latency (YOLO-World small).
+
+## Scope of the first deliverable (5-epoch OpenDrawer PoC)
+
+1. Base work on `robocasa365-integration` (all RoboCASA training machinery lives
+   there; `main` lacks it).
+2. Stage YOLO-World: add `ultralytics`, pre-download small weights on an
+   internet-enabled node to a fixed path (compute nodes are offline).
+3. Fetch static left/right camera matrices via the RoboCASA sim env.
+4. Offline preprocessing → per-point ROI-flag parallel LMDB for OpenDrawer.
+5. Dataloader: guarded ROI/background split in `augment_point_cloud`
+   (`data_3d.py`), with uniform fallback.
+6. Visualization gate (interactive HTML) → eyeball.
+7. Launch 5-epoch OpenDrawer training (ROI variant, and a matched uniform
+   baseline if none exists).
+
+The online eval path is the **next** deliverable, after training shows signal.
 
 ## Open items to resolve during planning
 
 - Exact eval-time insertion point for the online sampler.
-- **Measure SAM 3.1 VRAM + per-frame latency on the actual eval GPU** alongside
-  Qwen2.5-VL + PTv3; confirm the live loop is acceptable or trigger the tiny
-  two-model fallback.
-- Whether SAM 3.1 weights are available in the environment or need to be added
-  (and their license/footprint).
 - Storage format details for the ROI-flag LMDB (bit-packing vs. uint8).
 - Workspace-filter ordering: ensure ROI flag and cloud are filtered together.
+- Whether static camera matrices are constant across OpenDrawer episodes (fetch
+  per-episode to be safe; collapse to one fetch if verified constant).
