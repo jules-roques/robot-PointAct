@@ -19,6 +19,8 @@ from pointact.data.transforms.pointcloud import (
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
 )
+from pointact.roi_sampling.geometry import halo_weights
+from pointact.roi_sampling.sampling import roi_guided_indices, soft_guided_indices
 
 msgpack_numpy.patch()
 
@@ -60,6 +62,17 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         max_npoints: int = 4096,
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
+        # ROI-guided sampling (optional). When roi_point_cloud_dirname is set, a
+        # per-point ROI flag LMDB (same keys/order as the point LMDB) is loaded and
+        # the uniform subsample is replaced by a guarded ROI/background split of the
+        # same total size. Missing/empty ROI falls back to uniform sampling.
+        roi_point_cloud_dirname: str | None = None,
+        roi_ratio: float = 0.7,
+        # Halo radius multiplier applied on top of the cached radius, and hard/soft
+        # selection. Both are runtime knobs: the cache stores the halo, not a baked mask.
+        roi_radius_scale: float = 1.0,
+        roi_mode: str = "hard",     # "hard" (ball) or "soft" (Gaussian falloff)
+        roi_softness: float = 1.0,  # soft mode: sigma as a multiple of radius
         **kwargs,
     ):
         super().__init__(
@@ -94,7 +107,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.point_cloud_dir = os.path.join(self.root, point_cloud_dirname)
         self._point_cloud_lmdb_env = None
         self._point_cloud_lmdb_txn = None
-        self._point_cloud_lmdb_pid = None    
+        self._point_cloud_lmdb_pid = None
+
+        self.roi_ratio = roi_ratio
+        self.roi_radius_scale = roi_radius_scale
+        self.roi_mode = roi_mode
+        self.roi_softness = roi_softness
+        self.roi_point_cloud_dir = (
+            os.path.join(self.root, roi_point_cloud_dirname)
+            if roi_point_cloud_dirname is not None
+            else None
+        )
+        self._roi_lmdb_env = None
+        self._roi_lmdb_txn = None
+        self._roi_lmdb_pid = None
 
     def __del__(self):
         if getattr(self, "_point_cloud_lmdb_txn", None) is not None:
@@ -104,12 +130,22 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             self._point_cloud_lmdb_env.close()
             self._point_cloud_lmdb_env = None
         self._point_cloud_lmdb_pid = None
+        if getattr(self, "_roi_lmdb_txn", None) is not None:
+            self._roi_lmdb_txn.abort()
+            self._roi_lmdb_txn = None
+        if getattr(self, "_roi_lmdb_env", None) is not None:
+            self._roi_lmdb_env.close()
+            self._roi_lmdb_env = None
+        self._roi_lmdb_pid = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_point_cloud_lmdb_env"] = None
         state["_point_cloud_lmdb_txn"] = None
         state["_point_cloud_lmdb_pid"] = None
+        state["_roi_lmdb_env"] = None
+        state["_roi_lmdb_txn"] = None
+        state["_roi_lmdb_pid"] = None
         return state
 
     def set_feature_keys(
@@ -152,8 +188,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
+        # Frame-level halo (anchor, radius): unaffected by the workspace crop below.
+        roi_halo = self.load_roi_halo(ep_idx, frame_idx)
         point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
-        point_cloud = self.augment_point_cloud(point_cloud, item)
+        point_cloud = self.augment_point_cloud(point_cloud, item, roi_halo)
         point_cloud = self.center_point_cloud(point_cloud, item)
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
@@ -205,10 +243,70 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         return self._point_cloud_lmdb_txn
 
-    def augment_point_cloud(self, point_cloud: np.ndarray, item: dict):
+    def get_roi_lmdb_txn(self):
+        current_pid = os.getpid()
+        if self._roi_lmdb_pid != current_pid:
+            self._roi_lmdb_env = None
+            self._roi_lmdb_txn = None
+            self._roi_lmdb_pid = current_pid
+
+        if self._roi_lmdb_env is None:
+            self._roi_lmdb_env = lmdb.open(
+                self.roi_point_cloud_dir,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                max_spare_txns=1,
+            )
+            self._roi_lmdb_txn = self._roi_lmdb_env.begin(buffers=True)
+
+        return self._roi_lmdb_txn
+
+    def load_roi_halo(self, ep_idx: int, frame_idx: int):
+        """Return (anchor_xyz, radius) for this frame, or None.
+
+        The cache stores the halo itself — anchor(3), radius(1), n_in_box(1) as float32 —
+        rather than a baked per-point mask, so radius scaling and hard/soft selection stay
+        runtime knobs. None (or a zero radius, meaning no reliable detection) makes the
+        caller fall back to uniform sampling.
+        """
+        if self.roi_point_cloud_dir is None:
+            return None
+        txn = self.get_roi_lmdb_txn()
+        buf = txn.get(f"{ep_idx}-{frame_idx}".encode("ascii"))
+        if buf is None:
+            return None
+        rec = np.frombuffer(bytes(buf), dtype=np.float32)
+        if len(rec) < 4 or not np.isfinite(rec[:4]).all() or rec[3] <= 0:
+            return None
+        return rec[:3].astype(np.float64), float(rec[3])
+
+    def augment_point_cloud(self, point_cloud: np.ndarray, item: dict, roi_halo: tuple | None = None):
+        # Baseline count rule is preserved exactly; only the *selection* changes when a
+        # valid halo is present.
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
-            ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
+            ridxs = None
+            if roi_halo is not None:
+                anchor, radius = roi_halo
+                w = halo_weights(
+                    point_cloud[:, :3], anchor, radius * self.roi_radius_scale,
+                    mode=self.roi_mode, softness=self.roi_softness,
+                )
+                rng = np.random.default_rng(np.random.randint(2**31 - 1))
+                if self.roi_mode == "soft":
+                    if np.any(w >= 0.5) and not np.all(w >= 0.5):
+                        ridxs = soft_guided_indices(
+                            len(point_cloud), max_npoints, w, self.roi_ratio, rng
+                        )
+                else:
+                    mask = w > 0
+                    if mask.any() and not mask.all():
+                        ridxs = roi_guided_indices(
+                            len(point_cloud), max_npoints, mask, self.roi_ratio, rng
+                        )
+            if ridxs is None:  # no/unusable halo -> baseline uniform draw
+                ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]
 
         point_cloud_color = augment_point_cloud_color(
