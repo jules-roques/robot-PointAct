@@ -10,7 +10,7 @@
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=48
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_h100-t4

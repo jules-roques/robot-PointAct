@@ -12,9 +12,9 @@ export HF_DATASETS_OFFLINE=1
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
-# Paper: total batch size 128 across 2 H100 -> 2 GPUs x 64 per device (effective 128).
-GPUS=2
-PER_DEVICE_BATCH_SIZE=64
+# Effective batch 128 = 4 GPUs x 32 (matches the live uniform baseline exactly).
+GPUS=4
+PER_DEVICE_BATCH_SIZE=32
 NUM_NODES=${NUM_NODES:-1}
 
 if [ $GPUS -eq 1 ]; then
@@ -43,7 +43,7 @@ epoch=${EPOCH:-5}
 model_name_or_path=
 run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}
 
-output_dir=$SCRATCH/datasets/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
+output_dir=$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
 
 export WANDB_ENTITY=diffusion4robots
 export WANDB_PROJECT=pointact-robocasa365
@@ -89,7 +89,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --run-name ${run_name} \
     --attn-implementation flash_attention_2 \
     --log_level info \
-    --report-to wandb tensorboard \
+    --report-to wandb \
     --color_aug True \
     --max_grad_norm 3 \
     --use_robot_state True \
