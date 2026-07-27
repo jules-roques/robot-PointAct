@@ -170,6 +170,38 @@ wrist stream) is reconsidered.
 
 The online eval path is the **next** deliverable, after training shows signal.
 
+## Findings from implementation (2026-07-27)
+
+**The instruction's "left"/"right" cannot be decoded geometrically.** RoboCASA OpenDrawer
+instructions name a side, but the robot parks at a different yaw in each kitchen, so the
+same instruction grasps at both signs of the base-frame Y axis (left-drawer episodes at
+Y = -0.607, -0.459, +0.473, -0.418, +0.503). Neither an image-space "leftmost box" rule
+nor a base-frame axis test works — both scored 3/6 episodes.
+
+**Drawer selection now uses the demonstration's grasp point.** `observation.state[0:3]`
+(`base_to_eef_pos`, the point-cloud frame) at the first frame `action[7] > 0.5`
+(gripper close) is the handle the demonstration reached for. It is a per-episode constant,
+so it disambiguates every frame including frame 0, without the ROI trailing the arm.
+Precomputed for all 496 episodes by `dump_grasp_anchors.py` into a JSON sidecar.
+Result: **6/6 preview episodes correct, mean lateral error 0.079 m** (was 0.335 m).
+
+**Unconfirmed frames fall back to uniform.** When no detected candidate lies within
+0.45 m of the grasp point, the target drawer was not found; emitting no halo (uniform
+sampling) keeps such frames baseline-equivalent, whereas guessing the best-supported
+candidate put one episode's ROI ~1 m away on the wrong drawer.
+
+**Coverage is partial — the treatment is diluted.** Over the full 496-episode cache only
+**43.3% of frames** carry a confirmed ROI (per-episode median 37%; 35% of episodes below
+25%). The remaining frames sample uniformly, so the A/B measures a *partial* treatment.
+Raising coverage without weakening the correctness guard is the obvious next lever: lower
+the detector confidence threshold and raise `--max-det` so the correct drawer is more
+often among the candidates (selection is nearest-to-grasp, so extra candidates are safe).
+
+**Eval-time limitation (open).** The grasp point exists only in demonstrations. The online
+eval path therefore still needs a standalone selector — candidates: the policy's own early
+reach, or prompting the VLM for the target drawer. This does not affect the training-time
+A/B but must be solved before the consistent train/eval path is complete.
+
 ## Open items to resolve during planning
 
 - Exact eval-time insertion point for the online sampler.
