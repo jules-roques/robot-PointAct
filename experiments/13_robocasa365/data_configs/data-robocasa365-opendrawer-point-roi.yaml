@@ -1,0 +1,41 @@
+# ROI-guided variant of data-robocasa365-opendrawer-point.yaml.
+# IDENTICAL to the baseline config except for the two roi_* fields at the bottom, which
+# switch the dataloader's uniform subsample for a count-preserving guarded ROI/background
+# split. Keeping everything else equal is what makes the A/B comparison fair.
+#
+# Requires the ROI-flag LMDB built by data_prep/roi_sampling (points_3views_roi).
+
+mm_datasets:
+
+lerobot_datasets:
+
+  - repo_id: OpenDrawer
+    root: robot_data/robocasa365/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+
+    select_video_keys: [observation.images.left_image]
+    video_key_ids_for_vlm: [0]
+
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+
+    converted_rot_type: rot6d  # euler, rot6d
+    is_delta_action: False
+
+    points_workspace: {
+      'X_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Y_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Z_BBOX': [0.0, 1.0],    # 0 = floor
+    }
+
+    max_npoints: 4096
+    augment_pc_rot: 30
+    point_cloud_dirname: points_3views
+
+    state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+
+    # --- ROI-guided sampling (the only difference vs. the baseline config) ---
+    # Per-point ROI-flag LMDB (under `root`/OpenDrawer) built by build_roi_cache.py.
+    roi_point_cloud_dirname: points_3views_roi
+    # Fraction of the 4096-point budget allocated to ROI (drawer/handle) points.
+    roi_ratio: 0.6
