@@ -65,7 +65,7 @@ uv run --project envs/robocasa365 --no-sync \
     --args.seed ${seed} \
     --args.host ${host} --args.port ${port} \
     --args.env_name ${env_name} \
-    --args.num_trials 50 \
+    --args.num_trials ${NUM_TRIALS:-50} \
     --args.pred_rot_type ${pred_rot_type} \
     --args.replan_steps 8 \
     --args.use_depth \
@@ -75,6 +75,7 @@ uv run --project envs/robocasa365 --no-sync \
 echo ${ckpt_dir}/checkpoint-${ckpt_step}
 echo "Client finished"
 
-kill $SERVER_PID
-wait $SERVER_PID
+# Tolerate the server's kill signal so `set -e` doesn't mark the job FAILED after a clean run.
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
 echo "Server exited"

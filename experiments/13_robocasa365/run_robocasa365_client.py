@@ -69,6 +69,22 @@ def setup_logging(filename=None):
     logger.addHandler(ch)
 
 
+def build_fused_point_cloud(obs: dict) -> np.ndarray:
+    """Fuse the left/right/wrist camera clouds into one [N, 6] (xyz + rgb) array.
+
+    Mirrors data_prep/robocasa365_to_lerobot/replay.py:make_point_cloud, which built the
+    3-view training clouds: per-camera xyz (already in the robot-base frame) concatenated with
+    rgb/255, stacked across cameras. Workspace crop, 1cm voxel downsample and the 4096-point
+    subsample are applied server-side by the processor, so they are intentionally omitted here.
+    """
+    clouds = []
+    for cam in ("left", "right", "wrist"):
+        xyz = np.asarray(obs[f"observation.points.{cam}"], dtype=np.float32)
+        rgb = np.asarray(obs[f"observation.images.{cam}_image"], dtype=np.float32) / 255.0
+        clouds.append(np.concatenate([xyz, rgb], axis=-1).reshape(-1, 6))
+    return np.concatenate(clouds, axis=0)
+
+
 def prepare_state(raw_state: np.ndarray, pred_rot_type: str) -> np.ndarray:
     """Convert the eef rotation quat in observation.state to the model's rotation type.
 
@@ -85,38 +101,6 @@ def prepare_state(raw_state: np.ndarray, pred_rot_type: str) -> np.ndarray:
     elif pred_rot_type == "rot6d":
         rot = convert_rotation(rot, "quat", "rot6d", quat_order_src="xyzw")
     return np.concatenate([raw_state[:3], rot, raw_state[7:]])
-
-
-def reconstruct_env_action(action: np.ndarray, pred_rot_type: str) -> np.ndarray:
-    """Turn one predicted action step into the 13-D flat PandaOmron action expected by step().
-
-    Env action layout (see convert_flat_action_to_panda_omron_action):
-      [eef_pos(3), eef_quat_xyzw(4), gripper_close(1), base_motion(4), control_mode(1)]
-
-    The model emits rotation as pred_rot_type, so the trailing fields shift accordingly:
-      rot6d -> action = [pos(3), rot6d(6), gripper(1), base(4), mode(1)]  (15-D)
-      euler -> action = [pos(3), euler(3), gripper(1), base(4), mode(1)]  (12-D)
-
-    TODO(verify): index math and the gripper/control_mode handling below against a real
-    checkpoint's output. These are the fields most likely to need adjustment.
-    """
-    if pred_rot_type == "rot6d":
-        rot_len = 6
-    elif pred_rot_type == "euler":
-        rot_len = 3
-    else:
-        raise ValueError(pred_rot_type)
-
-    pos = action[:3]
-    rot = action[3:3 + rot_len]
-    tail = action[3 + rot_len:]  # [gripper(1), base_motion(4), control_mode(1)]
-
-    if pred_rot_type == "rot6d":
-        quat = convert_rotation(rot, "rot6d", "quat", quat_order_dst="xyzw")
-    else:
-        quat = convert_rotation(rot, "euler", "quat", euler_order_src="xyz", quat_order_dst="xyzw")
-
-    return np.concatenate([pos, quat, tail])  # 13-D flat action for RoboCasa365Env.step
 
 
 def main(args: ClientArgs) -> None:
@@ -159,10 +143,10 @@ def main(args: ClientArgs) -> None:
     for episode_idx in tqdm.tqdm(range(args.num_trials)):
         # Each reset re-randomises the scene. TODO(verify): reseeding per trial for
         # reproducible-yet-varied scenes may need explicit env support.
-        obs = env.reset()
+        obs, _ = env.reset()
         action_plan = collections.deque()
         replay_images = []
-        done = False
+        success = False
 
         for _t in range(max_steps):
             replay_images.append(obs["observation.images.left_image"])
@@ -171,7 +155,10 @@ def main(args: ClientArgs) -> None:
 
             if not action_plan:
                 batch = {
-                    # left agentview is the VLM view (matches the training data config)
+                    # left + right agentviews feed the VLM (matches the training data config's
+                    # select_video_keys / video_key_ids_for_vlm = [0,1]; wrist is not a VLM view).
+                    # The server picks whichever keys the checkpoint's baked config names, so
+                    # sending all three here is harmless — wrist is simply ignored by the VLM.
                     "observation.images.left_image": [obs["observation.images.left_image"]],
                     "observation.images.right_image": [obs["observation.images.right_image"]],
                     "observation.images.wrist_image": [obs["observation.images.wrist_image"]],
@@ -180,11 +167,11 @@ def main(args: ClientArgs) -> None:
                     "repo_id": [args.repo_id],
                 }
                 if args.use_depth:
-                    batch.update({
-                        "observation.points.left": [obs["observation.points.left"]],
-                        "observation.points.right": [obs["observation.points.right"]],
-                        "observation.points.wrist": [obs["observation.points.wrist"]],
-                    })
+                    # Send a single fused 3-view point cloud (matches training data). This uses the
+                    # server's existing-points branch directly, so we don't depend on the server
+                    # re-deriving cameras from select_video_keys — the fused cloud is what training
+                    # saw (points_3views: left+right+wrist), avoiding any view mismatch.
+                    batch["observation.points"] = [build_fused_point_cloud(obs)]
 
                 points_workspace = env.get_points_workspace(obs)
                 ov_out = policy_client.get_action(
@@ -196,21 +183,28 @@ def main(args: ClientArgs) -> None:
                 )
                 action_chunk = ov_out.action[0].copy()
 
-                # TODO(verify): Libero remaps the last dim (gripper) as
-                #   action[..., -1] = 2*(1-action[..., -1]) - 1
-                # For RoboCasa365 the last dim is control_mode and gripper_close sits mid-vector,
-                # so that remap does NOT apply as-is. Decide the correct gripper handling.
+                # No Libero-style gripper remap here: for RoboCasa365 gripper_close sits mid-vector
+                # (index 7 of the 13-D action) and the env's unmap_panda_omron_action thresholds it
+                # at 0.5 internally, so the raw server action is stepped as-is.
                 assert len(action_chunk) >= args.replan_steps
                 action_plan.extend(action_chunk[: args.replan_steps])
 
-            step_action = reconstruct_env_action(action_plan.popleft(), args.pred_rot_type)
-            obs, reward, done, info = env.step(step_action)
+            # The server returns a 13-D env-ready action:
+            #   [eef_pos(3), eef_quat_xyzw(4), gripper_close(1), base_motion(4), control_mode(1)]
+            # pred_rot_type (rot6d->quat) and the absolute-position offset are applied server-side
+            # in _build_action_output, so the action goes straight to env.step (no reconstruction).
+            obs, reward, done, info = env.step(action_plan.popleft())
+            # Count success from the explicit flag, not `done`: robosuite also returns
+            # done=True at the horizon timeout, which would otherwise inflate the rate.
+            if info.get("success", False):
+                success = True
+                break
             if done:
-                total_successes += 1
                 break
 
         total_episodes += 1
-        suffix = "success" if done else "failure"
+        total_successes += int(success)
+        suffix = "success" if success else "failure"
         if video_out_dir is not None:
             imageio.mimwrite(
                 pathlib.Path(video_out_dir) / f"{args.env_name}_rollout{episode_idx}_{suffix}.mp4",
@@ -219,7 +213,7 @@ def main(args: ClientArgs) -> None:
             )
         if args.verbose:
             logging.info(
-                f"[{total_episodes}] success={done} "
+                f"[{total_episodes}] success={success} "
                 f"running={total_successes}/{total_episodes} "
                 f"({100 * total_successes / total_episodes:.1f}%)"
             )

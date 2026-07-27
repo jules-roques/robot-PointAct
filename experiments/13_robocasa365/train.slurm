@@ -1,5 +1,5 @@
 #!/bin/bash
-# Full PointAct training on RoboCasa365 OpenDrawer: 2 H100, effective batch 128.
+# Full PointAct training on RoboCasa365 OpenDrawer: 4 H100, effective batch 128.
 # Auto-resumes from the run's output_dir (train_or_resume detects checkpoints), so
 # resubmitting this same job continues past the QoS wall.
 #
@@ -11,8 +11,8 @@
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=96
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_h100-t4
 #SBATCH --time=100:00:00
@@ -42,5 +42,5 @@ VARIANT="${1:-concerto}"
 echo "host=$(hostname) variant=$VARIANT gpus=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L
 
-# accelerate (inside the train script) spawns the 2 GPU processes itself — no srun.
+# accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
 uv run --no-sync bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"

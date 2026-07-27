@@ -15,10 +15,11 @@ lerobot_datasets:
     class_name: LeRobotPointCloudDataset
 
     # RoboCasa365 saves three cameras: left / right / wrist (agentview_left,
-    # agentview_right, eye_in_hand). Libero feeds a single frontal view to the VLM; the
-    # closest equivalent here is the left agentview. Switch/extend if you want both externals.
-    select_video_keys: [observation.images.left_image]
-    video_key_ids_for_vlm: [0]
+    # agentview_right, eye_in_hand). We feed the VLM the two external agentviews (left + right)
+    # for scene context, but NOT the egocentric wrist view. video_key_ids_for_vlm indexes into
+    # select_video_keys: [0,1] = left + right.
+    select_video_keys: [observation.images.left_image, observation.images.right_image]
+    video_key_ids_for_vlm: [0, 1]
 
     select_state_keys: [observation.state]
     select_action_keys: [action]

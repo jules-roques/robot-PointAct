@@ -5,9 +5,9 @@ export HF_DATASETS_OFFLINE=1
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
-# Paper: total batch size 128 across 2 H100 -> 2 GPUs x 64 per device (effective 128).
-GPUS=2
-PER_DEVICE_BATCH_SIZE=64
+# Paper: total batch size 128 (kept). Split across 4 H100 x 32 per device for faster wall-clock.
+GPUS=4
+PER_DEVICE_BATCH_SIZE=32
 NUM_NODES=${NUM_NODES:-1}
 
 # Build accelerate arguments based on GPU count
@@ -24,20 +24,22 @@ fi
 
 # datasets
 dataset=${1:-experiments/13_robocasa365/data_configs/data-robocasa365-opendrawer-point.yaml}
-dataset_name=$(basename ${dataset%.*})-rot6d-image.leftview
+dataset_name=$(basename ${dataset%.*})-rot6d-image.leftright
 
 # hparams
 lr=5e-5
 mlr=5e-5
 vlr=2e-5
 
+# Single-task OpenDrawer budget. The paper's 20-50K-step budget was for 10-task suites; a naive
+# 1/10 cut (5 ep) badly undertrains here (eval: 5 ep -> 8%, 50 ep -> 60%), so we use 20 ep.
 chunk_size=16
-epoch=50
+epoch=20
 
 model_name_or_path=
 run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}
 
-output_dir=$SCRATCH/datasets/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
+output_dir=$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
 
 # Weights & Biases. On Jean Zay compute nodes (no internet) this logs offline; sync from a
 # login node with `wandb sync` (WANDB_MODE / WANDB_DIR are set by train.slurm).
@@ -87,7 +89,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --run-name ${run_name} \
     --attn-implementation flash_attention_2 \
     --log_level info \
-    --report-to wandb tensorboard \
+    --report-to wandb \
     --color_aug True \
     --max_grad_norm 3 \
     --use_robot_state True \

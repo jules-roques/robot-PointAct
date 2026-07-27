@@ -70,34 +70,76 @@ bash experiments/13_robocasa365/train_pointact_utonia.sh
 ```
 
 Both take an optional data-config path as `$1` (default: the OpenDrawer config). Outputs land
-in `$SCRATCH/datasets/PointAct_exprs/robocasa365/pointact/...`.
+in `$SCRATCH/PointAct_exprs/robocasa365/pointact/...` (see "Storing results" below).
 
 The 13-D PandaOmron action becomes 15-D after quat→rot6d, well under `max_action_dim=32`, so
 the model architecture is unchanged from Libero — only the data differs.
 
 ## Evaluation
 
-Server (pointact env, model) + client (robocasa365 env, MuJoCo/EGL) on the **same V100** GPU
-(RoboCasa365 does not run on H100):
+Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) on the **same
+A100** GPU, driven by `eval.slurm`. A100 (not V100) is required because the model uses
+FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only); H100 is avoided
+because RoboCasa365 does not run correctly there.
 
 ```bash
-srun -A rgx@v100 -C v100-32g --gres=gpu:1 --cpus-per-task=10 --hint=nomultithread \
-     --qos=qos_gpu-dev --time=02:00:00 --pty \
-     experiments/13_robocasa365/eval_robocasa365.sh \
-     OpenDrawer <ckpt_dir> <ckpt_step> rot6d " --args.save_video --args.verbose"
+# Full 50-trial success rate (default checkpoint = the OpenDrawer concerto run):
+sbatch experiments/13_robocasa365/eval.slurm
+
+# Smoke (3 trials + videos, short dev QoS):
+sbatch --qos=qos_gpu_a100-dev --time=01:00:00 \
+       --export=ALL,NUM_TRIALS=3,OPTS="--args.save_video --args.verbose" \
+       experiments/13_robocasa365/eval.slurm
 ```
 
-## Open items (what a scaffold cannot decide for you)
+Override the checkpoint via `--export=ALL,CKPT_DIR=...,CKPT_STEP=...`. Results (per-trial log,
+success rate, optional videos) are written under `<run_dir>/results/checkpoint-<step>/`.
+Baseline: the concerto OpenDrawer checkpoint scores **~60% (30/50)** on this eval.
 
-- **`is_delta_action`** in the data config — RoboCasa365 eef actions absolute vs delta. Set to
-  match the source action definition and keep the client consistent.
+The client sends the model a **fused 3-view point cloud** (left+right+wrist, matching the
+`points_3views` training data): the server otherwise builds the cloud from `select_video_keys`
+alone (the single `left` VLM view), which starves the PTv3 backbone and collapses the policy.
+The server already applies `pred_rot_type` and the absolute-position offset, so the client
+steps the returned 13-D action directly.
+
+## Storing results
+
+Run outputs live on `$SCRATCH` (fast, large) but SCRATCH is **purged after ~30 days of no
+access**, so anything worth keeping must be copied off it:
+
+- **Training curves** — logged to Weights & Biases (offline on compute nodes). `wandb sync
+  $SCRATCH/wandb/wandb/offline-run-*` from a login node uploads them to the `diffusion4robots`
+  cloud project (durable).
+- **Final checkpoint + eval results + configs** — archive to `$STORE` (permanent, backed up):
+  ```bash
+  bash experiments/13_robocasa365/archive_run.sh <run_dir>
+  ```
+  This tars the *final* checkpoint, the `results/` tree and the run config into
+  `$STORE/PointAct/robocasa365/<run>.tar`. `$STORE` has a low inode quota, so keep it to a few
+  large tars — do **not** rsync loose files there (and avoid `$WORK`, whose inode quota is
+  ~90% full).
+- **Intermediate checkpoints** stay on SCRATCH; they exist for resume and are regenerable, so
+  let the purge reclaim them.
+
+## Decisions (resolved)
+
+- **`is_delta_action` = False (absolute eef)** — baked into the checkpoint
+  (`is_action_eef: true`); the client and stats are consistent with it.
+- **Client action / gripper plumbing** — resolved. The server's `_build_action_output` applies
+  `pred_rot_type` (rot6d→quat) and re-adds the absolute-position offset, returning a 13-D
+  env-ready action; the client steps it directly (no reconstruction, no Libero gripper remap —
+  the env thresholds `gripper_close`/`control_mode` at 0.5 internally).
+- **Point-cloud input** — the client fuses the 3 camera views into `observation.points`; see
+  the Evaluation section for why a single-view cloud collapses the policy.
+- **Success counting** — from the sim's `info["success"]`, not `done` (robosuite also sets
+  `done` at the horizon timeout, which would inflate the rate).
+- **Success filtering** — the training set was filtered to the 496 successful replays.
+- **State base-rotation normalization** — zero-std dims guarded via `--replace_zero_std` when
+  generating the stats (otherwise the base-quat dims divide by zero → NaN).
+
+## Remaining
+
 - **VLM camera view** — the config feeds `left` (agentview_left) to the VLM. RoboCasa365 has
   two external views (left/right) plus wrist; revisit if both externals should go to the VLM.
-- **State base-rotation normalization** — see the stats note above.
-- **Client action reconstruction** (`reconstruct_env_action`) and **gripper handling** — the
-  `TODO(verify)` blocks in `run_robocasa365_client.py`. Libero's last-dim gripper remap does
-  not transfer (RoboCasa365's last dim is `control_mode`; `gripper_close` is mid-vector).
-- **Per-trial scene seeding** — how `RoboCasa365Env.reset()` should vary/reproduce scenes
-  across eval trials.
-- **Success filtering** — the converted dataset keeps all 514 episodes; 18 replays did not
-  reach success. Decide whether to train on successes only.
+- **Per-trial scene seeding** — `RoboCasa365Env.reset()` re-randomises each trial from the
+  env RNG (seeded once); revisit if you need reproducible per-trial scenes.
