@@ -65,6 +65,63 @@ def roi_guided_indices(
     return out
 
 
+def soft_guided_indices(
+    num_points: int,
+    n_total: int,
+    weights: np.ndarray,
+    roi_ratio: float,
+    rng: np.random.Generator | None = None,
+    tau: float = 0.5,
+) -> np.ndarray:
+    """Soft variant: sample without replacement using continuous ROI weights.
+
+    Removes the hard radius boundary. Points are split into a "core" pool (weight >= tau,
+    i.e. the well-inside-the-halo points) and the rest; the core receives ``roi_ratio`` of
+    the budget and the remainder goes to the rest, but *within* each pool selection is
+    probability-weighted by the Gaussian weights, so peripheral points fade out smoothly
+    instead of being cut off.
+
+    Falls back to a uniform draw when the weights carry no usable signal.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    w = np.asarray(weights, dtype=np.float64)
+    assert w.shape[0] == num_points, "weights length must match cloud size"
+    target = int(min(n_total, num_points))
+
+    core = np.flatnonzero(w >= tau)
+    rest = np.flatnonzero(w < tau)
+    if len(core) == 0 or len(rest) == 0:
+        return rng.choice(num_points, target, replace=False)
+
+    n_core = int(round(roi_ratio * target))
+    n_rest = target - n_core
+    if n_core > len(core):
+        n_core = len(core)
+        n_rest = target - n_core
+    if n_rest > len(rest):
+        n_rest = len(rest)
+        n_core = target - n_rest
+    n_core = min(n_core, len(core))
+
+    def draw(idx, k, prob):
+        if k <= 0:
+            return np.empty(0, dtype=np.int64)
+        p = prob[idx].astype(np.float64)
+        s = p.sum()
+        if not np.isfinite(s) or s <= 0:
+            return rng.choice(idx, k, replace=False)
+        return rng.choice(idx, k, replace=False, p=p / s)
+
+    # Core: weight-proportional. Rest: inverse-ish so nearer-the-halo context is favoured
+    # slightly, but every background point keeps a non-zero chance.
+    sel_core = draw(core, n_core, w)
+    sel_rest = draw(rest, n_rest, w + 1e-3)
+    out = np.concatenate([sel_core, sel_rest])
+    rng.shuffle(out)
+    return out
+
+
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
 
@@ -96,4 +153,12 @@ if __name__ == "__main__":
     idx4 = roi_guided_indices(m, 4096, np.zeros(m, dtype=bool), 0.6, rng)
     assert len(idx4) == 4096 and len(np.unique(idx4)) == 4096
     print("empty-roi: uniform fallback OK")
+
+    # Soft variant: exact count, core share honoured, no hard boundary.
+    d = np.linalg.norm(rng.standard_normal((m, 3)) * 0.3, axis=1)
+    wts = np.exp(-0.5 * (d / 0.25) ** 2)
+    idx5 = soft_guided_indices(m, 4096, wts, 0.7, rng)
+    assert len(idx5) == 4096 and len(np.unique(idx5)) == 4096
+    core_frac = (wts[idx5] >= 0.5).mean()
+    print(f"soft: total={len(idx5)} core_share={core_frac:.2f} (target ~0.70 capped by availability)")
     print("sampling self-test OK")

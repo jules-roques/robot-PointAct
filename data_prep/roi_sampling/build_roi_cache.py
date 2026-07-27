@@ -1,15 +1,17 @@
-"""Stage B: build the per-point ROI-flag LMDB with YOLO-World.
+"""Stage B: build the ROI halo cache with YOLO-World.
 
-Runs in the ROI preproc env (torch + ultralytics, V100). For each stored frame:
+Runs in the ROI preproc env (torch + ultralytics, H100). For each stored frame:
   1. load the base-frame point cloud from the points LMDB (same key/order as training),
   2. decode the left/right RGB frame from the episode mp4,
-  3. detect the object with a YOLO-World checkpoint pre-baked for "drawer handle",
-  4. reproject the cloud, take the in-box epicenter, build a halo, flag ROI points,
-  5. write the bit-packed flag under the identical `ep-frame` key.
+  3. detect drawers with a YOLO-World checkpoint pre-baked for "drawer",
+  4. keep the box on the side named by the instruction ("Open the left/right drawer."),
+  5. reproject the cloud, take the in-box epicenter, size the halo,
+  6. write (anchor_xyz, radius, n_in_box) under the identical `ep-frame` key.
 
-Frames with no reliable detection are stored as all-zero (the dataloader then falls
-back to uniform sampling). Output flag order matches the raw stored cloud exactly, so
-the dataloader can filter it in lockstep with the workspace crop.
+The cache stores the **halo**, not per-point flags: the dataloader derives the mask (or
+soft weights) from the points it already has, so radius scaling and hard/soft selection
+are runtime knobs that need no rebuild. Frames with no reliable detection store a zero
+radius, and the dataloader falls back to uniform sampling for them.
 """
 
 from __future__ import annotations
@@ -26,9 +28,18 @@ import msgpack_numpy
 import numpy as np
 from tqdm.auto import tqdm
 
-from pointact.roi_sampling.geometry import build_halo_roi
+from pointact.roi_sampling.geometry import (
+    build_halo_roi,
+    parse_task_side,
+    select_box_by_side,
+)
 
 msgpack_numpy.patch()
+
+# Cache record: anchor(3) + radius(1) + n_in_box(1), float32. Storing the halo itself
+# (not baked per-point flags) keeps radius scaling and hard/soft selection as dataloader
+# knobs — they can change without rebuilding this cache.
+ROI_RECORD_DTYPE = np.float32
 
 
 def load_calib(path: Path) -> tuple[list[dict], tuple[int, int]]:
@@ -49,6 +60,21 @@ def episode_lengths(meta_dir: Path) -> dict[int, int]:
             row = json.loads(line)
             lengths[int(row["episode_index"])] = int(row["length"])
     return lengths
+
+
+def episode_sides(meta_dir: Path) -> dict[int, str | None]:
+    """Map {episode_index: "left"|"right"|None} from each episode's instruction.
+
+    OpenDrawer instructions are "Open the left drawer." / "Open the right drawer.", so the
+    target side is known for every frame — at training and at eval alike.
+    """
+    sides = {}
+    with open(meta_dir / "episodes.jsonl") as f:
+        for line in f:
+            row = json.loads(line)
+            tasks = row.get("tasks") or []
+            sides[int(row["episode_index"])] = parse_task_side(tasks[0] if tasks else None)
+    return sides
 
 
 def decode_video(path: Path) -> list[np.ndarray]:
@@ -86,13 +112,15 @@ def main() -> None:
     ap.add_argument("--out-dirname", default="points_3views_roi")
     ap.add_argument("--points-dirname", default="points_3views")
     ap.add_argument("--episodes", nargs="*", type=int, default=None)
-    # "drawer" fires reliably at ~0.1-0.16 conf on these sim renders; keep the single
-    # most-confident box per camera to anchor the halo.
+    # "drawer" fires reliably at ~0.1-0.16 conf on these sim renders. Keep several
+    # candidates so the instructed side ("left"/"right") can pick the correct drawer.
     ap.add_argument("--conf", type=float, default=0.02)
-    ap.add_argument("--max-det", type=int, default=1)
-    ap.add_argument("--halo-scale", type=float, default=2.0)
-    ap.add_argument("--min-radius", type=float, default=0.05)
-    ap.add_argument("--max-radius", type=float, default=0.6)
+    ap.add_argument("--max-det", type=int, default=5)
+    # halo_scale 0.5 (was 2.0) tightens the halo ~4x toward the handle rather than the
+    # whole drawer front; min/max radius shrink accordingly.
+    ap.add_argument("--halo-scale", type=float, default=0.5)
+    ap.add_argument("--min-radius", type=float, default=0.02)
+    ap.add_argument("--max-radius", type=float, default=0.25)
     ap.add_argument("--min-in-box", type=int, default=20)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--map-size-gb", type=float, default=8.0)
@@ -103,6 +131,7 @@ def main() -> None:
     dataset_dir = args.dataset_dir.expanduser().resolve()
     cams, image_hw = load_calib(args.calib)
     lengths = episode_lengths(dataset_dir / "meta")
+    sides = episode_sides(dataset_dir / "meta")
     info = json.loads((dataset_dir / "meta" / "info.json").read_text())
     chunks_size = int(info.get("chunks_size", 1000))
 
@@ -125,6 +154,7 @@ def main() -> None:
     with points_env.begin(buffers=True) as ptxn:
         for ep in tqdm(episodes, desc="episodes", unit="ep"):
             n = lengths[ep]
+            side = sides.get(ep)  # "left"/"right" from the episode instruction
             left = decode_video(video_path("left", ep))
             right = decode_video(video_path("right", ep))
             n_use = min(n, len(left), len(right))
@@ -146,17 +176,26 @@ def main() -> None:
                         continue
                     cloud = msgpack.unpackb(bytes(buf)).astype(np.float32)
                     pts = cloud[:, :3]
+                    # Keep only the box on the instructed side, per camera.
+                    dets = {
+                        "left": select_box_by_side(left_boxes[f], side),
+                        "right": select_box_by_side(right_boxes[f], side),
+                    }
                     res = build_halo_roi(
-                        pts, cams,
-                        {"left": left_boxes[f], "right": right_boxes[f]},
-                        image_hw,
+                        pts, cams, dets, image_hw,
                         halo_scale=args.halo_scale,
                         min_radius=args.min_radius,
                         max_radius=args.max_radius,
                         min_in_box=args.min_in_box,
                     )
-                    packed = np.packbits(res.roi_mask.astype(np.uint8))
-                    wtxn.put(key, packed.tobytes())
+                    if res.anchor is None:
+                        record = np.array([0, 0, 0, 0, res.n_in_box], dtype=ROI_RECORD_DTYPE)
+                    else:
+                        record = np.array(
+                            [*res.anchor.tolist(), res.radius, res.n_in_box],
+                            dtype=ROI_RECORD_DTYPE,
+                        )
+                    wtxn.put(key, record.tobytes())
 
                     stats["frames"] += 1
                     stats["total_points"] += len(pts)

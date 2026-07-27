@@ -108,6 +108,37 @@ def points_in_box(
     return inside
 
 
+def halo_weights(
+    points_base: np.ndarray,
+    anchor: np.ndarray,
+    radius: float,
+    mode: str = "hard",
+    softness: float = 1.0,
+) -> np.ndarray:
+    """Per-point ROI weight from a stored (anchor, radius) halo.
+
+    Kept separate from halo construction so radius scaling and hard/soft selection are
+    *dataloader* knobs: the cache stores only the anchor and radius, so these can change
+    without rebuilding anything.
+
+    Args:
+        mode: "hard" -> 1.0 inside the ball, 0.0 outside (sharp boundary, exact counts).
+              "soft" -> Gaussian falloff exp(-d^2 / (2 sigma^2)) with sigma = softness*radius,
+              which removes the boundary artifact and down-weights the periphery smoothly.
+        softness: sigma as a multiple of radius (soft mode only).
+
+    Returns:
+        (N,) float weights in [0, 1].
+    """
+    d = np.linalg.norm(np.asarray(points_base, dtype=np.float64) - np.asarray(anchor, dtype=np.float64), axis=1)
+    if mode == "hard":
+        return (d <= radius).astype(np.float64)
+    if mode == "soft":
+        sigma = max(1e-6, softness * radius)
+        return np.exp(-0.5 * (d / sigma) ** 2)
+    raise ValueError(f"unknown halo mode {mode!r} (expected 'hard' or 'soft')")
+
+
 @dataclass
 class HaloResult:
     """Outcome of building a halo for one frame."""
@@ -116,6 +147,42 @@ class HaloResult:
     anchor: np.ndarray | None  # (3,) base-frame epicenter, or None
     radius: float  # halo radius (meters), 0.0 if no detection
     n_in_box: int  # number of points that fell inside any detection box
+
+
+def select_box_by_side(boxes: np.ndarray, side: str | None) -> np.ndarray:
+    """Pick the drawer box matching the instructed side.
+
+    RoboCASA OpenDrawer instructions name the target ("Open the left drawer." /
+    "Open the right drawer."), but an open-vocab "drawer" prompt fires on every drawer
+    in view — so the most-confident box is often the wrong one. Disambiguate by image
+    x-position: leftmost box center for "left", rightmost for "right". The instruction
+    is available at training AND at eval, so this works in both paths.
+
+    Args:
+        boxes: (K, 4) xyxy candidate boxes (any order).
+        side: "left", "right", or None (no disambiguation -> return all boxes).
+
+    Returns:
+        (1, 4) chosen box, or the input when side is None / boxes is empty.
+    """
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    if side is None or len(boxes) <= 1:
+        return boxes
+    centers_x = 0.5 * (boxes[:, 0] + boxes[:, 2])
+    idx = int(np.argmin(centers_x)) if side == "left" else int(np.argmax(centers_x))
+    return boxes[idx : idx + 1]
+
+
+def parse_task_side(task: str | None) -> str | None:
+    """Extract the target side from a RoboCASA OpenDrawer instruction."""
+    if not task:
+        return None
+    t = task.lower()
+    if "left" in t:
+        return "left"
+    if "right" in t:
+        return "right"
+    return None
 
 
 def build_halo_roi(

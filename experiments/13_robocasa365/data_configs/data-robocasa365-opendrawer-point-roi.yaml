@@ -35,7 +35,15 @@ lerobot_datasets:
     state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
 
     # --- ROI-guided sampling (the only difference vs. the baseline config) ---
-    # Per-point ROI-flag LMDB (under `root`/OpenDrawer) built by build_roi_cache.py.
+    # Halo cache (anchor + radius per frame) built by build_roi_cache.py.
     roi_point_cloud_dirname: points_3views_roi
-    # Fraction of the 4096-point budget allocated to ROI (drawer/handle) points.
-    roi_ratio: 0.6
+    # 70% of the 4096-point budget to ROI points, 30% to everything else. This is a cap:
+    # when the tight halo holds fewer points, the guarded split takes all of them and
+    # tops up from background, so the total stays exactly 4096.
+    roi_ratio: 0.7
+    # Extra radius scaling on top of the cached halo (cache built with halo_scale=0.5,
+    # already ~4x tighter than the first pass). Runtime knob — no rebuild needed.
+    roi_radius_scale: 1.0
+    # "hard": sharp ball. "soft": Gaussian falloff, no boundary artifact.
+    roi_mode: hard
+    roi_softness: 1.0

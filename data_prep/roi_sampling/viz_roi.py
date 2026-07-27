@@ -21,6 +21,7 @@ import msgpack_numpy
 import numpy as np
 import plotly.graph_objects as go
 
+from pointact.roi_sampling.geometry import halo_weights
 from pointact.roi_sampling.sampling import roi_guided_indices
 
 msgpack_numpy.patch()
@@ -31,11 +32,25 @@ def load_cloud(txn, ep, f):
     return None if buf is None else msgpack.unpackb(bytes(buf)).astype(np.float32)
 
 
-def load_flag(txn, ep, f, m):
+def load_halo(txn, ep, f):
+    """Return (anchor, radius) from the halo cache, or None."""
     buf = txn.get(f"{ep}-{f}".encode("ascii"))
     if buf is None:
-        return np.zeros(m, dtype=bool)
-    return np.unpackbits(np.frombuffer(bytes(buf), dtype=np.uint8))[:m].astype(bool)
+        return None
+    rec = np.frombuffer(bytes(buf), dtype=np.float32)
+    if len(rec) < 4 or not np.isfinite(rec[:4]).all() or rec[3] <= 0:
+        return None
+    return rec[:3].astype(np.float64), float(rec[3])
+
+
+def load_flag(txn, ep, f, pts, radius_scale=1.0, mode="hard", softness=1.0):
+    """Per-point ROI mask derived from the cached halo (empty when no detection)."""
+    halo = load_halo(txn, ep, f)
+    if halo is None:
+        return np.zeros(len(pts), dtype=bool)
+    anchor, radius = halo
+    w = halo_weights(pts, anchor, radius * radius_scale, mode=mode, softness=softness)
+    return (w >= 0.5) if mode == "soft" else (w > 0)
 
 
 def rgb_str(colors: np.ndarray) -> list[str]:
@@ -64,7 +79,8 @@ def main() -> None:
                     help="Restrict auto-picking to these episodes (e.g. a built subset).")
     ap.add_argument("--num-samples", type=int, default=8)
     ap.add_argument("--max-points", type=int, default=9000, help="Cap points drawn per frame.")
-    ap.add_argument("--roi-ratio", type=float, default=0.6)
+    ap.add_argument("--roi-ratio", type=float, default=0.7)
+    ap.add_argument("--roi-radius-scale", type=float, default=1.0)
     ap.add_argument("--max-npoints", type=int, default=4096)
     ap.add_argument("--fragment", action="store_true",
                     help="Write body-only HTML (for embedding, e.g. an Artifact) instead of a full page.")
@@ -98,10 +114,18 @@ def main() -> None:
                     cloud = load_cloud(ptxn, ep, f)
                     if cloud is None:
                         continue
-                    if load_flag(rtxn, ep, f, len(cloud)).any():
+                    if load_flag(rtxn, ep, f, cloud[:, :3], args.roi_radius_scale).any():
                         chosen = f
                         break
                 samples.append((ep, chosen))
+
+    # Episode -> instruction, so the viz label shows which drawer was asked for.
+    ep_task = {}
+    with open(dataset_dir / "meta" / "episodes.jsonl") as fh:
+        for line in fh:
+            row = json.loads(line)
+            tk = row.get("tasks") or [""]
+            ep_task[int(row["episode_index"])] = tk[0] if tk else ""
 
     rng = np.random.default_rng(0)
     traces = []
@@ -112,7 +136,7 @@ def main() -> None:
             if cloud is None:
                 continue
             m = len(cloud)
-            flag = load_flag(rtxn, ep, f, m)
+            flag = load_flag(rtxn, ep, f, cloud[:, :3], args.roi_radius_scale)
             pts, rgb = cloud[:, :3], cloud[:, 3:6]
             # RGB may be stored in [-1,1] (dataloader rescales); map to [0,1] for display.
             disp_rgb = (rgb + 1) / 2 if rgb.min() < 0 else rgb
@@ -127,7 +151,8 @@ def main() -> None:
             start = len(traces)
             traces.append(scatter(pts[bg_idx], rgb_str(disp_rgb[bg_idx]),
                                   f"{ep}-{f} background", 1.5, opacity=0.35))
-            traces.append(scatter(pts[roi_idx], "red", f"{ep}-{f} ROI ({len(roi_idx)})", 2.5))
+            traces.append(scatter(pts[roi_idx], "red",
+                                  f"{ep}-{f} ROI ({len(roi_idx)} pts) — {ep_task.get(ep,'')}", 2.5))
 
             # Post-sample view (green), hidden by default.
             if flag.any() and not flag.all():
@@ -149,7 +174,8 @@ def main() -> None:
             # keep the post-sample trace as legendonly, others visible
             vis[t] = "legendonly" if traces[t].visible == "legendonly" else True
         buttons.append(dict(label=f"{ep}-{f}", method="update",
-                            args=[{"visible": vis}, {"title": f"ROI cloud — episode {ep} frame {f}"}]))
+                            args=[{"visible": vis},
+                                  {"title": f"ROI cloud — ep {ep} frame {f} — {ep_task.get(ep,'')}"}]))
 
     # Default: first frame visible only.
     for i, t in enumerate(traces):
@@ -161,7 +187,7 @@ def main() -> None:
     fig.update_layout(
         updatemenus=[dict(buttons=buttons, x=0.0, y=1.12, xanchor="left")],
         scene=dict(aspectmode="data"),
-        title=f"ROI cloud — episode {samples[0][0]} frame {samples[0][1]}",
+        title=f"ROI cloud — ep {samples[0][0]} frame {samples[0][1]} — {ep_task.get(samples[0][0],'')}",
         margin=dict(l=0, r=0, t=40, b=0),
         legend=dict(itemsizing="constant"),
     )

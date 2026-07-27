@@ -57,7 +57,10 @@ class LerobotConfig:
     # ROI-guided point sampling (optional). Directory (under `root`) of the per-point
     # ROI-flag LMDB produced by data_prep/roi_sampling; None disables it (uniform).
     roi_point_cloud_dirname: str | None = None
-    roi_ratio: float = 0.6
+    roi_ratio: float = 0.7
+    roi_radius_scale: float = 1.0
+    roi_mode: str = "hard"      # "hard" (ball) or "soft" (Gaussian falloff)
+    roi_softness: float = 1.0
 
     image_size: int | None = None
 
