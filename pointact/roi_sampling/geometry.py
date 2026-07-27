@@ -139,6 +139,34 @@ def halo_weights(
     raise ValueError(f"unknown halo mode {mode!r} (expected 'hard' or 'soft')")
 
 
+def eef_density_weights(
+    points_xyz: np.ndarray,
+    eef_pos: np.ndarray,
+    sigma: float,
+    floor: float,
+) -> np.ndarray:
+    """Per-point sampling weight: a Gaussian bump around the end-effector with a density floor.
+
+    ``weight = floor + (1 - floor) * exp(-d^2 / (2 sigma^2))``, so every point keeps a
+    non-zero weight (background is never starved) while points within ~sigma of the eef
+    dominate the budget. Unlike :func:`halo_weights`, there is no radius/box detection step:
+    ``eef_pos`` comes straight from the frame's proprioceptive state, so this needs no cache.
+
+    Args:
+        points_xyz: (N, 3) cloud points, same frame as ``eef_pos`` (robot-base frame).
+        eef_pos: (3,) end-effector position.
+        sigma: Gaussian bandwidth (meters).
+        floor: minimum weight at infinite distance, in [0, 1).
+
+    Returns:
+        (N,) float weights in [floor, 1].
+    """
+    d = np.linalg.norm(np.asarray(points_xyz, dtype=np.float64) - np.asarray(eef_pos, dtype=np.float64), axis=1)
+    sigma = max(1e-6, float(sigma))
+    gauss = np.exp(-0.5 * (d / sigma) ** 2)
+    return floor + (1.0 - floor) * gauss
+
+
 @dataclass
 class HaloResult:
     """Outcome of building a halo for one frame."""

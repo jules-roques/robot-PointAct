@@ -1,0 +1,49 @@
+# EEF-density variant of data-robocasa365-opendrawer-point.yaml.
+# IDENTICAL to the baseline config except for the three eef_sampling_* fields at the bottom,
+# which switch the dataloader's uniform subsample for weight-proportional sampling under a
+# Gaussian-with-floor density centered on the frame's end-effector position. Keeping
+# everything else equal is what makes the A/B comparison fair.
+#
+# Needs no preprocessing/cache: the anchor is the frame's own observation.state[:3], already
+# in the point-cloud (robot-base) frame before centering. See
+# pointact/roi_sampling/geometry.py:eef_density_weights.
+
+mm_datasets:
+
+lerobot_datasets:
+
+  - repo_id: OpenDrawer
+    root: robot_data/robocasa365/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+
+    # The VLM sees both external agentview cameras for scene context, but NOT the
+    # egocentric wrist view (matches the uniform baseline config).
+    select_video_keys: [observation.images.left_image, observation.images.right_image]
+    video_key_ids_for_vlm: [0, 1]
+
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+
+    converted_rot_type: rot6d  # euler, rot6d
+    is_delta_action: False
+
+    points_workspace: {
+      'X_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Y_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Z_BBOX': [0.0, 1.0],    # 0 = floor
+    }
+
+    max_npoints: 4096
+    augment_pc_rot: 30
+    point_cloud_dirname: points_3views
+
+    state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+
+    # --- EEF-density sampling (the only difference vs. the baseline config) ---
+    eef_sampling: True
+    # Gaussian bandwidth around the eef, meters. Tight enough that most of the budget lands
+    # on the gripper/contact region rather than spreading over the whole 1.6x1.6x1.0m workspace.
+    eef_sampling_sigma: 0.08
+    # Minimum sampling weight at infinite distance (as a fraction of the peak weight at the
+    # eef itself), so background/context points are never fully starved.
+    eef_sampling_floor: 0.05

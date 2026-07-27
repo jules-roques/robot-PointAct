@@ -19,8 +19,8 @@ from pointact.data.transforms.pointcloud import (
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
 )
-from pointact.roi_sampling.geometry import halo_weights
-from pointact.roi_sampling.sampling import roi_guided_indices, soft_guided_indices
+from pointact.roi_sampling.geometry import eef_density_weights, halo_weights
+from pointact.roi_sampling.sampling import density_weighted_indices, roi_guided_indices, soft_guided_indices
 
 msgpack_numpy.patch()
 
@@ -73,6 +73,14 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         roi_radius_scale: float = 1.0,
         roi_mode: str = "hard",     # "hard" (ball) or "soft" (Gaussian falloff)
         roi_softness: float = 1.0,  # soft mode: sigma as a multiple of radius
+        # EEF-density sampling (optional, mutually exclusive with roi_point_cloud_dirname).
+        # No cache needed: the anchor is the frame's own end-effector position (state[:3],
+        # already in the point-cloud/base frame before centering). Replaces the uniform
+        # subsample with weight-proportional sampling under a Gaussian-with-floor density,
+        # so points near the eef dominate the budget while every point stays reachable.
+        eef_sampling: bool = False,
+        eef_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
+        eef_sampling_floor: float = 0.05,   # minimum weight at infinite distance
         **kwargs,
     ):
         super().__init__(
@@ -121,6 +129,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self._roi_lmdb_env = None
         self._roi_lmdb_txn = None
         self._roi_lmdb_pid = None
+
+        self.eef_sampling = eef_sampling
+        self.eef_sampling_sigma = eef_sampling_sigma
+        self.eef_sampling_floor = eef_sampling_floor
 
     def __del__(self):
         if getattr(self, "_point_cloud_lmdb_txn", None) is not None:
@@ -287,7 +299,14 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = None
-            if roi_halo is not None:
+            if self.eef_sampling:
+                rng = np.random.default_rng(np.random.randint(2**31 - 1))
+                eef_pos = item[OBS_STATE][:3].numpy()
+                w = eef_density_weights(
+                    point_cloud[:, :3], eef_pos, self.eef_sampling_sigma, self.eef_sampling_floor
+                )
+                ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
+            elif roi_halo is not None:
                 anchor, radius = roi_halo
                 w = halo_weights(
                     point_cloud[:, :3], anchor, radius * self.roi_radius_scale,

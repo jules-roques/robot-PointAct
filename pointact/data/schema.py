@@ -62,6 +62,13 @@ class LerobotConfig:
     roi_mode: str = "hard"      # "hard" (ball) or "soft" (Gaussian falloff)
     roi_softness: float = 1.0
 
+    # EEF-density point sampling (optional, mutually exclusive with the ROI fields above).
+    # No cache needed: the anchor is the frame's own end-effector position. See
+    # pointact.roi_sampling.geometry.eef_density_weights.
+    eef_sampling: bool = False
+    eef_sampling_sigma: float = 0.08
+    eef_sampling_floor: float = 0.05
+
     image_size: int | None = None
 
     class_name: str = 'LeRobotDataset'

@@ -122,6 +122,40 @@ def soft_guided_indices(
     return out
 
 
+def density_weighted_indices(
+    num_points: int,
+    n_total: int,
+    weights: np.ndarray,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Select ``min(n_total, num_points)`` indices by plain weight-proportional sampling.
+
+    No pool split / quota, unlike :func:`roi_guided_indices` and :func:`soft_guided_indices`:
+    every point is drawn without replacement with probability proportional to ``weights``.
+    Intended for a strictly-positive density (e.g. :func:`pointact.roi_sampling.geometry.
+    eef_density_weights`, which has a floor), so there is no "empty ROI" fallback case.
+
+    Args:
+        num_points: size of the cloud being sampled (``len(cloud)``).
+        n_total: desired number of points (the baseline count rule result).
+        weights: (num_points,) float, strictly positive.
+        rng: numpy Generator (defaults to a fresh default_rng).
+
+    Returns:
+        1-D int array of selected indices (unordered), length ``min(n_total, num_points)``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    w = np.asarray(weights, dtype=np.float64)
+    assert w.shape[0] == num_points, "weights length must match cloud size"
+    target = int(min(n_total, num_points))
+
+    s = w.sum()
+    if not np.isfinite(s) or s <= 0:
+        return rng.choice(num_points, target, replace=False)
+    return rng.choice(num_points, target, replace=False, p=w / s)
+
+
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
 
@@ -161,4 +195,12 @@ if __name__ == "__main__":
     assert len(idx5) == 4096 and len(np.unique(idx5)) == 4096
     core_frac = (wts[idx5] >= 0.5).mean()
     print(f"soft: total={len(idx5)} core_share={core_frac:.2f} (target ~0.70 capped by availability)")
+
+    # Density-weighted: near-eef points dominate but the floor keeps far points reachable.
+    near = np.exp(-0.5 * (d / 0.08) ** 2)
+    wts_floor = 0.05 + 0.95 * near
+    idx6 = density_weighted_indices(m, 4096, wts_floor, rng)
+    assert len(idx6) == 4096 and len(np.unique(idx6)) == 4096
+    near_frac = (d[idx6] < 0.08).mean()
+    print(f"density: total={len(idx6)} near_eef_frac={near_frac:.2f} (base rate {(d < 0.08).mean():.2f})")
     print("sampling self-test OK")
