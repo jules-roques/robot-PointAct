@@ -13,10 +13,13 @@ lerobot_datasets:
     root: robot_data/robocasa365/lerobot_point_lmdb
     class_name: LeRobotPointCloudDataset
 
-    # All three cameras go to the VLM (matches the uniform baseline config).
-    # video_key_ids_for_vlm indexes into select_video_keys: [0,1,2] = all three.
-    select_video_keys: [observation.images.left_image, observation.images.right_image, observation.images.wrist_image]
-    video_key_ids_for_vlm: [0, 1, 2]
+    # The VLM sees both external agentview cameras for scene context, but NOT the
+    # egocentric wrist view (matches the uniform baseline config).
+    # video_key_ids_for_vlm indexes into select_video_keys: [0,1] = left + right.
+    # Note the point cloud is still built from all three cameras (points_3views LMDB);
+    # this setting only controls what the VLM is shown.
+    select_video_keys: [observation.images.left_image, observation.images.right_image]
+    video_key_ids_for_vlm: [0, 1]
 
     select_state_keys: [observation.state]
     select_action_keys: [action]
