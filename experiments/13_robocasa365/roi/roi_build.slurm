@@ -36,6 +36,7 @@ nvidia-smi -L || true
 srun "$VENV" data_prep/roi_sampling/build_roi_cache.py \
   --dataset-dir "$DATA" \
   --calib "$CALIB" \
+  --grasp-anchors "$DATA/roi_meta/grasp_anchors.json" \
   --weights "$WEIGHTS" \
   --out-dirname points_3views_roi \
   ${EPISODES:+--episodes $EPISODES}

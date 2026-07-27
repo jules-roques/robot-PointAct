@@ -77,28 +77,16 @@ def episode_sides(meta_dir: Path) -> dict[int, str | None]:
     return sides
 
 
-def episode_grasp_point(dataset_dir: Path, ep: int, chunks_size: int) -> np.ndarray | None:
-    """End-effector position (robot-base frame) at the frame the gripper closes.
+def load_grasp_anchors(path: Path | None) -> dict[int, np.ndarray]:
+    """Load per-episode grasp anchors written by dump_grasp_anchors.py.
 
-    observation.state[0:3] is base_to_eef_pos — the same frame as the stored point cloud.
-    action[7] is gripper_close. The first closing frame is where the demonstration grasps
-    the handle, which identifies the target drawer for the whole episode.
+    Kept as a JSON sidecar (not read from parquet here) so this env needs no pyarrow and
+    the anchors stay auditable.
     """
-    import pyarrow.parquet as pq
-
-    p = dataset_dir / "data" / f"chunk-{ep // chunks_size:03d}" / f"episode_{ep:06d}.parquet"
-    try:
-        tb = pq.read_table(p, columns=["observation.state", "action"])
-    except Exception:
-        return None
-    S = np.array([np.asarray(x, np.float32) for x in tb.column("observation.state").to_pylist()])
-    A = np.array([np.asarray(x, np.float32) for x in tb.column("action").to_pylist()])
-    if S.ndim != 2 or S.shape[1] < 3 or A.ndim != 2 or A.shape[1] < 8:
-        return None
-    idx = np.flatnonzero(A[:, 7] > 0.5)
-    if len(idx) == 0:
-        return None
-    return S[idx[0], 0:3].astype(np.float64)
+    if path is None or not path.exists():
+        return {}
+    blob = json.loads(path.read_text())
+    return {int(k): np.asarray(v, dtype=np.float64) for k, v in blob.get("anchors", {}).items()}
 
 
 def decode_video(path: Path) -> list[np.ndarray]:
@@ -133,6 +121,8 @@ def main() -> None:
     ap.add_argument("--calib", required=True, type=Path)
     ap.add_argument("--weights", required=True, type=Path,
                     help="YOLO-World checkpoint pre-baked with the class prompt.")
+    ap.add_argument("--grasp-anchors", type=Path, default=None,
+                    help="JSON from dump_grasp_anchors.py; selects the demonstrated drawer.")
     ap.add_argument("--out-dirname", default="points_3views_roi")
     ap.add_argument("--points-dirname", default="points_3views")
     ap.add_argument("--episodes", nargs="*", type=int, default=None)
@@ -153,6 +143,7 @@ def main() -> None:
     dataset_dir = args.dataset_dir.expanduser().resolve()
     cams, image_hw = load_calib(args.calib)
     lengths = episode_lengths(dataset_dir / "meta")
+    grasp_anchors = load_grasp_anchors(args.grasp_anchors)
     info = json.loads((dataset_dir / "meta" / "info.json").read_text())
     chunks_size = int(info.get("chunks_size", 1000))
 
@@ -176,7 +167,7 @@ def main() -> None:
         for ep in tqdm(episodes, desc="episodes", unit="ep"):
             n = lengths[ep]
             # Per-episode ground truth: where the demonstration grasps the handle.
-            grasp = episode_grasp_point(dataset_dir, ep, chunks_size)
+            grasp = grasp_anchors.get(ep)
             left = decode_video(video_path("left", ep))
             right = decode_video(video_path("right", ep))
             n_use = min(n, len(left), len(right))
