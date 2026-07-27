@@ -22,7 +22,8 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
 
-REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct/.claude/worktrees/roi-guided-sampling
+MAIN_REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
+REPO="$MAIN_REPO/.claude/worktrees/roi-guided-sampling"
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"   # shadow main-checkout pointact with the worktree
 
@@ -32,7 +33,8 @@ OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/roi_
 mkdir -p "$(dirname "$OUT")"
 nvidia-smi -L || true
 
-srun uv run --project envs/robocasa365 --no-sync \
+# robocasa365 env (.venv) lives in the main checkout; worktree provides the code via PYTHONPATH.
+srun uv run --project "$MAIN_REPO/envs/robocasa365" --no-sync \
   python data_prep/roi_sampling/dump_camera_calib.py \
   --source-dir "$BASE/lerobot" \
   --out "$OUT" \
