@@ -19,6 +19,7 @@ from pointact.data.transforms.pointcloud import (
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
 )
+from pointact.roi_sampling.sampling import roi_guided_indices
 
 msgpack_numpy.patch()
 
@@ -60,6 +61,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         max_npoints: int = 4096,
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
+        # ROI-guided sampling (optional). When roi_point_cloud_dirname is set, a
+        # per-point ROI flag LMDB (same keys/order as the point LMDB) is loaded and
+        # the uniform subsample is replaced by a guarded ROI/background split of the
+        # same total size. Missing/empty ROI falls back to uniform sampling.
+        roi_point_cloud_dirname: str | None = None,
+        roi_ratio: float = 0.6,
         **kwargs,
     ):
         super().__init__(
@@ -94,7 +101,17 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.point_cloud_dir = os.path.join(self.root, point_cloud_dirname)
         self._point_cloud_lmdb_env = None
         self._point_cloud_lmdb_txn = None
-        self._point_cloud_lmdb_pid = None    
+        self._point_cloud_lmdb_pid = None
+
+        self.roi_ratio = roi_ratio
+        self.roi_point_cloud_dir = (
+            os.path.join(self.root, roi_point_cloud_dirname)
+            if roi_point_cloud_dirname is not None
+            else None
+        )
+        self._roi_lmdb_env = None
+        self._roi_lmdb_txn = None
+        self._roi_lmdb_pid = None
 
     def __del__(self):
         if getattr(self, "_point_cloud_lmdb_txn", None) is not None:
@@ -104,12 +121,22 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             self._point_cloud_lmdb_env.close()
             self._point_cloud_lmdb_env = None
         self._point_cloud_lmdb_pid = None
+        if getattr(self, "_roi_lmdb_txn", None) is not None:
+            self._roi_lmdb_txn.abort()
+            self._roi_lmdb_txn = None
+        if getattr(self, "_roi_lmdb_env", None) is not None:
+            self._roi_lmdb_env.close()
+            self._roi_lmdb_env = None
+        self._roi_lmdb_pid = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_point_cloud_lmdb_env"] = None
         state["_point_cloud_lmdb_txn"] = None
         state["_point_cloud_lmdb_pid"] = None
+        state["_roi_lmdb_env"] = None
+        state["_roi_lmdb_txn"] = None
+        state["_roi_lmdb_pid"] = None
         return state
 
     def set_feature_keys(
@@ -152,8 +179,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
-        point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
-        point_cloud = self.augment_point_cloud(point_cloud, item)
+        roi_flag = self.load_roi_flag(ep_idx, frame_idx, len(point_cloud))
+        point_cloud, roi_flag = self.filter_point_cloud_by_workspace(point_cloud, roi_flag)
+        point_cloud = self.augment_point_cloud(point_cloud, item, roi_flag)
         point_cloud = self.center_point_cloud(point_cloud, item)
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
@@ -171,9 +199,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise KeyError(f"Point cloud '{point_key}' not found in {self.point_cloud_dir}")
         return msgpack.unpackb(point_cloud).copy().astype(np.float32)
 
-    def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray):
+    def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray, roi_flag: np.ndarray | None = None):
         if self.points_workspace is None:
-            return point_cloud
+            return point_cloud, roi_flag
 
         workspace = self.points_workspace
         point_mask = (
@@ -184,7 +212,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             & (point_cloud[:, 2] > workspace["Z_BBOX"][0])
             & (point_cloud[:, 2] < workspace["Z_BBOX"][1])
         )
-        return point_cloud[point_mask]
+        # Filter the ROI flag in lockstep so it stays aligned to the cloud.
+        if roi_flag is not None:
+            roi_flag = roi_flag[point_mask]
+        return point_cloud[point_mask], roi_flag
 
     def get_point_cloud_lmdb_txn(self):
         current_pid = os.getpid()
@@ -205,10 +236,57 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         return self._point_cloud_lmdb_txn
 
-    def augment_point_cloud(self, point_cloud: np.ndarray, item: dict):
+    def get_roi_lmdb_txn(self):
+        current_pid = os.getpid()
+        if self._roi_lmdb_pid != current_pid:
+            self._roi_lmdb_env = None
+            self._roi_lmdb_txn = None
+            self._roi_lmdb_pid = current_pid
+
+        if self._roi_lmdb_env is None:
+            self._roi_lmdb_env = lmdb.open(
+                self.roi_point_cloud_dir,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                max_spare_txns=1,
+            )
+            self._roi_lmdb_txn = self._roi_lmdb_env.begin(buffers=True)
+
+        return self._roi_lmdb_txn
+
+    def load_roi_flag(self, ep_idx: int, frame_idx: int, num_points: int):
+        """Return a (num_points,) bool ROI mask aligned to the raw stored cloud.
+
+        Returns None when ROI sampling is disabled or the flag is missing, so the
+        caller falls back to uniform sampling. Flags are stored bit-packed
+        (np.packbits) under the same ``ep-frame`` key as the point cloud.
+        """
+        if self.roi_point_cloud_dir is None:
+            return None
+        txn = self.get_roi_lmdb_txn()
+        buf = txn.get(f"{ep_idx}-{frame_idx}".encode("ascii"))
+        if buf is None:
+            return None
+        packed = np.frombuffer(bytes(buf), dtype=np.uint8)
+        flag = np.unpackbits(packed)[:num_points].astype(bool)
+        if len(flag) != num_points:
+            # Length mismatch means a stale/misaligned cache -> ignore safely.
+            return None
+        return flag
+
+    def augment_point_cloud(self, point_cloud: np.ndarray, item: dict, roi_flag: np.ndarray | None = None):
+        # Baseline count rule is preserved exactly; only the *selection* changes when
+        # a valid ROI flag is present.
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
-            ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
+            if roi_flag is not None and roi_flag.any() and not roi_flag.all():
+                rng = np.random.default_rng(np.random.randint(2**31 - 1))
+                ridxs = roi_guided_indices(
+                    len(point_cloud), max_npoints, roi_flag, self.roi_ratio, rng
+                )
+            else:
+                ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]
 
         point_cloud_color = augment_point_cloud_color(

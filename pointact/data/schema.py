@@ -54,6 +54,11 @@ class LerobotConfig:
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
     point_cloud_dirname: str | None = None
 
+    # ROI-guided point sampling (optional). Directory (under `root`) of the per-point
+    # ROI-flag LMDB produced by data_prep/roi_sampling; None disables it (uniform).
+    roi_point_cloud_dirname: str | None = None
+    roi_ratio: float = 0.6
+
     image_size: int | None = None
 
     class_name: str = 'LeRobotDataset'
