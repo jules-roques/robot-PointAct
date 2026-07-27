@@ -13,8 +13,8 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=48
 #SBATCH --hint=nomultithread
-#SBATCH --qos=qos_gpu_h100-t4
-#SBATCH --time=20:00:00
+#SBATCH --qos=qos_gpu_h100-t3
+#SBATCH --time=04:00:00
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 
