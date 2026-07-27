@@ -149,21 +149,22 @@ class HaloResult:
     n_in_box: int  # number of points that fell inside any detection box
 
 
+#: Sign of the robot-base Y axis that the instruction's "left" refers to.
+#: Calibrated from the demonstrations themselves: taking observation.state[0:3]
+#: (base_to_eef_pos, the same frame as the point cloud) at the frame the gripper closes
+#: — i.e. the handle actually grasped — "left" episodes average Y=+0.156 and "right"
+#: episodes Y=-0.148 over 80 episodes. So "left" is the HIGHER-Y drawer.
+#: NOTE: an image-space "leftmost box" rule is wrong here (it picks the opposite drawer),
+#: and an absolute Y threshold is unreliable per-episode because the robot base pose
+#: varies; comparing candidates *within a frame* is what makes this robust.
+LEFT_IS_HIGHER_Y = True
+
+
 def select_box_by_side(boxes: np.ndarray, side: str | None) -> np.ndarray:
-    """Pick the drawer box matching the instructed side.
+    """Deprecated image-space selector, kept only for the geometry self-test.
 
-    RoboCASA OpenDrawer instructions name the target ("Open the left drawer." /
-    "Open the right drawer."), but an open-vocab "drawer" prompt fires on every drawer
-    in view — so the most-confident box is often the wrong one. Disambiguate by image
-    x-position: leftmost box center for "left", rightmost for "right". The instruction
-    is available at training AND at eval, so this works in both paths.
-
-    Args:
-        boxes: (K, 4) xyxy candidate boxes (any order).
-        side: "left", "right", or None (no disambiguation -> return all boxes).
-
-    Returns:
-        (1, 4) chosen box, or the input when side is None / boxes is empty.
+    Use :func:`select_anchor_by_side`, which disambiguates in 3D. Image-space x is
+    camera-dependent and empirically selects the wrong drawer on this dataset.
     """
     boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
     if side is None or len(boxes) <= 1:
@@ -171,6 +172,51 @@ def select_box_by_side(boxes: np.ndarray, side: str | None) -> np.ndarray:
     centers_x = 0.5 * (boxes[:, 0] + boxes[:, 2])
     idx = int(np.argmin(centers_x)) if side == "left" else int(np.argmax(centers_x))
     return boxes[idx : idx + 1]
+
+
+def candidate_anchors(
+    points_base: np.ndarray,
+    cameras: list[dict],
+    detections: dict[str, np.ndarray],
+    image_hw: tuple[int, int],
+    min_in_box: int = 20,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """One 3D anchor per detected box, so candidates can be compared in the world.
+
+    Returns:
+        List of (anchor_xyz, in_box_mask) for every box with enough support.
+    """
+    out = []
+    for cam in cameras:
+        boxes = detections.get(cam["name"])
+        if boxes is None or len(boxes) == 0:
+            continue
+        for box in np.asarray(boxes, dtype=np.float64).reshape(-1, 4):
+            mask = points_in_box(points_base, cam["intrinsic"], cam["base2cam"], box, image_hw)
+            if int(mask.sum()) < min_in_box:
+                continue
+            anchor = np.median(np.asarray(points_base, dtype=np.float64)[mask], axis=0)
+            out.append((anchor, mask))
+    return out
+
+
+def select_anchor_by_side(
+    cands: list[tuple[np.ndarray, np.ndarray]], side: str | None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Choose the candidate drawer named by the instruction, comparing in 3D.
+
+    "left" -> the higher-base-Y candidate, "right" -> the lower (see LEFT_IS_HIGHER_Y).
+    The comparison is relative among this frame's candidates, so it does not depend on
+    the robot's absolute base pose or on which camera saw the drawer.
+    """
+    if not cands:
+        return None
+    if side is None or len(cands) == 1:
+        # No side information: fall back to the best-supported candidate.
+        return max(cands, key=lambda c: int(c[1].sum()))
+    ys = np.array([c[0][1] for c in cands])
+    want_max = (side == "left") == LEFT_IS_HIGHER_Y
+    return cands[int(np.argmax(ys)) if want_max else int(np.argmin(ys))]
 
 
 def parse_task_side(task: str | None) -> str | None:
@@ -183,6 +229,26 @@ def parse_task_side(task: str | None) -> str | None:
     if "right" in t:
         return "right"
     return None
+
+
+def halo_from_candidate(
+    points_base: np.ndarray,
+    cand: tuple[np.ndarray, np.ndarray] | None,
+    halo_scale: float = 1.0,
+    min_radius: float = 0.02,
+    max_radius: float = 0.25,
+) -> HaloResult:
+    """Size a halo around an already-selected candidate (anchor, in_box_mask)."""
+    n = len(points_base)
+    if cand is None:
+        return HaloResult(np.zeros(n, dtype=bool), None, 0.0, 0)
+    anchor, mask = cand
+    pts = np.asarray(points_base, dtype=np.float64)
+    in_box_pts = pts[mask]
+    spread = float(np.sqrt(np.mean(np.sum((in_box_pts - anchor) ** 2, axis=1))))
+    radius = float(np.clip(halo_scale * spread, min_radius, max_radius))
+    roi = np.linalg.norm(pts - anchor, axis=1) <= radius
+    return HaloResult(roi, anchor.astype(np.float32), radius, int(mask.sum()))
 
 
 def build_halo_roi(

@@ -13,8 +13,10 @@ lerobot_datasets:
     root: robot_data/robocasa365/lerobot_point_lmdb
     class_name: LeRobotPointCloudDataset
 
-    select_video_keys: [observation.images.left_image]
-    video_key_ids_for_vlm: [0]
+    # All three cameras go to the VLM (matches the uniform baseline config).
+    # video_key_ids_for_vlm indexes into select_video_keys: [0,1,2] = all three.
+    select_video_keys: [observation.images.left_image, observation.images.right_image, observation.images.wrist_image]
+    video_key_ids_for_vlm: [0, 1, 2]
 
     select_state_keys: [observation.state]
     select_action_keys: [action]
@@ -41,8 +43,8 @@ lerobot_datasets:
     # when the tight halo holds fewer points, the guarded split takes all of them and
     # tops up from background, so the total stays exactly 4096.
     roi_ratio: 0.7
-    # Extra radius scaling on top of the cached halo (cache built with halo_scale=0.5,
-    # already ~4x tighter than the first pass). Runtime knob — no rebuild needed.
+    # Extra radius scaling on top of the cached halo (cache built with halo_scale=1.0).
+    # Runtime knob — changing it needs no rebuild.
     roi_radius_scale: 1.0
     # "hard": sharp ball. "soft": Gaussian falloff, no boundary artifact.
     roi_mode: hard

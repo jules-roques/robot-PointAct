@@ -4,7 +4,7 @@ Runs in the ROI preproc env (torch + ultralytics, H100). For each stored frame:
   1. load the base-frame point cloud from the points LMDB (same key/order as training),
   2. decode the left/right RGB frame from the episode mp4,
   3. detect drawers with a YOLO-World checkpoint pre-baked for "drawer",
-  4. keep the box on the side named by the instruction ("Open the left/right drawer."),
+  4. build a 3D anchor per box and keep the drawer the instruction names (3D side test),
   5. reproject the cloud, take the in-box epicenter, size the halo,
   6. write (anchor_xyz, radius, n_in_box) under the identical `ep-frame` key.
 
@@ -29,9 +29,10 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from pointact.roi_sampling.geometry import (
-    build_halo_roi,
+    candidate_anchors,
+    halo_from_candidate,
     parse_task_side,
-    select_box_by_side,
+    select_anchor_by_side,
 )
 
 msgpack_numpy.patch()
@@ -116,9 +117,7 @@ def main() -> None:
     # candidates so the instructed side ("left"/"right") can pick the correct drawer.
     ap.add_argument("--conf", type=float, default=0.02)
     ap.add_argument("--max-det", type=int, default=5)
-    # halo_scale 0.5 (was 2.0) tightens the halo ~4x toward the handle rather than the
-    # whole drawer front; min/max radius shrink accordingly.
-    ap.add_argument("--halo-scale", type=float, default=0.5)
+    ap.add_argument("--halo-scale", type=float, default=1.0)
     ap.add_argument("--min-radius", type=float, default=0.02)
     ap.add_argument("--max-radius", type=float, default=0.25)
     ap.add_argument("--min-in-box", type=int, default=20)
@@ -176,17 +175,18 @@ def main() -> None:
                         continue
                     cloud = msgpack.unpackb(bytes(buf)).astype(np.float32)
                     pts = cloud[:, :3]
-                    # Keep only the box on the instructed side, per camera.
-                    dets = {
-                        "left": select_box_by_side(left_boxes[f], side),
-                        "right": select_box_by_side(right_boxes[f], side),
-                    }
-                    res = build_halo_roi(
-                        pts, cams, dets, image_hw,
+                    # One 3D anchor per detected box, then pick the drawer the
+                    # instruction names by comparing candidates in the base frame.
+                    dets = {"left": left_boxes[f], "right": right_boxes[f]}
+                    cands = candidate_anchors(
+                        pts, cams, dets, image_hw, min_in_box=args.min_in_box
+                    )
+                    cand = select_anchor_by_side(cands, side)
+                    res = halo_from_candidate(
+                        pts, cand,
                         halo_scale=args.halo_scale,
                         min_radius=args.min_radius,
                         max_radius=args.max_radius,
-                        min_in_box=args.min_in_box,
                     )
                     if res.anchor is None:
                         record = np.array([0, 0, 0, 0, res.n_in_box], dtype=ROI_RECORD_DTYPE)
