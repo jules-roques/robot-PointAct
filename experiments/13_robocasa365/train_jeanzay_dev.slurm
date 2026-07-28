@@ -111,7 +111,15 @@ fi
 # the log agree with the real output_dir instead of duplicating its naming rules here.
 OUTPUT_DIR=$(POINTACT_PRINT_OUTPUT_DIR=1 bash "$SCRIPT" | tail -1)
 
+# Every 2 h slice is a fresh process, so wandb.init() would mint a NEW run id each time and
+# scatter one training run's curves across a dozen W&B runs. Pin a stable id derived from the
+# output_dir (unique per arm, unchanged across the chain) and let wandb resume it, so all
+# slices append to a single continuous curve. This only affects logging, never training.
+export WANDB_RUN_ID="chain-$(printf '%s' "$(basename "${OUTPUT_DIR}")" | md5sum | cut -c1-12)"
+export WANDB_RESUME=allow
+
 echo "host=$(hostname) variant=${VARIANT} chain_remaining=${CHAIN_REMAINING}"
+echo "wandb_run_id=${WANDB_RUN_ID} (resume=${WANDB_RESUME})"
 echo "gpus=${GPUS} per_device_bs=${PER_DEVICE_BATCH_SIZE} grad_accum=${GRAD_ACCUM}" \
      "-> effective batch ${EFFECTIVE_BATCH}"
 echo "output_dir=${OUTPUT_DIR}"
