@@ -1,0 +1,56 @@
+# Oracle variant of data-robocasa365-opendrawer-point.yaml.
+# IDENTICAL to the baseline config except for the oracle_* fields at the bottom, which replace
+# the dataloader's uniform subsample with a guarded split that spends most of the 4096-point
+# budget on points the simulator says belong to the drawer front and its handle.
+#
+# This is the UPPER BOUND for the sampling ablations, not a deployable policy: the labels are
+# simulator-privileged information used only to choose which points to keep. If a perfect ROI
+# does not beat uniform sampling here, no learned/detected ROI (see the roi and eefdensity
+# configs) can be expected to either.
+#
+# Needs the label LMDB from:
+#   replay.py --labels-only  ->  export_point_labels.py
+
+mm_datasets:
+
+lerobot_datasets:
+
+  - repo_id: OpenDrawer
+    root: robot_data/robocasa365/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+
+    # The VLM sees both external agentview cameras for scene context, but NOT the
+    # egocentric wrist view (matches the uniform baseline config).
+    select_video_keys: [observation.images.left_image, observation.images.right_image]
+    video_key_ids_for_vlm: [0, 1]
+
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+
+    converted_rot_type: rot6d  # euler, rot6d
+    is_delta_action: False
+
+    points_workspace: {
+      'X_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Y_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Z_BBOX': [0.0, 1.0],    # 0 = floor
+    }
+
+    max_npoints: 4096
+    augment_pc_rot: 30
+    point_cloud_dirname: points_3views
+
+    state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+
+    # --- Oracle sampling (the only difference vs. the baseline config) ---
+    oracle_sampling: True
+    oracle_label_dirname: points_3views_labels
+    # 3 = drawer/door front panel, 4 = its handle. Deliberately NOT 2 (the rest of the target
+    # fixture): the fixture body spans the whole cabinet stack, so including it would make the
+    # "ROI" almost as diffuse as the background and blunt the comparison.
+    oracle_roi_labels: [3, 4]
+    # Share of the budget reserved for ROI points. Matches the ROI config's ratio so the two
+    # differ only in how the ROI is obtained (ground truth vs. detector). Door+handle is only
+    # ~4.5-9% of points, so this is capped by availability in practice: the split takes every
+    # ROI point available and fills the remainder from the background.
+    oracle_ratio: 0.6

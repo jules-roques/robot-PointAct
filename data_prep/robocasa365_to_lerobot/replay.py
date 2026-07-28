@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation as R
 from tqdm.auto import tqdm
 
+from data_prep.robocasa365_to_lerobot.voxel_keys import voxel_keys_for_points
 from pointact.robot_envs.robocasa365_utils.environments import (
     NUM_POINT_LABELS,
     RoboCasa365Env,
@@ -51,6 +52,10 @@ def episode_points_path(cache_dir: Path, episode_index: int) -> Path:
 
 def episode_point_labels_path(cache_dir: Path, episode_index: int) -> Path:
     return cache_dir / "episodes" / f"episode_{episode_index:06d}_point_labels.npy"
+
+
+def episode_voxel_keys_path(cache_dir: Path, episode_index: int) -> Path:
+    return cache_dir / "episodes" / f"episode_{episode_index:06d}_voxel_keys.npy"
 
 
 def get_episode_parquet_path(input_dir: Path, episode_index: int) -> Path:
@@ -380,6 +385,7 @@ def replay_episode(
     dones = []
     point_clouds = []
     point_labels: list[np.ndarray] = []
+    point_voxel_keys: list[np.ndarray] = []
     point_counts = []
     success = False
     success_frame = -1
@@ -407,6 +413,7 @@ def replay_episode(
         point_clouds.append(point_cloud)
         if collect_labels:
             point_labels.append(frame_labels)
+            point_voxel_keys.append(voxel_keys_for_points(point_cloud[:, :3], voxel_size))
         point_counts.append(int(len(point_cloud)))
 
         obs, reward, done, info = robocasa_env.step(action_env)
@@ -438,6 +445,7 @@ def replay_episode(
             point_clouds.append(point_cloud)
             if collect_labels:
                 point_labels.append(frame_labels)
+                point_voxel_keys.append(voxel_keys_for_points(point_cloud[:, :3], voxel_size))
             point_counts.append(int(len(point_cloud)))
 
             # The terminal observation has no source action; repeat terminal flags and
@@ -511,6 +519,17 @@ def replay_episode(
                 f"labels={len(point_label_values)} points={len(point_cloud_points)}"
             )
         np.save(episode_point_labels_path(cache_dir, episode_index), point_label_values)
+
+        if point_voxel_keys:
+            voxel_key_values = np.concatenate(point_voxel_keys, axis=0).astype(np.int32, copy=False)
+        else:
+            voxel_key_values = np.empty((0,), dtype=np.int32)
+        if len(voxel_key_values) != len(point_label_values):
+            raise RuntimeError(
+                f"Voxel key count mismatch for episode {episode_index}: "
+                f"keys={len(voxel_key_values)} labels={len(point_label_values)}"
+            )
+        np.save(episode_voxel_keys_path(cache_dir, episode_index), voxel_key_values)
 
     return {
         "episode_index": episode_index,
