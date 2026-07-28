@@ -51,6 +51,19 @@ Writes `OpenDrawer/points_3views_roi` (bit-packed per-point flags, same keys/ord
 Open the HTML locally; dropdown switches frames, legend toggles background / ROI /
 post-sample.
 
+### Gate — per-episode animation, one file per strategy
+```bash
+uv run --no-sync python -m data_prep.roi_sampling.viz_sampling_episode \
+  --dataset-dir $SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer \
+  --episode 0 --method all --out-dir /scratch/$USER/viz
+```
+Writes `sampling_ep0000_{uniform,eef,roi}.html`: the *same* episode and clouds under each
+strategy, animated over the episode (play/pause + frame slider) so you can watch where the
+4096-point budget goes as the arm approaches and pulls. Needs only the training env and
+`points_3views` — the ROI halo is recomputed on the fly from proprioception (see
+`build_roi_cache_proprio.py`), so no ROI cache is required. Point count is deterministic
+here (no 0.8-1.0 jitter) so frames and strategies compare frame-for-frame.
+
 ### Train
 ```bash
 module load arch/h100
