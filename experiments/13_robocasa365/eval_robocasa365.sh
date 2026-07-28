@@ -20,9 +20,16 @@ port=$((10000 + RANDOM % 10000))
 seed=7
 num_denoise_steps=10
 
-# $HOME differs per cluster but "code/robot-PointAct" underneath it doesn't, so this resolves
-# correctly on both Jean Zay and CLEPS without editing this file per-cluster.
-REPO="$HOME/code/robot-PointAct"
+# The checkout is at $HOME/code on CLEPS but $WORK/code on Jean Zay, so probe rather than
+# assume (the previous $HOME-only form simply failed on Jean Zay).
+REPO=""
+for candidate in "${SLURM_SUBMIT_DIR:-}" "$PWD" "$HOME/code/robot-PointAct" "${WORK:-}/code/robot-PointAct"; do
+    if [ -n "$candidate" ] && [ -d "$candidate/experiments/13_robocasa365" ]; then
+        REPO="$candidate"
+        break
+    fi
+done
+[ -z "$REPO" ] && { echo "Could not locate the robot-PointAct checkout" >&2; exit 1; }
 cd "$REPO"
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
@@ -56,11 +63,43 @@ is_used() { lsof -i TCP:$1 >/dev/null 2>&1; }
 while is_used "$port"; do port=$((10000 + RANDOM % 10000)); done
 echo "port=$port"
 
+# --- How was this checkpoint trained to sample points? -------------------------------------
+# A policy trained on clouds concentrated near the end-effector or near the task's handle must
+# be evaluated the same way; sampling uniformly instead is a train/test mismatch that looks
+# like a drop in success rate. Derive it from the run's own training_args.json -> data config
+# rather than relying on the caller to pass a matching flag by hand.
+POINT_SAMPLING="${POINT_SAMPLING:-}"
+ORACLE_ANCHOR=""
+if [ -z "$POINT_SAMPLING" ]; then
+    DATA_CFG=$(python3 -c "
+import json,sys
+try:
+    print(json.load(open('${ckpt_dir}/training_args.json')).get('data_path',''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [ -n "$DATA_CFG" ] && [ -f "$DATA_CFG" ]; then
+        if grep -qE '^\s*oracle_sampling:\s*True' "$DATA_CFG"; then
+            POINT_SAMPLING=anchor
+        elif grep -qE '^\s*eef_sampling:\s*True' "$DATA_CFG"; then
+            POINT_SAMPLING=eef
+        else
+            POINT_SAMPLING=uniform
+        fi
+        echo "derived point_sampling=${POINT_SAMPLING} from ${DATA_CFG}"
+    else
+        POINT_SAMPLING=uniform
+        echo "WARNING: no data config found for ${ckpt_dir}; defaulting to uniform sampling" >&2
+    fi
+fi
+[ "$POINT_SAMPLING" = "anchor" ] && ORACLE_ANCHOR="--args.oracle_anchor"
+
 # --- Policy server (pointact / root env) ---
 uv run --no-sync scripts/run_server.py \
     --args.seed ${seed} \
     --args.pretrained_path ${ckpt_dir}/checkpoint-${ckpt_step} \
     --args.num_denoise_steps ${num_denoise_steps} \
+    --args.point_sampling ${POINT_SAMPLING} \
     --args.host ${host} --args.port ${port} &
 SERVER_PID=$!
 echo "Server started, PID=$SERVER_PID"
@@ -77,6 +116,7 @@ uv run --project envs/robocasa365 --no-sync \
     --args.replan_steps 8 \
     --args.use_depth \
     --args.save_dir ${ckpt_dir}/results/checkpoint-${ckpt_step} \
+    ${ORACLE_ANCHOR} \
     ${options}
 
 echo ${ckpt_dir}/checkpoint-${ckpt_step}
