@@ -21,6 +21,7 @@ way training curves would not reveal.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import lmdb
@@ -37,22 +38,49 @@ NUM_POINT_LABELS = 5
 LABEL_NAMES = ["background", "robot", "target_other", "target_door", "target_handle"]
 
 
-def cached_episodes(cache_dirs: list[Path]) -> list[tuple[int, Path]]:
-    """(source episode index, episodes dir) for every cached episode, in source order.
+def dataset_episode_order(dataset_dir: Path, cache_dirs: list[Path]) -> list[tuple[int, Path]]:
+    """(source episode index, episodes dir) for each dataset episode, in DATASET index order.
 
-    Replay can be sharded across array tasks writing separate cache dirs; the dataset's episode
-    index is the rank among ALL successfully replayed episodes in source order, so the shards
-    have to be pooled and sorted before enumerating, not concatenated dir by dir.
+    The dataset's episode numbering is neither the source numbering nor sorted source order: it
+    follows the order episodes appear in the dataset's own replay_summary.jsonl, filtered to the
+    successful ones (the failures were dropped at conversion). Verified on OpenDrawer, where
+    that ordering reproduces all 496 episode lengths *and* all 496 task strings exactly, while
+    sorted-source order reproduces neither. Guessing this wrong would shift every key.
     """
-    found: dict[int, Path] = {}
+    summary_path = dataset_dir / "replay_summary.jsonl"
+    if not summary_path.exists():
+        raise SystemExit(
+            f"{summary_path} is missing; it is the only record of how source episodes map onto "
+            f"dataset episode indices."
+        )
+    with summary_path.open() as f:
+        summaries = [json.loads(line) for line in f if line.strip()]
+    successful = [s for s in summaries if s.get("success")]
+
+    # Where each source episode's labels were cached (replay may have been sharded).
+    located: dict[int, Path] = {}
     for cache_dir in cache_dirs:
         episodes_dir = cache_dir / "episodes"
         for path in episodes_dir.glob("episode_*.npz"):
             index = int(path.stem.split("_")[-1])
-            if index in found:
-                raise SystemExit(f"episode {index} cached twice: {found[index]} and {episodes_dir}")
-            found[index] = episodes_dir
-    return sorted(found.items())
+            if index in located:
+                raise SystemExit(f"episode {index} cached twice: {located[index]} and {episodes_dir}")
+            located[index] = episodes_dir
+
+    order: list[tuple[int, Path]] = []
+    missing: list[int] = []
+    for entry in successful:
+        source_index = int(entry["episode_index"])
+        if source_index not in located:
+            missing.append(source_index)
+        else:
+            order.append((source_index, located[source_index]))
+    if missing:
+        raise SystemExit(
+            f"{len(missing)} episodes in the dataset have no cached labels (e.g. {missing[:5]}); "
+            f"re-run replay.py --labels-only for them."
+        )
+    return order
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,10 +111,10 @@ def main() -> None:
     )
     points_txn = points_env.begin(buffers=True)
 
-    episodes = cached_episodes(cache_dirs)
+    episodes = dataset_episode_order(dataset_dir, cache_dirs)
     if not episodes:
         raise SystemExit(f"No cached episodes under {[str(d) for d in cache_dirs]}")
-    print(f"{len(episodes)} cached episodes from {len(cache_dirs)} dir(s) "
+    print(f"{len(episodes)} dataset episodes (from {len(cache_dirs)} cache dir(s)) "
           f"-> dataset indices 0..{len(episodes) - 1}")
 
     label_env = lmdb.open(str(dataset_dir / label_dirname), map_size=int(args.lmdb_map_size))
