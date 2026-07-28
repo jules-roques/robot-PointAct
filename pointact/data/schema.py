@@ -69,14 +69,18 @@ class LerobotConfig:
     eef_sampling_sigma: float = 0.08
     eef_sampling_floor: float = 0.05
 
-    # Oracle point sampling (optional): simulator ground-truth labels as a perfect ROI mask,
-    # i.e. the upper bound on what any learned sampler could buy. `oracle_label_dirname` is the
-    # per-point label LMDB (under `root`) written by convert.py --point-labels.
+    # Oracle point sampling (optional): the upper bound on what any learned sampler could buy.
+    # Same Gaussian-with-floor density as eef_sampling above, but centred on the handle the
+    # gripper is reaching for rather than on the gripper, so the two arms differ only in the
+    # anchor. `oracle_label_dirname` is the per-point label LMDB (under `root`) written by
+    # convert.py --point-labels.
     # Labels: 0 background, 1 robot, 2 target fixture, 3 target door/drawer panel, 4 handle.
     oracle_sampling: bool = False
     oracle_label_dirname: str | None = None
-    oracle_roi_labels: tuple[int, ...] = (3, 4)
-    oracle_ratio: float = 0.6
+    oracle_anchor_labels: tuple[int, ...] = (4,)
+    oracle_anchor_fallback_labels: tuple[int, ...] = (3,)
+    oracle_sampling_sigma: float = 0.08
+    oracle_sampling_floor: float = 0.05
 
     image_size: int | None = None
 

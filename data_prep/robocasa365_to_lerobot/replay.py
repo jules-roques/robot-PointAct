@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation as R
 from tqdm.auto import tqdm
 
-from data_prep.robocasa365_to_lerobot.voxel_keys import voxel_keys_for_points
+from data_prep.robocasa365_to_lerobot.voxel_keys import pack_voxel_keys, voxel_keys_for_points
 from pointact.robot_envs.robocasa365_utils.environments import (
     NUM_POINT_LABELS,
     RoboCasa365Env,
@@ -255,21 +255,35 @@ def voxel_downsample(
         return point_cloud.astype(np.float32, copy=False), labels
 
     voxel_indices = np.floor(point_cloud[:, :3] / float(voxel_size)).astype(np.int64)
-    _, inverse, counts = np.unique(voxel_indices, axis=0, return_inverse=True, return_counts=True)
-    sums = np.zeros((len(counts), point_cloud.shape[1]), dtype=np.float64)
-    np.add.at(sums, inverse, point_cloud.astype(np.float64))
-    merged = (sums / counts[:, None]).astype(np.float32)
+    # Group on a packed 1-D key rather than np.unique(..., axis=0), which lexsorts an (N, 3)
+    # array and dominated replay time (~207 ms/frame vs ~23 ms here, i.e. more than the physics
+    # step itself). The packing is order-preserving, so groups, ordering and output are
+    # unchanged -- asserted bit-identical in the voxel-label tests.
+    keys = pack_voxel_keys(voxel_indices)
+    _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
+    # numpy's `return_inverse` shape has changed across 2.x releases; ravel to be safe.
+    inverse = np.ravel(inverse)
+    n_voxels = len(counts)
+
+    # bincount reductions instead of np.add.at, which falls back to an unbuffered slow path.
+    merged = np.empty((n_voxels, point_cloud.shape[1]), dtype=np.float32)
+    for column in range(point_cloud.shape[1]):
+        merged[:, column] = (
+            np.bincount(
+                inverse, weights=point_cloud[:, column].astype(np.float64), minlength=n_voxels
+            )
+            / counts
+        ).astype(np.float32)
 
     if labels is None:
         return merged, None
 
     # A voxel can straddle an object boundary, so take the majority label among its points.
-    # numpy's `return_inverse` shape has changed across 2.x releases; ravel to be safe.
-    inverse = np.ravel(inverse)
-    votes = np.zeros((len(counts), NUM_POINT_LABELS), dtype=np.int64)
-    np.add.at(votes, (inverse, labels.astype(np.int64)), 1)
+    votes = np.zeros((n_voxels, NUM_POINT_LABELS), dtype=np.int64)
+    for label in range(NUM_POINT_LABELS):
+        votes[:, label] = np.bincount(inverse[labels == label], minlength=n_voxels)
     # Ties go to the higher label id so boundary voxels keep the task-relevant label
-    # (TARGET/ROBOT) rather than decaying to BACKGROUND.
+    # (handle > door > fixture > robot) rather than decaying to BACKGROUND.
     ranked = votes * NUM_POINT_LABELS + np.arange(NUM_POINT_LABELS)
     return merged, ranked.argmax(axis=1).astype(np.uint8)
 
@@ -295,11 +309,26 @@ def save_episode_cache(path: Path, episode: dict[str, Any], compress: bool) -> N
 def load_completed_episode_summary(
     cache_dir: Path,
     episode_index: int,
+    labels_only: bool = False,
 ) -> dict[str, Any] | None:
+    """Summary of an already-cached episode, or None if it must be (re)replayed.
+
+    In --labels-only mode the images and the point clouds are deliberately not written, so
+    completeness is judged on the label and voxel-key arrays instead; checking for the points
+    file there would make --resume redo every episode.
+    """
     cache_path = episode_cache_path(cache_dir, episode_index)
-    points_path = episode_points_path(cache_dir, episode_index)
-    if not cache_path.exists() or not points_path.exists():
+    if not cache_path.exists():
         return None
+    if labels_only:
+        if not (
+            episode_point_labels_path(cache_dir, episode_index).exists()
+            and episode_voxel_keys_path(cache_dir, episode_index).exists()
+        ):
+            return None
+    elif not episode_points_path(cache_dir, episode_index).exists():
+        return None
+    points_path = episode_points_path(cache_dir, episode_index)
 
     try:
         with np.load(cache_path, allow_pickle=True) as data:
@@ -311,7 +340,7 @@ def load_completed_episode_summary(
                 "next_done",
                 "point_counts",
                 "point_cloud_offsets",
-                *{f"image_{camera_name}" for camera_name in CAMERA_NAMES},
+                *({} if labels_only else {f"image_{camera_name}" for camera_name in CAMERA_NAMES}),
             }
             if not required_keys.issubset(files):
                 return None
@@ -328,15 +357,28 @@ def load_completed_episode_summary(
                 "next_reward": len(rewards),
                 "next_done": len(dones),
                 "point_counts": len(point_counts),
-                **{f"image_{camera_name}": len(data[f"image_{camera_name}"]) for camera_name in CAMERA_NAMES},
+                **({} if labels_only else {
+                    f"image_{camera_name}": len(data[f"image_{camera_name}"])
+                    for camera_name in CAMERA_NAMES
+                }),
             }
             if len(set(lengths.values())) != 1:
                 return None
 
             replay_length = len(states)
-            point_cloud_points = np.load(points_path, mmap_mode="r")
-            if point_cloud_points.ndim != 2 or point_cloud_points.shape[1] != 6:
-                return None
+            if labels_only:
+                labels = np.load(
+                    episode_point_labels_path(cache_dir, episode_index), mmap_mode="r"
+                )
+                keys = np.load(
+                    episode_voxel_keys_path(cache_dir, episode_index), mmap_mode="r"
+                )
+                if len(labels) != int(point_cloud_offsets[-1]) or len(keys) != len(labels):
+                    return None
+            else:
+                point_cloud_points = np.load(points_path, mmap_mode="r")
+                if point_cloud_points.ndim != 2 or point_cloud_points.shape[1] != 6:
+                    return None
             if len(point_cloud_offsets) != replay_length + 1:
                 return None
             if int(point_cloud_offsets[0]) != 0 or int(point_cloud_offsets[-1]) != len(point_cloud_points):
@@ -620,6 +662,7 @@ def main() -> None:
                 cached_summary = load_completed_episode_summary(
                     cache_dir=cache_dir,
                     episode_index=episode_index,
+                    labels_only=args.labels_only,
                 )
                 if cached_summary is not None:
                     episode_iter.set_postfix(

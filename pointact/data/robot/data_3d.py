@@ -82,16 +82,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         eef_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
         eef_sampling_floor: float = 0.05,   # minimum weight at infinite distance
         # Oracle sampling (optional): the upper bound on what any learned sampler could buy.
-        # Reads simulator ground-truth per-point labels from a sibling LMDB (same keys/order
-        # as the point LMDB, written by convert.py --point-labels) and spends the budget on the
-        # labels named in oracle_roi_labels via the same guarded split the ROI path uses.
-        # Privileged information: preprocessing only, never an input to the policy.
+        # Uses the SAME Gaussian-with-floor density as eef_sampling above, so the two arms
+        # differ only in where the bump is centred: the gripper (eef_sampling) vs. the handle
+        # it is reaching for (here). The anchor is the centroid of the points the simulator
+        # labels as the handle, read from a sibling label LMDB written by convert.py
+        # --point-labels. Privileged information: preprocessing only, never a policy input.
         oracle_sampling: bool = False,
         oracle_label_dirname: str | None = None,
-        # Default (3, 4) = the drawer/door front panel plus its handle, i.e. what the gripper
-        # actually interacts with, rather than the whole cabinet fixture.
-        oracle_roi_labels: tuple[int, ...] = (3, 4),
-        oracle_ratio: float = 0.6,
+        # Labels whose centroid anchors the Gaussian. Default (4,) = the handle alone.
+        oracle_anchor_labels: tuple[int, ...] = (4,),
+        # Used when no anchor-labelled point is visible this frame (the handle can be occluded
+        # by the gripper or face away): default (3,) = the drawer front panel it sits on.
+        oracle_anchor_fallback_labels: tuple[int, ...] = (3,),
+        oracle_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
+        oracle_sampling_floor: float = 0.05,   # minimum weight at infinite distance
         **kwargs,
     ):
         super().__init__(
@@ -146,8 +150,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.eef_sampling_floor = eef_sampling_floor
 
         self.oracle_sampling = oracle_sampling
-        self.oracle_roi_labels = tuple(int(label) for label in oracle_roi_labels)
-        self.oracle_ratio = oracle_ratio
+        self.oracle_anchor_labels = tuple(int(label) for label in oracle_anchor_labels)
+        self.oracle_anchor_fallback_labels = tuple(
+            int(label) for label in oracle_anchor_fallback_labels
+        )
+        self.oracle_sampling_sigma = oracle_sampling_sigma
+        self.oracle_sampling_floor = oracle_sampling_floor
         if oracle_sampling and oracle_label_dirname is None:
             raise ValueError("oracle_sampling requires oracle_label_dirname")
         self.oracle_label_dir = (
@@ -353,6 +361,22 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             return None
         return rec[:3].astype(np.float64), float(rec[3])
 
+    def oracle_anchor(self, point_cloud: np.ndarray, point_labels: np.ndarray):
+        """Centroid of the ground-truth handle points, or None if nothing usable is visible.
+
+        The handle is a small compact cluster (a few cm across), so its centroid is a good
+        Gaussian centre. It can be occluded by the gripper or face away from every camera, in
+        which case we fall back to the drawer panel it sits on rather than to no guidance at
+        all; only when neither is visible does the caller revert to a uniform draw.
+        """
+        for labels in (self.oracle_anchor_labels, self.oracle_anchor_fallback_labels):
+            if not labels:
+                continue
+            mask = np.isin(point_labels, labels)
+            if mask.any():
+                return point_cloud[mask, :3].mean(axis=0).astype(np.float64)
+        return None
+
     def augment_point_cloud(
         self,
         point_cloud: np.ndarray,
@@ -366,16 +390,17 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if len(point_cloud) > max_npoints:
             ridxs = None
             if self.oracle_sampling and point_labels is not None:
-                # Perfect ROI mask: the same guarded split the ROI path uses, but with a
-                # ground-truth mask instead of a detected one. Frames where the target is
-                # absent or fills the view fall through to the uniform draw below, exactly
-                # as an unusable halo does.
-                mask = np.isin(point_labels, self.oracle_roi_labels)
-                if mask.any() and not mask.all():
+                # Same Gaussian-with-floor density as the eef arm, centred on the handle the
+                # gripper is reaching for instead of on the gripper itself. Frames with no
+                # visible anchor fall through to the uniform draw below.
+                anchor = self.oracle_anchor(point_cloud, point_labels)
+                if anchor is not None:
                     rng = np.random.default_rng(np.random.randint(2**31 - 1))
-                    ridxs = roi_guided_indices(
-                        len(point_cloud), max_npoints, mask, self.oracle_ratio, rng
+                    w = eef_density_weights(
+                        point_cloud[:, :3], anchor,
+                        self.oracle_sampling_sigma, self.oracle_sampling_floor,
                     )
+                    ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
             elif self.eef_sampling:
                 rng = np.random.default_rng(np.random.randint(2**31 - 1))
                 eef_pos = item[OBS_STATE][:3].numpy()
