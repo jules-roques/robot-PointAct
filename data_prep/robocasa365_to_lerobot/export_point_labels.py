@@ -38,8 +38,10 @@ NUM_POINT_LABELS = 5
 LABEL_NAMES = ["background", "robot", "target_other", "target_door", "target_handle"]
 
 
-def dataset_episode_order(dataset_dir: Path, cache_dirs: list[Path]) -> list[tuple[int, Path]]:
-    """(source episode index, episodes dir) for each dataset episode, in DATASET index order.
+def dataset_episode_order(
+    dataset_dir: Path, cache_dirs: list[Path]
+) -> list[tuple[int, Path, int]]:
+    """(source episode index, episodes dir, dataset frame count) in DATASET index order.
 
     The dataset's episode numbering is neither the source numbering nor sorted source order: it
     follows the order episodes appear in the dataset's own replay_summary.jsonl, filtered to the
@@ -57,6 +59,19 @@ def dataset_episode_order(dataset_dir: Path, cache_dirs: list[Path]) -> list[tup
         summaries = [json.loads(line) for line in f if line.strip()]
     successful = [s for s in summaries if s.get("success")]
 
+    # The dataset's own episode lengths are authoritative for how many frames to label. A
+    # replay can end a step or two later than the original one did (success is checked per
+    # step and the sim is not bit-deterministic across machines), so the cache may hold a few
+    # trailing frames the dataset never kept.
+    episodes_meta_path = dataset_dir / "meta" / "episodes.jsonl"
+    with episodes_meta_path.open() as f:
+        dataset_lengths = [json.loads(line)["length"] for line in f if line.strip()]
+    if len(dataset_lengths) != len(successful):
+        raise SystemExit(
+            f"{len(successful)} successful episodes in replay_summary.jsonl but "
+            f"{len(dataset_lengths)} in meta/episodes.jsonl; the mapping is not trustworthy."
+        )
+
     # Where each source episode's labels were cached (replay may have been sharded).
     located: dict[int, Path] = {}
     for cache_dir in cache_dirs:
@@ -67,14 +82,14 @@ def dataset_episode_order(dataset_dir: Path, cache_dirs: list[Path]) -> list[tup
                 raise SystemExit(f"episode {index} cached twice: {located[index]} and {episodes_dir}")
             located[index] = episodes_dir
 
-    order: list[tuple[int, Path]] = []
+    order: list[tuple[int, Path, int]] = []
     missing: list[int] = []
-    for entry in successful:
+    for entry, n_frames in zip(successful, dataset_lengths):
         source_index = int(entry["episode_index"])
         if source_index not in located:
             missing.append(source_index)
         else:
-            order.append((source_index, located[source_index]))
+            order.append((source_index, located[source_index], n_frames))
     if missing:
         raise SystemExit(
             f"{len(missing)} episodes in the dataset have no cached labels (e.g. {missing[:5]}); "
@@ -95,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lmdb-map-size", type=int, default=int(1024**4))
     parser.add_argument("--lmdb-commit-every", type=int, default=200)
     parser.add_argument("--voxel-size", type=float, default=0.01)
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Re-export episodes whose labels are already written.")
     parser.add_argument("--max-unmatched-frac", type=float, default=1e-3,
                         help="Abort if more than this fraction of points fail to join.")
     return parser
@@ -120,23 +137,39 @@ def main() -> None:
     label_env = lmdb.open(str(dataset_dir / label_dirname), map_size=int(args.lmdb_map_size))
 
     totals = np.zeros(NUM_POINT_LABELS, dtype=np.int64)
-    n_frames = 0
+    n_frames_written = 0
     n_points_total = 0
     n_unmatched_total = 0
+    n_skipped = 0
     worst_frame = (0.0, None)
     txn = label_env.begin(write=True)
     pending = 0
     try:
-        for dataset_index, (source_index, episodes_dir) in enumerate(
+        for dataset_index, (source_index, episodes_dir, n_frames) in enumerate(
             tqdm(episodes, desc="episodes", unit="ep", dynamic_ncols=True)
         ):
+            # Resume: an episode whose last frame is already written was finished by a previous
+            # run. Re-reading it would cost a full pass over its clouds for nothing.
+            if not args.no_resume:
+                with label_env.begin() as probe:
+                    if probe.get(f"{dataset_index}-{n_frames - 1}".encode("ascii")) is not None:
+                        n_skipped += 1
+                        continue
+
             stem = f"episode_{source_index:06d}"
             with np.load(episodes_dir / f"{stem}.npz", allow_pickle=True) as data:
                 offsets = data["point_cloud_offsets"].astype(np.int64)
             labels = np.load(episodes_dir / f"{stem}_point_labels.npy", mmap_mode="r")
             keys = np.load(episodes_dir / f"{stem}_voxel_keys.npy", mmap_mode="r")
 
-            for frame_index in range(len(offsets) - 1):
+            n_cached = len(offsets) - 1
+            if n_cached < n_frames:
+                raise SystemExit(
+                    f"source episode {source_index} -> dataset episode {dataset_index}: cache "
+                    f"has {n_cached} frames but the dataset has {n_frames}; re-replay it."
+                )
+
+            for frame_index in range(n_frames):
                 key = f"{dataset_index}-{frame_index}".encode("ascii")
                 buf = points_txn.get(key)
                 if buf is None:
@@ -171,7 +204,7 @@ def main() -> None:
 
                 txn.put(key, msgpack.packb(frame_labels))
                 totals += np.bincount(frame_labels, minlength=NUM_POINT_LABELS)
-                n_frames += 1
+                n_frames_written += 1
 
                 pending += 1
                 if args.lmdb_commit_every > 0 and pending >= args.lmdb_commit_every:
@@ -188,7 +221,8 @@ def main() -> None:
 
     total_points = int(totals.sum())
     unmatched_frac = n_unmatched_total / max(n_points_total, 1)
-    print(f"\nwrote {n_frames} frames / {total_points} points to {dataset_dir / label_dirname}")
+    print(f"\nwrote {n_frames_written} frames / {total_points} points to "
+          f"{dataset_dir / label_dirname} ({n_skipped} episodes already present)")
     print(f"  unmatched points: {n_unmatched_total}/{n_points_total} ({unmatched_frac:.2e}); "
           f"worst frame {worst_frame[1]} at {worst_frame[0]:.2e}")
     if unmatched_frac > args.max_unmatched_frac:
