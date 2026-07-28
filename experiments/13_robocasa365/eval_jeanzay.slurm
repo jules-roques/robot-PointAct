@@ -46,7 +46,7 @@ if [ -z "$REPO" ]; then
 fi
 cd "$REPO"
 
-RUN_DIR="${RUN_DIR:-$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-data-robocasa365-opendrawer-point-rot6d-image.leftright_ck16_lr5e-5_gpu4_bs32_epoch20-freeze.vlm}"
+RUN_DIR="${RUN_DIR:-$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-data-robocasa365-opendrawer-point-rot6d-image.leftright_ck16_lr5e-5_eb128_epoch20-freeze.vlm}"
 CKPT_DIR="${CKPT_DIR:-$RUN_DIR}"
 CKPT_STEP="${CKPT_STEP:?set CKPT_STEP=<step or final-N> via --export}"
 ENV_NAME="${ENV_NAME:-OpenDrawer}"
