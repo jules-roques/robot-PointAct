@@ -36,7 +36,20 @@ export WANDB_MODE=offline
 export WANDB_DIR="$SCRATCH/wandb"
 mkdir -p "$WANDB_DIR"
 
-REPO="$HOME/code/robot-PointAct"
+# The repo lives at a different place on each cluster ($HOME/code on CLEPS, $WORK/code on
+# Jean Zay), and sbatch is always run from the repo root, so trust the submit dir first and
+# fall back to the known locations. Hardcoding $HOME/code here silently broke Jean Zay jobs.
+REPO=""
+for candidate in "${SLURM_SUBMIT_DIR:-}" "$HOME/code/robot-PointAct" "${WORK:-}/code/robot-PointAct"; do
+    if [ -n "$candidate" ] && [ -d "$candidate/experiments/13_robocasa365" ]; then
+        REPO="$candidate"
+        break
+    fi
+done
+if [ -z "$REPO" ]; then
+    echo "Could not locate the robot-PointAct checkout" >&2
+    exit 1
+fi
 cd "$REPO"
 
 VARIANT="${1:-concerto}"

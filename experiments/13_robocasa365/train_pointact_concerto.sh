@@ -11,8 +11,11 @@ VLM_PATH=${DSDIR:+$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct}
 VLM_PATH=${VLM_PATH:-$SCRATCH/models/Qwen2.5-VL-3B-Instruct}
 
 # Paper: total batch size 128 (kept). Split across 4 H100 x 32 per device for faster wall-clock.
-GPUS=4
-PER_DEVICE_BATCH_SIZE=32
+GPUS=${GPUS:-4}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-32}
+# Effective batch = GPUS x PER_DEVICE_BATCH_SIZE x GRAD_ACCUM. Keep it at 128 across
+# every arm: the ablations are only comparable at equal effective batch.
+GRAD_ACCUM=${GRAD_ACCUM:-1}
 NUM_NODES=${NUM_NODES:-1}
 
 # Build accelerate arguments based on GPU count
@@ -42,12 +45,24 @@ chunk_size=16
 epoch=20
 
 model_name_or_path=
-run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}
+# Name the run by EFFECTIVE batch, not by GPU count x per-device batch. The optimisation
+# depends only on the effective batch, and keeping the name (hence output_dir) stable
+# lets a run resume after being re-submitted on a different number of GPUs -- which is
+# what the dev-QoS chain does when it has to fall back from 4 GPUs to 2 or 1.
+EFFECTIVE_BATCH=$((GPUS * PER_DEVICE_BATCH_SIZE * GRAD_ACCUM))
+run_name=${dataset_name}_ck${chunk_size}_lr${lr}_eb${EFFECTIVE_BATCH}_epoch${epoch}
 
 output_dir=$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-${run_name}-freeze.vlm
 
 # Weights & Biases. On Jean Zay compute nodes (no internet) this logs offline; sync from a
 # login node with `wandb sync` (WANDB_MODE / WANDB_DIR are set by train.slurm).
+# Let a caller (e.g. the chained dev-QoS SLURM script) discover where this run writes without
+# starting it, so the resume/completion logic never has to duplicate the naming rules above.
+if [ "${POINTACT_PRINT_OUTPUT_DIR:-0}" = "1" ]; then
+    echo "${output_dir}"
+    exit 0
+fi
+
 export WANDB_ENTITY=diffusion4robots
 export WANDB_PROJECT=pointact-robocasa365
 export WANDB_NAME=concerto-${run_name}
@@ -80,6 +95,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --fp16 False \
     --num-train-epochs ${epoch} \
     --per-device-train-batch-size ${PER_DEVICE_BATCH_SIZE} \
+    --gradient-accumulation-steps ${GRAD_ACCUM} \
     --learning-rate ${lr} \
     --merger-lr ${mlr} \
     --vision-lr ${vlr} \
@@ -89,8 +105,8 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --gradient-checkpointing True \
     --save-strategy steps \
     --logging-steps 10 \
-    --save-steps 1000 \
-    --save-total-limit 10 \
+    --save-steps ${SAVE_STEPS:-1000} \
+    --save-total-limit ${SAVE_TOTAL_LIMIT:-10} \
     --run-name ${run_name} \
     --attn-implementation flash_attention_2 \
     --log_level info \

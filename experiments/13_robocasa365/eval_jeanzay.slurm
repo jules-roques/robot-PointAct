@@ -30,7 +30,20 @@ set -euo pipefail
 module load arch/a100
 module load ffmpeg/6.1.1
 
-REPO="$HOME/code/robot-PointAct"
+# The repo lives at a different place on each cluster ($HOME/code on CLEPS, $WORK/code on
+# Jean Zay), and sbatch is always run from the repo root, so trust the submit dir first and
+# fall back to the known locations. Hardcoding $HOME/code here silently broke Jean Zay jobs.
+REPO=""
+for candidate in "${SLURM_SUBMIT_DIR:-}" "$HOME/code/robot-PointAct" "${WORK:-}/code/robot-PointAct"; do
+    if [ -n "$candidate" ] && [ -d "$candidate/experiments/13_robocasa365" ]; then
+        REPO="$candidate"
+        break
+    fi
+done
+if [ -z "$REPO" ]; then
+    echo "Could not locate the robot-PointAct checkout" >&2
+    exit 1
+fi
 cd "$REPO"
 
 RUN_DIR="${RUN_DIR:-$SCRATCH/PointAct_exprs/robocasa365/pointact/VLAEncDec3DWithActionRegressionModel-concerto-data-robocasa365-opendrawer-point-rot6d-image.leftright_ck16_lr5e-5_gpu4_bs32_epoch20-freeze.vlm}"
