@@ -37,14 +37,29 @@ NUM_POINT_LABELS = 5
 LABEL_NAMES = ["background", "robot", "target_other", "target_door", "target_handle"]
 
 
-def cached_episode_indices(cache_dir: Path) -> list[int]:
-    files = sorted((cache_dir / "episodes").glob("episode_*.npz"))
-    return [int(path.stem.split("_")[-1]) for path in files]
+def cached_episodes(cache_dirs: list[Path]) -> list[tuple[int, Path]]:
+    """(source episode index, episodes dir) for every cached episode, in source order.
+
+    Replay can be sharded across array tasks writing separate cache dirs; the dataset's episode
+    index is the rank among ALL successfully replayed episodes in source order, so the shards
+    have to be pooled and sorted before enumerating, not concatenated dir by dir.
+    """
+    found: dict[int, Path] = {}
+    for cache_dir in cache_dirs:
+        episodes_dir = cache_dir / "episodes"
+        for path in episodes_dir.glob("episode_*.npz"):
+            index = int(path.stem.split("_")[-1])
+            if index in found:
+                raise SystemExit(f"episode {index} cached twice: {found[index]} and {episodes_dir}")
+            found[index] = episodes_dir
+    return sorted(found.items())
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument("--cache-dir", required=True, type=Path, nargs="+",
+                        help="One or more replay cache dirs (e.g. the shard_* dirs of an "
+                             "array job); episodes are pooled and sorted by source index.")
     parser.add_argument("--dataset-dir", required=True, type=Path)
     parser.add_argument("--point-cloud-dirname", default="points_3views")
     parser.add_argument("--label-dirname", default=None,
@@ -59,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    cache_dir = args.cache_dir.expanduser().resolve()
+    cache_dirs = [d.expanduser().resolve() for d in args.cache_dir]
     dataset_dir = args.dataset_dir.expanduser().resolve()
     label_dirname = args.label_dirname or f"{args.point_cloud_dirname}_labels"
 
@@ -68,10 +83,11 @@ def main() -> None:
     )
     points_txn = points_env.begin(buffers=True)
 
-    source_indices = cached_episode_indices(cache_dir)
-    if not source_indices:
-        raise SystemExit(f"No cached episodes under {cache_dir / 'episodes'}")
-    print(f"{len(source_indices)} cached episodes -> dataset indices 0..{len(source_indices) - 1}")
+    episodes = cached_episodes(cache_dirs)
+    if not episodes:
+        raise SystemExit(f"No cached episodes under {[str(d) for d in cache_dirs]}")
+    print(f"{len(episodes)} cached episodes from {len(cache_dirs)} dir(s) "
+          f"-> dataset indices 0..{len(episodes) - 1}")
 
     label_env = lmdb.open(str(dataset_dir / label_dirname), map_size=int(args.lmdb_map_size))
 
@@ -83,14 +99,14 @@ def main() -> None:
     txn = label_env.begin(write=True)
     pending = 0
     try:
-        for dataset_index, source_index in enumerate(
-            tqdm(source_indices, desc="episodes", unit="ep", dynamic_ncols=True)
+        for dataset_index, (source_index, episodes_dir) in enumerate(
+            tqdm(episodes, desc="episodes", unit="ep", dynamic_ncols=True)
         ):
             stem = f"episode_{source_index:06d}"
-            with np.load(cache_dir / "episodes" / f"{stem}.npz", allow_pickle=True) as data:
+            with np.load(episodes_dir / f"{stem}.npz", allow_pickle=True) as data:
                 offsets = data["point_cloud_offsets"].astype(np.int64)
-            labels = np.load(cache_dir / "episodes" / f"{stem}_point_labels.npy", mmap_mode="r")
-            keys = np.load(cache_dir / "episodes" / f"{stem}_voxel_keys.npy", mmap_mode="r")
+            labels = np.load(episodes_dir / f"{stem}_point_labels.npy", mmap_mode="r")
+            keys = np.load(episodes_dir / f"{stem}_voxel_keys.npy", mmap_mode="r")
 
             for frame_index in range(len(offsets) - 1):
                 key = f"{dataset_index}-{frame_index}".encode("ascii")
