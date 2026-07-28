@@ -55,19 +55,27 @@ post-sample.
 ```bash
 uv run --no-sync python -m data_prep.roi_sampling.viz_sampling_episode \
   --dataset-dir $SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer \
-  --episode 0 --method all --point-color "#4ade80" --display-points 0 \
-  --out-dir /scratch/$USER/viz
+  --episode 0 --method all --display-points 0 --out-dir /scratch/$USER/viz
 ```
-Writes `sampling_ep0000_{uniform,eef,roi,oracle}.html`: the *same* episode and clouds under
-each strategy, animated over the episode (play/pause + frame slider) so you can watch where
-the 4096-point budget goes as the arm approaches and pulls. Point count is deterministic
-here (no 0.8-1.0 jitter) so frames and strategies compare frame-for-frame.
+Writes `sampling_ep0000_{uniform,eef,oracle}.html`: the *same* episode and clouds under each
+strategy, animated over the episode (play/pause + frame slider) so you can watch where the
+4096-point budget goes as the arm approaches and pulls. Point count is deterministic here
+(no 0.8-1.0 jitter) so frames and strategies compare frame-for-frame. `--method roi` still
+builds the proprioceptive-halo arm, but it is not in the `all` set — the oracle-GT arm
+supersedes it as the "knows where the handle is" upper bound.
 
 `uniform`/`eef`/`roi` need only the training env and `points_3views` — the ROI halo is
 recomputed on the fly from proprioception (`build_roi_cache_proprio.py`), so no ROI cache is
 required. `oracle` additionally needs `points_3views_labels` (see the oracle data config),
 and reproduces the trained variant exactly: Gaussian-with-floor centred on the centroid of
 the MuJoCo handle-labelled points, falling back to the door panel.
+
+Points are coloured by the weight they were drawn with (`--color-by weight`, the default),
+expressed as a multiple of the uniform draw's probability — `N * w / sum(w)`, so ×1 is
+"as likely as uniform". Raw weights are only defined up to a scale factor, so that
+normalisation is what makes the files comparable; it also makes the uniform arm read as one
+flat tone at ×1 instead of a saturated one. `--color-by flat|rgb` switch to a single colour
+or the points' true RGB.
 
 Two stats are reported per frame and as an episode mean — the share of the budget landing
 within `--near-radius` of the handle, and the share of the GT handle points that survive the

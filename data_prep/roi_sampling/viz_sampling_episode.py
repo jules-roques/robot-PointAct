@@ -56,6 +56,11 @@ msgpack_numpy.patch()
 
 METHODS = ("uniform", "eef", "roi", "oracle")
 
+#: What ``--method all`` builds: the three arms actually under comparison. ``roi`` (the
+#: proprioceptive halo) stays selectable by name but is not part of the default set — the
+#: oracle-GT arm supersedes it as the "knows where the handle is" upper bound.
+DEFAULT_METHODS = ("uniform", "eef", "oracle")
+
 METHOD_LABEL = {
     "uniform": "Uniform (baseline)",
     "eef": "EEF-density (Gaussian + floor around the end-effector)",
@@ -69,6 +74,23 @@ ANCHOR_COLOR = {"uniform": "#9aa0a6", "eef": "#ff2d95", "roi": "#ff2d95", "oracl
 
 #: MuJoCo segmentation levels written by replay.py --labels-only (see the oracle data config).
 LABEL_NAMES = {0: "background", 1: "robot", 2: "target fixture", 3: "door panel", 4: "handle"}
+
+#: Colour axis for the sampling weight, in log2(× uniform). Diverging about 0 = ×1, so a
+#: uniform draw reads as one neutral tone and any concentration reads as warmth. Stops are
+#: bright enough to stay legible on the dark ground.
+#: Bounds track the measured spread on OpenDrawer (log2 ratio runs about -0.8 .. +3.9 with
+#: sigma=0.08, floor=0.05), so the ramp is spent on the range the data actually occupies.
+CLOG_MIN, CLOG_MAX = -1.0, 4.0
+WEIGHT_COLORSCALE = [
+    [0.00, "#2f6fb0"],  # x0.5 - given up
+    [0.12, "#8fb4d4"],
+    [0.20, "#dbe3ea"],  # x1   - same as uniform
+    [0.40, "#ffd166"],
+    [0.70, "#ff9a3c"],
+    [1.00, "#ff3b6b"],  # x16  - heavily concentrated
+]
+WEIGHT_TICKS = [-1, 0, 1, 2, 3, 4]
+WEIGHT_TICKTEXT = ["×0.5", "×1", "×2", "×4", "×8", "×16"]
 
 
 def load_cloud(txn, ep: int, f: int) -> np.ndarray | None:
@@ -131,33 +153,59 @@ def hex_colors(rgb: np.ndarray) -> list[str]:
     return [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in c]
 
 
+def compute_weights(method: str, cloud: np.ndarray, anchor: np.ndarray | None, args):
+    """Per-point sampling weight for this frame, or None when the draw is plain uniform."""
+    if anchor is None:
+        return None
+    if method == "eef":
+        return eef_density_weights(cloud[:, :3], anchor, args.eef_sigma, args.eef_floor)
+    if method == "oracle":
+        return eef_density_weights(cloud[:, :3], anchor, args.oracle_sigma, args.oracle_floor)
+    if method == "roi":
+        return halo_weights(cloud[:, :3], anchor, args.roi_radius * args.roi_radius_scale,
+                            mode=args.roi_mode, softness=args.roi_softness)
+    return None
+
+
 def select_indices(
     method: str,
     cloud: np.ndarray,
     n_target: int,
-    anchor: np.ndarray | None,
+    weights: np.ndarray | None,
     args,
     rng: np.random.Generator,
 ) -> np.ndarray:
     """The dataloader's own selection, for one frame (see data_3d.augment_point_cloud)."""
     m = len(cloud)
-    if method == "eef" and anchor is not None:
-        w = eef_density_weights(cloud[:, :3], anchor, args.eef_sigma, args.eef_floor)
-        return density_weighted_indices(m, n_target, w, rng)
-    if method == "oracle" and anchor is not None:
-        w = eef_density_weights(cloud[:, :3], anchor, args.oracle_sigma, args.oracle_floor)
-        return density_weighted_indices(m, n_target, w, rng)
-    if method == "roi" and anchor is not None:
-        w = halo_weights(cloud[:, :3], anchor, args.roi_radius * args.roi_radius_scale,
-                         mode=args.roi_mode, softness=args.roi_softness)
-        if args.roi_mode == "soft":
-            if np.any(w >= 0.5) and not np.all(w >= 0.5):
-                return soft_guided_indices(m, n_target, w, args.roi_ratio, rng)
-        else:
-            mask = w > 0
-            if mask.any() and not mask.all():
-                return roi_guided_indices(m, n_target, mask, args.roi_ratio, rng)
+    if weights is not None:
+        if method in ("eef", "oracle"):
+            return density_weighted_indices(m, n_target, weights, rng)
+        if method == "roi":
+            if args.roi_mode == "soft":
+                if np.any(weights >= 0.5) and not np.all(weights >= 0.5):
+                    return soft_guided_indices(m, n_target, weights, args.roi_ratio, rng)
+            else:
+                mask = weights > 0
+                if mask.any() and not mask.all():
+                    return roi_guided_indices(m, n_target, mask, args.roi_ratio, rng)
     return rng.choice(m, n_target, replace=False)
+
+
+def oversampling_factor(weights: np.ndarray | None, n_points: int) -> np.ndarray:
+    """Per-point keep-probability as a multiple of the uniform draw's.
+
+    Raw weights are only defined up to a scale factor, so plotting them directly would make
+    the colour scale arbitrary and non-comparable between strategies. Normalising by the
+    uniform probability 1/N fixes that: ``N * w / sum(w)`` is exactly ×1 everywhere for a
+    uniform draw, <1 where a strategy gives up points, and >1 where it concentrates them.
+    """
+    if weights is None:
+        return np.ones(n_points, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    s = w.sum()
+    if not np.isfinite(s) or s <= 0:
+        return np.ones(n_points, dtype=np.float64)
+    return n_points * w / s
 
 
 def sphere_wireframe(center: np.ndarray, radius: float, n_ring: int = 48) -> tuple[np.ndarray, ...]:
@@ -182,9 +230,21 @@ def build_figure(method: str, frames_data: list[dict], ep: int, task: str, args)
 
     def traces_for(fd: dict) -> list[go.Scatter3d]:
         pts = fd["pts"]
+        if args.color_by == "weight":
+            marker = dict(
+                size=args.point_size, color=fd["colors"], colorscale=WEIGHT_COLORSCALE,
+                cmin=CLOG_MIN, cmax=CLOG_MAX,
+                colorbar=dict(
+                    title=dict(text="sampling<br>weight", side="right"),
+                    tickvals=WEIGHT_TICKS, ticktext=WEIGHT_TICKTEXT,
+                    len=0.55, thickness=13, x=0.99, xanchor="right", y=0.55,
+                    outlinewidth=0, tickfont=dict(size=10),
+                ),
+            )
+        else:
+            marker = dict(size=args.point_size, color=fd["colors"])
         out = [go.Scatter3d(
-            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode="markers",
-            marker=dict(size=args.point_size, color=fd["colors"]),
+            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode="markers", marker=marker,
             name=f"sampled points ({fd['n_sel']})", hoverinfo="skip",
         )]
         a = fd["anchor"]
@@ -285,9 +345,13 @@ def main() -> None:
                     help="Uniform thinning of the selection for rendering only (keeps the HTML small; "
                          "relative density is preserved). 0 = draw all selected points.")
     ap.add_argument("--point-size", type=float, default=2.0)
-    ap.add_argument("--point-color", default=None,
-                    help="Flat CSS color for every point (e.g. '#3ddc97'). Default: each point's "
-                         "true RGB, which is faithful but loses dark surfaces against a dark ground.")
+    ap.add_argument("--color-by", default="weight", choices=("weight", "flat", "rgb"),
+                    help="'weight': colour each point by the sampling weight it was drawn with, "
+                         "as a multiple of the uniform draw's probability (×1 = uniform). "
+                         "'flat': one colour (--point-color). 'rgb': the point's true colour, "
+                         "faithful but dark surfaces vanish against a dark ground.")
+    ap.add_argument("--point-color", default="#4ade80",
+                    help="Flat CSS colour used when --color-by flat.")
     ap.add_argument("--frame-ms", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dark", action="store_true", help="Dark plotly template.")
@@ -341,7 +405,7 @@ def main() -> None:
 
     stride = args.stride if args.stride > 0 else max(1, n_frames // max(1, args.num_frames))
     frame_ids = list(range(0, n_frames, stride))
-    methods = list(METHODS) if args.method == "all" else [args.method]
+    methods = list(DEFAULT_METHODS) if args.method == "all" else [args.method]
 
     env = lmdb.open(str(d / args.points_dirname), readonly=True, lock=False, readahead=False)
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -399,9 +463,11 @@ def main() -> None:
                     anchor = states[f, :3].astype(np.float64) if f < len(states) else None
 
                 n_target = int(min(len(cloud), args.max_npoints))
-                sel = select_indices(method, cloud, n_target, anchor if method != "uniform" else None,
-                                     args, rng)
+                weights = compute_weights(method, cloud, anchor, args) if method != "uniform" else None
+                sel = select_indices(method, cloud, n_target, weights, args, rng)
                 sel_pts = cloud[sel]
+                # log2 of the keep-probability relative to uniform, for the colour axis.
+                sel_logw = np.log2(oversampling_factor(weights, len(cloud))[sel])
 
                 # Stats measured on the FULL selection, before display thinning. The reference
                 # is the GT handle centroid where labels exist, so all methods are scored
@@ -425,7 +491,7 @@ def main() -> None:
 
                 if args.display_points and len(sel_pts) > args.display_points:
                     keep = disp_rng.choice(len(sel_pts), args.display_points, replace=False)
-                    sel_pts = sel_pts[keep]
+                    sel_pts, sel_logw = sel_pts[keep], sel_logw[keep]
 
                 if closed is not None and f < len(closed):
                     phase = "gripper closed" if closed[f] else "gripper open"
@@ -434,7 +500,10 @@ def main() -> None:
 
                 frames_data.append(dict(
                     frame=f, n_frames=n_frames, pts=sel_pts[:, :3].astype(np.float32),
-                    colors=args.point_color or hex_colors(sel_pts[:, 3:6]), anchor=anchor,
+                    colors=(sel_logw.astype(np.float32) if args.color_by == "weight"
+                            else args.point_color if args.color_by == "flat"
+                            else hex_colors(sel_pts[:, 3:6])),
+                    anchor=anchor,
                     n_sel=n_target, n_cloud=len(cloud), near_frac=near_frac, phase=phase,
                     n_handle_total=n_handle_total, n_handle_sel=n_handle_sel,
                     handle_recall=recall,
