@@ -38,7 +38,10 @@ fi
 
 # datasets (ROI variant by default)
 dataset=${1:-experiments/13_robocasa365/data_configs/data-robocasa365-opendrawer-point-roi.yaml}
-dataset_name=$(basename ${dataset%.*})-rot6d-image.leftview
+# 'leftright' describes what the VLM is actually fed: both agentview cameras
+# (select_video_keys + video_key_ids_for_vlm [0,1] in the data config). This is a
+# label only -- it feeds run_name and nothing else -- but it must not lie.
+dataset_name=$(basename ${dataset%.*})-rot6d-image.leftright
 
 # hparams
 lr=5e-5

@@ -38,6 +38,12 @@ fi
 
 # datasets (eef-density variant by default)
 dataset=${1:-experiments/13_robocasa365/data_configs/data-robocasa365-opendrawer-point-eefdensity.yaml}
+# NOTE: 'leftview' is a MISNOMER -- this run feeds the VLM both agentview cameras, exactly
+# like the baseline (verified at runtime: two <|vision_start|> blocks, 162 image_pad
+# tokens, identical to concerto.sh). The label is wrong; the training is not. It is left
+# alone deliberately: run_name determines output_dir, so correcting it mid-run would
+# orphan the checkpoints and restart the chain. Change it to 'leftright' once the
+# current run finishes.
 dataset_name=$(basename ${dataset%.*})-rot6d-image.leftview
 
 # hparams
