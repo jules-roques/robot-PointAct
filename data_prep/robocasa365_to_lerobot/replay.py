@@ -11,7 +11,10 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation as R
 from tqdm.auto import tqdm
 
-from pointact.robot_envs.robocasa365_utils.environments import RoboCasa365Env
+from pointact.robot_envs.robocasa365_utils.environments import (
+    NUM_POINT_LABELS,
+    RoboCasa365Env,
+)
 
 
 CAMERA_NAMES = (
@@ -44,6 +47,10 @@ def episode_cache_path(cache_dir: Path, episode_index: int) -> Path:
 
 def episode_points_path(cache_dir: Path, episode_index: int) -> Path:
     return cache_dir / "episodes" / f"episode_{episode_index:06d}_points.npy"
+
+
+def episode_point_labels_path(cache_dir: Path, episode_index: int) -> Path:
+    return cache_dir / "episodes" / f"episode_{episode_index:06d}_point_labels.npy"
 
 
 def get_episode_parquet_path(input_dir: Path, episode_index: int) -> Path:
@@ -183,25 +190,44 @@ def validate_resume_cache_meta(cache_meta_path: Path, expected_meta: dict[str, A
         )
 
 
-def make_point_cloud(obs: dict[str, Any], voxel_size: float) -> np.ndarray:
+def make_point_cloud(
+    obs: dict[str, Any],
+    voxel_size: float,
+    with_labels: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Fuse the per-camera clouds into one workspace-cropped, voxel-downsampled cloud.
+
+    With ``with_labels`` the simulator's ground-truth per-point labels ride along through the
+    crop and the voxel merge, yielding one label per output point. The xyz/rgb columns are
+    computed exactly as before either way, so labelled replays reproduce unlabelled ones.
+    """
     clouds = []
+    labels = [] if with_labels else None
     for camera_name in CAMERA_NAMES:
         rgb = obs[f"observation.images.{camera_name}_image"]
         xyz = obs[f"observation.points.{camera_name}"].astype(np.float32)
         cloud = np.concatenate([xyz, rgb.astype(np.float32) / 255.0], axis=-1).reshape(-1, 6)
         clouds.append(cloud)
+        if with_labels:
+            labels.append(np.asarray(obs[f"observation.point_labels.{camera_name}"]).reshape(-1))
 
     point_cloud = np.concatenate(clouds, axis=0)
-    point_cloud = crop_point_cloud_by_workspace(point_cloud, DEFAULT_WORKSPACE)
+    point_labels = np.concatenate(labels, axis=0) if with_labels else None
+
+    keep = workspace_mask(point_cloud, DEFAULT_WORKSPACE)
+    point_cloud = point_cloud[keep]
+    if point_labels is not None:
+        point_labels = point_labels[keep]
 
     if len(point_cloud) == 0:
-        return np.empty((0, 6), dtype=np.float32)
+        empty_labels = np.empty((0,), dtype=np.uint8) if with_labels else None
+        return np.empty((0, 6), dtype=np.float32), empty_labels
 
-    return voxel_downsample(point_cloud, voxel_size=voxel_size)
+    return voxel_downsample(point_cloud, voxel_size=voxel_size, labels=point_labels)
 
 
-def crop_point_cloud_by_workspace(point_cloud: np.ndarray, workspace: dict[str, list[float]]) -> np.ndarray:
-    mask = (
+def workspace_mask(point_cloud: np.ndarray, workspace: dict[str, list[float]]) -> np.ndarray:
+    return (
         (point_cloud[:, 0] > workspace["X_BBOX"][0])
         & (point_cloud[:, 0] < workspace["X_BBOX"][1])
         & (point_cloud[:, 1] > workspace["Y_BBOX"][0])
@@ -209,18 +235,38 @@ def crop_point_cloud_by_workspace(point_cloud: np.ndarray, workspace: dict[str, 
         & (point_cloud[:, 2] > workspace["Z_BBOX"][0])
         & (point_cloud[:, 2] < workspace["Z_BBOX"][1])
     )
-    return point_cloud[mask]
 
 
-def voxel_downsample(point_cloud: np.ndarray, voxel_size: float) -> np.ndarray:
+def crop_point_cloud_by_workspace(point_cloud: np.ndarray, workspace: dict[str, list[float]]) -> np.ndarray:
+    return point_cloud[workspace_mask(point_cloud, workspace)]
+
+
+def voxel_downsample(
+    point_cloud: np.ndarray,
+    voxel_size: float,
+    labels: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     if voxel_size <= 0 or len(point_cloud) == 0:
-        return point_cloud.astype(np.float32, copy=False)
+        return point_cloud.astype(np.float32, copy=False), labels
 
     voxel_indices = np.floor(point_cloud[:, :3] / float(voxel_size)).astype(np.int64)
     _, inverse, counts = np.unique(voxel_indices, axis=0, return_inverse=True, return_counts=True)
     sums = np.zeros((len(counts), point_cloud.shape[1]), dtype=np.float64)
     np.add.at(sums, inverse, point_cloud.astype(np.float64))
-    return (sums / counts[:, None]).astype(np.float32)
+    merged = (sums / counts[:, None]).astype(np.float32)
+
+    if labels is None:
+        return merged, None
+
+    # A voxel can straddle an object boundary, so take the majority label among its points.
+    # numpy's `return_inverse` shape has changed across 2.x releases; ravel to be safe.
+    inverse = np.ravel(inverse)
+    votes = np.zeros((len(counts), NUM_POINT_LABELS), dtype=np.int64)
+    np.add.at(votes, (inverse, labels.astype(np.int64)), 1)
+    # Ties go to the higher label id so boundary voxels keep the task-relevant label
+    # (TARGET/ROBOT) rather than decaying to BACKGROUND.
+    ranked = votes * NUM_POINT_LABELS + np.arange(NUM_POINT_LABELS)
+    return merged, ranked.argmax(axis=1).astype(np.uint8)
 
 
 def frame_cache_from_obs(obs: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -317,6 +363,8 @@ def replay_episode(
     action_info: dict[str, Any],
     voxel_size: float,
     compress: bool,
+    collect_labels: bool = False,
+    labels_only: bool = False,
 ) -> dict[str, Any]:
     episode_dir = input_dir / "extras" / f"episode_{episode_index:06d}"
     obs, _ = robocasa_env.reset(initial_state_dir=episode_dir, step_after_reset=False)
@@ -331,6 +379,7 @@ def replay_episode(
     rewards = []
     dones = []
     point_clouds = []
+    point_labels: list[np.ndarray] = []
     point_counts = []
     success = False
     success_frame = -1
@@ -348,11 +397,16 @@ def replay_episode(
         frame = frame_cache_from_obs(obs)
         states.append(frame["observation_state"])
         saved_actions.append(action_env)
-        for camera_name in CAMERA_NAMES:
-            images[f"image_{camera_name}"].append(frame[f"image_{camera_name}"])
+        if not labels_only:
+            for camera_name in CAMERA_NAMES:
+                images[f"image_{camera_name}"].append(frame[f"image_{camera_name}"])
 
-        point_cloud = make_point_cloud(obs, voxel_size=voxel_size)
+        point_cloud, frame_labels = make_point_cloud(
+            obs, voxel_size=voxel_size, with_labels=collect_labels
+        )
         point_clouds.append(point_cloud)
+        if collect_labels:
+            point_labels.append(frame_labels)
         point_counts.append(int(len(point_cloud)))
 
         obs, reward, done, info = robocasa_env.step(action_env)
@@ -374,11 +428,16 @@ def replay_episode(
             terminal_frame = frame_cache_from_obs(obs)
             states.append(terminal_frame["observation_state"])
             saved_actions.append(stop_action)
-            for camera_name in CAMERA_NAMES:
-                images[f"image_{camera_name}"].append(terminal_frame[f"image_{camera_name}"])
+            if not labels_only:
+                for camera_name in CAMERA_NAMES:
+                    images[f"image_{camera_name}"].append(terminal_frame[f"image_{camera_name}"])
 
-            point_cloud = make_point_cloud(obs, voxel_size=voxel_size)
+            point_cloud, frame_labels = make_point_cloud(
+                obs, voxel_size=voxel_size, with_labels=collect_labels
+            )
             point_clouds.append(point_cloud)
+            if collect_labels:
+                point_labels.append(frame_labels)
             point_counts.append(int(len(point_cloud)))
 
             # The terminal observation has no source action; repeat terminal flags and
@@ -401,7 +460,7 @@ def replay_episode(
         "next_reward": len(rewards_arr),
         "next_done": len(dones_arr),
         "point_counts": len(point_counts_arr),
-        **{key: len(value) for key, value in images.items()},
+        **({} if labels_only else {key: len(value) for key, value in images.items()}),
     }
     if len(set(lengths.values())) != 1:
         raise RuntimeError(f"Replay cache length mismatch for episode {episode_index}: {lengths}")
@@ -433,11 +492,25 @@ def replay_episode(
         "point_cloud_offsets": point_cloud_offsets,
         "point_counts": point_counts_arr,
     }
-    for key, value in images.items():
-        episode_cache[key] = np.stack(value, axis=0).astype(np.uint8)
+    if not labels_only:
+        for key, value in images.items():
+            episode_cache[key] = np.stack(value, axis=0).astype(np.uint8)
 
     save_episode_cache(episode_cache_path(cache_dir, episode_index), episode_cache, compress)
-    np.save(episode_points_path(cache_dir, episode_index), point_cloud_points)
+    if not labels_only:
+        np.save(episode_points_path(cache_dir, episode_index), point_cloud_points)
+
+    if collect_labels:
+        if point_labels:
+            point_label_values = np.concatenate(point_labels, axis=0).astype(np.uint8, copy=False)
+        else:
+            point_label_values = np.empty((0,), dtype=np.uint8)
+        if len(point_label_values) != len(point_cloud_points):
+            raise RuntimeError(
+                f"Point label count mismatch for episode {episode_index}: "
+                f"labels={len(point_label_values)} points={len(point_cloud_points)}"
+            )
+        np.save(episode_point_labels_path(cache_dir, episode_index), point_label_values)
 
     return {
         "episode_index": episode_index,
@@ -472,9 +545,27 @@ def main() -> None:
     parser.add_argument("--image-resolution", type=int, default=256)
     parser.add_argument("--voxel-size", type=float, default=0.01)
     parser.add_argument("--compress", action="store_true")
+    parser.add_argument(
+        "--labels-only",
+        action="store_true",
+        help="Implies --point-labels. Cache only the per-point labels (plus offsets/state), "
+             "skipping the images and the point clouds themselves. Use when the point clouds "
+             "have already been converted and only ground-truth labels are needed: cuts the "
+             "replay cache from ~130 GB to ~3 GB.",
+    )
+    parser.add_argument(
+        "--point-labels",
+        action="store_true",
+        help="Also render simulator segmentation and cache a ground-truth label per point "
+             "(background / target fixture / robot). Used to build the oracle sampling "
+             "upper bound; costs one extra render pass per camera per frame.",
+    )
     args = parser.parse_args()
     if args.resume and args.overwrite:
         parser.error("--resume and --overwrite cannot be used together.")
+
+    # Caching only the labels is pointless without rendering them.
+    args.point_labels = args.point_labels or args.labels_only
 
     input_dir = args.input_dir.expanduser().resolve()
     cache_dir = args.cache_dir.expanduser().resolve()
@@ -533,6 +624,7 @@ def main() -> None:
                     image_resolution=args.image_resolution,
                     use_depth=True,
                     use_point_cloud=True,
+                    use_segmentation=args.point_labels,
                     enable_render=True,
                     terminate_on_success=False,
                 )
@@ -549,6 +641,8 @@ def main() -> None:
                 action_info=action_info,
                 voxel_size=args.voxel_size,
                 compress=args.compress,
+                collect_labels=args.point_labels,
+                labels_only=args.labels_only,
             )
             append_jsonl(summary_path, summary)
             episode_iter.set_postfix(

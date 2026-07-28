@@ -27,6 +27,52 @@ PANDA_OMRON_CAMERA_NAMES = [
     "robot0_eye_in_hand",
 ]
 
+# Per-point ground-truth labels rendered from the simulator, used to build the oracle
+# point-sampling upper bound (sample the fixed budget from the task-relevant points only).
+# These are privileged information: preprocessing only, never an input to the policy.
+# Ordered least- to most-specific: on a voxel that straddles a boundary the higher id wins, so
+# the handle survives against the door, the door against the rest of the cabinet, and any part
+# of the target against the robot. Labelling the target's parts separately (rather than one
+# "target" blob) lets the oracle ROI be redefined -- handle only, handle+door, whole fixture --
+# without re-rendering, which matters because the fixture body spans the entire cabinet stack,
+# not just the drawer the gripper touches.
+POINT_LABEL_BACKGROUND = 0
+POINT_LABEL_ROBOT = 1  # robot arm + gripper
+POINT_LABEL_TARGET = 2  # target fixture, other parts (housing, inner box, ...)
+POINT_LABEL_TARGET_DOOR = 3  # the drawer/door front panel
+POINT_LABEL_TARGET_HANDLE = 4  # the handle the gripper actually grasps
+NUM_POINT_LABELS = 5
+
+POINT_LABEL_NAMES = {
+    POINT_LABEL_BACKGROUND: "background",
+    POINT_LABEL_ROBOT: "robot",
+    POINT_LABEL_TARGET: "target_other",
+    POINT_LABEL_TARGET_DOOR: "target_door",
+    POINT_LABEL_TARGET_HANDLE: "target_handle",
+}
+
+# Body-name prefixes robosuite gives the robot and its gripper.
+_ROBOT_BODY_PREFIXES = ("robot0", "gripper0")
+
+
+def _target_fixture_names(env) -> list[str]:
+    """Names of the fixtures/objects the current task manipulates.
+
+    RoboCASA task classes store their target as an attribute holding a fixture object
+    (``ManipulateDrawer.drawer``, door/cabinet tasks use ``.door``/``.cab``, ...). We probe a
+    small set of known attribute names rather than hard-coding OpenDrawer, so the labeller
+    degrades gracefully (empty list -> no TARGET points) on tasks we have not looked at.
+    """
+    names: list[str] = []
+    for attr in ("drawer", "door", "cab", "obj", "fixture", "target_fixture"):
+        fixture = getattr(env, attr, None)
+        if fixture is None:
+            continue
+        name = getattr(fixture, "name", None)
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
 PANDA_OMRON_CAMERA_MAPPING = {
     "robot0_agentview_left": "left",
     "robot0_agentview_right": "right",
@@ -269,6 +315,7 @@ class RoboCasa365Env:
         use_depth: bool = False,
         use_point_cloud: bool = False,
         point_cloud_in_robot_base_frame: bool = True,
+        use_segmentation: bool = False,
         enable_render: bool = True,
         terminate_on_success: bool = False,
         obj_registries: Iterable[str] | None = None,
@@ -288,6 +335,10 @@ class RoboCasa365Env:
         self.use_depth = use_depth or use_point_cloud
         self.use_point_cloud = use_point_cloud
         self.point_cloud_in_robot_base_frame = point_cloud_in_robot_base_frame
+        self.use_segmentation = use_segmentation
+        # geom id -> POINT_LABEL_*. Rebuilt after every reset: reset_to() reloads the scene from
+        # the episode's XML, which renumbers geoms.
+        self._geom_label_lut: np.ndarray | None = None
         self.enable_render = enable_render
         self.terminate_on_success = terminate_on_success
         self.max_episode_steps = _get_task_horizon(env_name)
@@ -317,6 +368,9 @@ class RoboCasa365Env:
         initial_state_dir: str | None = None,
         step_after_reset: bool = True,
     ):
+        # The scene is rebuilt below, so any cached geom->label mapping is stale.
+        self._geom_label_lut = None
+
         if seed is not None:
             self.env.rng = np.random.default_rng(seed)
 
@@ -404,6 +458,13 @@ class RoboCasa365Env:
                         )
                     obs[f"observation.points.{mapped_name}"] = points
 
+                    if self.use_segmentation:
+                        # depth_to_point_cloud emits one point per pixel in row-major order and
+                        # drops nothing, so the flattened label map aligns 1:1 with `points`.
+                        obs[f"observation.point_labels.{mapped_name}"] = (
+                            self._get_segmentation(camera_name).reshape(-1)
+                        )
+
         obs["task"] = self.env.get_ep_meta().get("lang", "")
         return obs
 
@@ -486,6 +547,64 @@ class RoboCasa365Env:
             )
             depth = np.ascontiguousarray(depth[::-1])
         return self._to_metric_depth(depth)
+
+    def _build_geom_label_lut(self) -> np.ndarray:
+        """Map every geom id in the current scene to a POINT_LABEL_* value.
+
+        Labels are assigned by the MuJoCo body a geom hangs off: robosuite prefixes robot and
+        gripper bodies, and each RoboCASA fixture prefixes its bodies with the fixture name.
+        """
+        model = self.env.sim.model
+        lut = np.full(int(model.ngeom), POINT_LABEL_BACKGROUND, dtype=np.uint8)
+        target_names = _target_fixture_names(self.env)
+
+        for geom_id in range(int(model.ngeom)):
+            body = model.body_id2name(int(model.geom_bodyid[geom_id])) or ""
+            if body.startswith(_ROBOT_BODY_PREFIXES):
+                lut[geom_id] = POINT_LABEL_ROBOT
+            elif any(name in body for name in target_names):
+                # e.g. "<fixture>_door_handle_main" / "<fixture>_door_main" / "<fixture>_main".
+                # Check handle first: the handle body name also contains "door".
+                if "handle" in body:
+                    lut[geom_id] = POINT_LABEL_TARGET_HANDLE
+                elif "door" in body or "drawer" in body:
+                    lut[geom_id] = POINT_LABEL_TARGET_DOOR
+                else:
+                    lut[geom_id] = POINT_LABEL_TARGET
+
+        n_target = int((lut >= POINT_LABEL_TARGET).sum())
+        if target_names and n_target == 0:
+            logging.warning(
+                "No geoms matched target fixtures %s; oracle labels will have no TARGET points",
+                target_names,
+            )
+        return lut
+
+    def _get_segmentation(self, camera_name: str) -> np.ndarray:
+        """Per-pixel POINT_LABEL_* map, row-aligned with the RGB/depth images.
+
+        ``sim.render(segmentation=True)`` returns (H, W, 2) with [..., 0] the mjtObj type and
+        [..., 1] the object id (-1 where nothing was drawn). It is flipped exactly like the RGB
+        and depth buffers so the flattened result indexes the same points as the point cloud.
+        """
+        if self._geom_label_lut is None:
+            self._geom_label_lut = self._build_geom_label_lut()
+
+        seg = self.env.sim.render(
+            width=self.image_resolution,
+            height=self.image_resolution,
+            camera_name=camera_name,
+            segmentation=True,
+        )
+        seg = np.ascontiguousarray(np.asarray(seg)[::-1])
+
+        objtype = seg[..., 0]
+        objid = seg[..., 1]
+        is_geom = (objtype == int(mujoco.mjtObj.mjOBJ_GEOM)) & (objid >= 0)
+        # Clamp before indexing so the -1 background entries stay in range; they are masked out.
+        safe_ids = np.where(is_geom, objid, 0).astype(np.int64)
+        labels = np.where(is_geom, self._geom_label_lut[safe_ids], POINT_LABEL_BACKGROUND)
+        return labels.astype(np.uint8)
 
     def _to_metric_depth(self, depth: np.ndarray) -> np.ndarray:
         depth = np.asarray(depth, dtype=np.float32)

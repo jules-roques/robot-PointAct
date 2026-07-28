@@ -115,6 +115,10 @@ def cache_episode_points_path(episode_file: Path) -> Path:
     return episode_file.with_name(f"{episode_file.stem}_points.npy")
 
 
+def cache_episode_point_labels_path(episode_file: Path) -> Path:
+    return episode_file.with_name(f"{episode_file.stem}_point_labels.npy")
+
+
 def infer_episode_index_from_cache_file(episode_file: Path) -> int:
     return int(episode_file.stem.split("_")[-1])
 
@@ -202,14 +206,20 @@ def write_episode_points_to_lmdb(
     point_cloud_points: np.ndarray,
     pending_points: list[tuple[str, int, int]],
     lmdb_commit_every: int,
+    dtype: Any = np.float32,
 ) -> None:
+    """Write one value per frame, sliced out of a concatenated per-episode array.
+
+    Used for both the (N, 6) point clouds and the parallel (N,) ground-truth label arrays,
+    which share the same frame keys and offsets.
+    """
     out_txn = None
     frames_since_commit = 0
     written_keys = []
     try:
         out_txn = point_out_env.begin(write=True)
         for frame_index, (output_point_key, point_start, point_end) in enumerate(pending_points):
-            point_cloud = np.asarray(point_cloud_points[point_start:point_end], dtype=np.float32)
+            point_cloud = np.asarray(point_cloud_points[point_start:point_end], dtype=dtype)
             out_txn.put(output_point_key.encode("ascii"), msgpack.packb(point_cloud))
             written_keys.append(output_point_key)
             frames_since_commit += 1
@@ -239,12 +249,28 @@ def convert_episode_cache_to_lerobot(
     point_out_env,
     episode_file: Path,
     lmdb_commit_every: int,
+    label_out_env=None,
 ) -> dict[str, Any]:
     points_file = cache_episode_points_path(episode_file)
     if not points_file.exists():
         raise FileNotFoundError(f"Missing replay point cloud file: {points_file}")
 
     point_cloud_points = np.load(points_file, mmap_mode="r")
+
+    point_labels = None
+    if label_out_env is not None:
+        labels_file = cache_episode_point_labels_path(episode_file)
+        if not labels_file.exists():
+            raise FileNotFoundError(
+                f"Missing replay point label file: {labels_file}. "
+                "Re-run replay.py with --point-labels."
+            )
+        point_labels = np.load(labels_file, mmap_mode="r")
+        if len(point_labels) != len(point_cloud_points):
+            raise ValueError(
+                f"{episode_file}: point label count {len(point_labels)} "
+                f"!= point count {len(point_cloud_points)}"
+            )
     with np.load(episode_file, allow_pickle=True) as data:
         source_episode_index = int(data["episode_index"].reshape(-1)[0])
         task = str(data["task"].item())
@@ -304,6 +330,14 @@ def convert_episode_cache_to_lerobot(
             pending_points=pending_points,
             lmdb_commit_every=lmdb_commit_every,
         )
+        if label_out_env is not None:
+            write_episode_points_to_lmdb(
+                point_out_env=label_out_env,
+                point_cloud_points=point_labels,
+                pending_points=pending_points,
+                lmdb_commit_every=lmdb_commit_every,
+                dtype=np.uint8,
+            )
 
         return {
             "source_episode_index": source_episode_index,
@@ -335,6 +369,14 @@ def convert_cache_to_lerobot(args: argparse.Namespace) -> None:
     )
 
     point_out_env = lmdb.open(str(repo_dir / point_cloud_dirname), map_size=int(args.lmdb_map_size))
+    # Ground-truth labels live in a sibling LMDB keyed identically to the points, so the point
+    # store stays byte-identical to a label-free conversion and the policy dataloader only opens
+    # the label store when oracle sampling is switched on.
+    label_out_env = None
+    if args.point_labels:
+        label_out_env = lmdb.open(
+            str(repo_dir / f"{point_cloud_dirname}_labels"), map_size=int(args.lmdb_map_size)
+        )
 
     npoints = []
     failed_episode_ids = []
@@ -355,6 +397,7 @@ def convert_cache_to_lerobot(args: argparse.Namespace) -> None:
                     point_out_env=point_out_env,
                     episode_file=episode_file,
                     lmdb_commit_every=args.lmdb_commit_every,
+                    label_out_env=label_out_env,
                 )
             except Exception:
                 if source_episode_index not in failed_episode_ids:
@@ -373,6 +416,8 @@ def convert_cache_to_lerobot(args: argparse.Namespace) -> None:
             )
     finally:
         point_out_env.close()
+        if label_out_env is not None:
+            label_out_env.close()
         if failed_episode_ids:
             print("failed episode ids:", " ".join(f"{episode_id:06d}" for episode_id in failed_episode_ids))
 
@@ -395,6 +440,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", nargs="*", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--point-cloud-dirname", default=None)
+    parser.add_argument(
+        "--point-labels",
+        action="store_true",
+        help="Also write the ground-truth per-point labels cached by replay.py --point-labels "
+             "into a sibling '<point-cloud-dirname>_labels' LMDB (for oracle sampling).",
+    )
     parser.add_argument("--image-resolution", type=int, default=None)
     parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--robot-type", default="PandaOmron")
