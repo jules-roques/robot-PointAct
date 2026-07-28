@@ -55,14 +55,24 @@ post-sample.
 ```bash
 uv run --no-sync python -m data_prep.roi_sampling.viz_sampling_episode \
   --dataset-dir $SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer \
-  --episode 0 --method all --out-dir /scratch/$USER/viz
+  --episode 0 --method all --point-color "#4ade80" --display-points 0 \
+  --out-dir /scratch/$USER/viz
 ```
-Writes `sampling_ep0000_{uniform,eef,roi}.html`: the *same* episode and clouds under each
-strategy, animated over the episode (play/pause + frame slider) so you can watch where the
-4096-point budget goes as the arm approaches and pulls. Needs only the training env and
-`points_3views` — the ROI halo is recomputed on the fly from proprioception (see
-`build_roi_cache_proprio.py`), so no ROI cache is required. Point count is deterministic
+Writes `sampling_ep0000_{uniform,eef,roi,oracle}.html`: the *same* episode and clouds under
+each strategy, animated over the episode (play/pause + frame slider) so you can watch where
+the 4096-point budget goes as the arm approaches and pulls. Point count is deterministic
 here (no 0.8-1.0 jitter) so frames and strategies compare frame-for-frame.
+
+`uniform`/`eef`/`roi` need only the training env and `points_3views` — the ROI halo is
+recomputed on the fly from proprioception (`build_roi_cache_proprio.py`), so no ROI cache is
+required. `oracle` additionally needs `points_3views_labels` (see the oracle data config),
+and reproduces the trained variant exactly: Gaussian-with-floor centred on the centroid of
+the MuJoCo handle-labelled points, falling back to the door panel.
+
+Two stats are reported per frame and as an episode mean — the share of the budget landing
+within `--near-radius` of the handle, and the share of the GT handle points that survive the
+draw. The second is the sharper one; on ep 0 it separates the arms cleanly (uniform 25%,
+eef 52%, roi 99.8%, oracle 97.5%) where the first compresses them.
 
 ### Train
 ```bash

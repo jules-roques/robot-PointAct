@@ -13,6 +13,11 @@ Strategies (each writes its own self-contained HTML, matching the dataloader exa
            tracked proprioceptively (the oracle ROI of ``build_roi_cache_proprio.py``): the
            eef while the gripper is closed, held at the grasp/release pose outside that run.
            Computed on the fly here, so no ROI LMDB cache is required.
+  oracle   The variant actually trained (``data-robocasa365-opendrawer-point-oracle.yaml``):
+           the anchor is the centroid of the points MuJoCo *labels* as the handle (label 4,
+           falling back to the door panel, label 3, when the handle is occluded), and the draw
+           is the same Gaussian-with-floor density as ``eef`` — only the centre differs.
+           Needs the sibling ``points_3views_labels`` LMDB.
 
 The anchor each strategy is centred on is drawn as a marker, and for ``roi`` the halo
 sphere is outlined, so "where the budget went" is visible rather than inferred.
@@ -49,22 +54,65 @@ from pointact.roi_sampling.sampling import (
 
 msgpack_numpy.patch()
 
-METHODS = ("uniform", "eef", "roi")
+METHODS = ("uniform", "eef", "roi", "oracle")
 
 METHOD_LABEL = {
     "uniform": "Uniform (baseline)",
     "eef": "EEF-density (Gaussian + floor around the end-effector)",
-    "roi": "Oracle ROI (halo on the proprioceptively tracked handle)",
+    "roi": "ROI halo (proprioceptively tracked handle)",
+    "oracle": "Oracle GT (Gaussian on the MuJoCo-labelled handle)",
 }
 
 ANCHOR_LABEL = {"uniform": "end-effector (reference only)", "eef": "end-effector (anchor)",
-                "roi": "handle (ROI anchor)"}
-ANCHOR_COLOR = {"uniform": "#9aa0a6", "eef": "#ff2d95", "roi": "#ff2d95"}
+                "roi": "handle (ROI anchor)", "oracle": "GT handle centroid (anchor)"}
+ANCHOR_COLOR = {"uniform": "#9aa0a6", "eef": "#ff2d95", "roi": "#ff2d95", "oracle": "#ff2d95"}
+
+#: MuJoCo segmentation levels written by replay.py --labels-only (see the oracle data config).
+LABEL_NAMES = {0: "background", 1: "robot", 2: "target fixture", 3: "door panel", 4: "handle"}
 
 
 def load_cloud(txn, ep: int, f: int) -> np.ndarray | None:
     buf = txn.get(f"{ep}-{f}".encode("ascii"))
     return None if buf is None else msgpack.unpackb(bytes(buf)).astype(np.float32)
+
+
+def open_labels_env(dataset_dir: Path, dirname: str):
+    """Open the MuJoCo label LMDB, or None when it has not been built.
+
+    ``lock=True`` (unlike the points env) registers this process in the reader table, so a
+    concurrently running ``export_point_labels`` writer cannot reclaim pages out from under
+    the read — with ``lock=False`` a partially built cache raises MDB_PAGE_NOTFOUND mid-scan.
+    """
+    p = dataset_dir / dirname
+    if not p.exists():
+        return None
+    return lmdb.open(str(p), readonly=True, lock=True, readahead=False)
+
+
+def load_labels(txn, ep: int, f: int) -> np.ndarray | None:
+    buf = txn.get(f"{ep}-{f}".encode("ascii"))
+    return None if buf is None else msgpack.unpackb(bytes(buf)).astype(np.uint8)
+
+
+def oracle_anchor(
+    cloud: np.ndarray, labels: np.ndarray | None,
+    anchor_labels: tuple[int, ...], fallback_labels: tuple[int, ...],
+) -> np.ndarray | None:
+    """Centroid of the GT handle points, else of the door panel, else None.
+
+    Mirrors ``LeRobotPointCloudDataset.oracle_anchor``: the handle is a compact few-cm
+    cluster so its centroid is a good Gaussian centre, but it can be occluded by the gripper
+    or face away from every camera, in which case the panel it sits on still gives guidance.
+    """
+    if labels is None:
+        return None
+    for group in (anchor_labels, fallback_labels):
+        if not group:
+            continue
+        mask = np.isin(labels, group)
+        if mask.any():
+            return cloud[mask, :3].mean(axis=0).astype(np.float64)
+    return None
 
 
 def read_episode_arrays(dataset_dir: Path, ep: int, chunks: int) -> tuple[np.ndarray, np.ndarray]:
@@ -95,6 +143,9 @@ def select_indices(
     m = len(cloud)
     if method == "eef" and anchor is not None:
         w = eef_density_weights(cloud[:, :3], anchor, args.eef_sigma, args.eef_floor)
+        return density_weighted_indices(m, n_target, w, rng)
+    if method == "oracle" and anchor is not None:
+        w = eef_density_weights(cloud[:, :3], anchor, args.oracle_sigma, args.oracle_floor)
         return density_weighted_indices(m, n_target, w, rng)
     if method == "roi" and anchor is not None:
         w = halo_weights(cloud[:, :3], anchor, args.roi_radius * args.roi_radius_scale,
@@ -205,10 +256,15 @@ def build_figure(method: str, frames_data: list[dict], ep: int, task: str, args)
 
 def frame_title(method: str, ep: int, task: str, fd: dict, args) -> str:
     near = f"{fd['near_frac']:.0%}" if fd["near_frac"] is not None else "n/a"
+    if fd["n_handle_total"]:
+        handle = (f" · GT handle points kept {fd['n_handle_sel']}/{fd['n_handle_total']}"
+                  f" ({fd['handle_recall']:.0%})")
+    else:
+        handle = ""
     return (f"<b>{METHOD_LABEL[method]}</b><br>"
             f"<sup>ep {ep} · frame {fd['frame']}/{fd['n_frames'] - 1} · “{task}” · "
             f"{fd['n_sel']} of {fd['n_cloud']} pts · "
-            f"{near} within {args.near_radius:g} m of the handle · "
+            f"{near} within {args.near_radius:g} m of the handle{handle} · "
             f"phase: {fd['phase']}</sup>")
 
 
@@ -229,6 +285,9 @@ def main() -> None:
                     help="Uniform thinning of the selection for rendering only (keeps the HTML small; "
                          "relative density is preserved). 0 = draw all selected points.")
     ap.add_argument("--point-size", type=float, default=2.0)
+    ap.add_argument("--point-color", default=None,
+                    help="Flat CSS color for every point (e.g. '#3ddc97'). Default: each point's "
+                         "true RGB, which is faithful but loses dark surfaces against a dark ground.")
     ap.add_argument("--frame-ms", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dark", action="store_true", help="Dark plotly template.")
@@ -243,6 +302,12 @@ def main() -> None:
     ap.add_argument("--roi-ratio", type=float, default=0.7)
     ap.add_argument("--roi-mode", default="hard", choices=("hard", "soft"))
     ap.add_argument("--roi-softness", type=float, default=1.0)
+    # Oracle-GT knobs (defaults match data-robocasa365-opendrawer-point-oracle.yaml)
+    ap.add_argument("--labels-dirname", default="points_3views_labels")
+    ap.add_argument("--oracle-anchor-labels", nargs="*", type=int, default=[4])
+    ap.add_argument("--oracle-fallback-labels", nargs="*", type=int, default=[3])
+    ap.add_argument("--oracle-sigma", type=float, default=0.08)
+    ap.add_argument("--oracle-floor", type=float, default=0.05)
     ap.add_argument("--plotlyjs", default="inline", choices=("inline", "cdn"),
                     help="'inline' is self-contained (~4.5 MB bigger); 'cdn' needs internet to view.")
     ap.add_argument("--fragment", action="store_true",
@@ -293,17 +358,43 @@ def main() -> None:
         if not clouds:
             raise SystemExit(f"no clouds found for ep {ep} in {d/args.points_dirname}")
 
+        # MuJoCo per-point labels: the oracle's anchor, and the ground truth every strategy is
+        # scored against. Absent (or still being exported) -> the oracle method is unavailable
+        # and the handle stats fall back to the proprioceptive estimate.
+        labels = {}
+        lab_env = open_labels_env(d, args.labels_dirname)
+        if lab_env is not None:
+            with lab_env.begin(buffers=True) as ltxn:
+                for f in clouds:
+                    lb = load_labels(ltxn, ep, f)
+                    if lb is not None and len(lb) == len(clouds[f]):
+                        labels[f] = lb
+            lab_env.close()
+        if "oracle" in methods and not labels:
+            raise SystemExit(
+                f"method 'oracle' needs {d/args.labels_dirname} (per-point MuJoCo labels, "
+                f"built by replay.py --labels-only -> export_point_labels.py); "
+                f"no labels found for ep {ep}")
+        if labels and len(labels) < len(clouds):
+            print(f"note: labels cover {len(labels)}/{len(clouds)} sampled frames "
+                  f"(the export may still be running)")
+
         for method in methods:
             rng = np.random.default_rng(args.seed)
             disp_rng = np.random.default_rng(args.seed + 1)
             frames_data = []
             for f in sorted(clouds):
                 cloud = clouds[f]
+                lb = labels.get(f)
+                gt_anchor = oracle_anchor(cloud, lb, tuple(args.oracle_anchor_labels),
+                                          tuple(args.oracle_fallback_labels))
                 anchor = None
                 if method == "eef" and f < len(states):
                     anchor = states[f, :3].astype(np.float64)
                 elif method == "roi" and handle is not None and f < len(handle):
                     anchor = handle[f]
+                elif method == "oracle":
+                    anchor = gt_anchor
                 elif method == "uniform":  # reference marker only, never used for sampling
                     anchor = states[f, :3].astype(np.float64) if f < len(states) else None
 
@@ -312,12 +403,25 @@ def main() -> None:
                                      args, rng)
                 sel_pts = cloud[sel]
 
-                # Stat measured on the FULL selection, before display thinning.
-                ref = handle[f] if (handle is not None and f < len(handle)) else None
+                # Stats measured on the FULL selection, before display thinning. The reference
+                # is the GT handle centroid where labels exist, so all methods are scored
+                # against the same ground truth rather than each against its own anchor.
+                ref = gt_anchor
+                if ref is None and handle is not None and f < len(handle):
+                    ref = handle[f]
                 near_frac = None
                 if ref is not None:
                     dist = np.linalg.norm(sel_pts[:, :3].astype(np.float64) - ref, axis=1)
                     near_frac = float((dist <= args.near_radius).mean())
+
+                # How much of the actual handle survived the draw: the sharpest single number,
+                # since the handle is only a few dozen points out of ~17k.
+                n_handle_total = n_handle_sel = 0
+                if lb is not None:
+                    handle_mask = np.isin(lb, args.oracle_anchor_labels)
+                    n_handle_total = int(handle_mask.sum())
+                    n_handle_sel = int(handle_mask[sel].sum())
+                recall = (n_handle_sel / n_handle_total) if n_handle_total else 0.0
 
                 if args.display_points and len(sel_pts) > args.display_points:
                     keep = disp_rng.choice(len(sel_pts), args.display_points, replace=False)
@@ -330,8 +434,10 @@ def main() -> None:
 
                 frames_data.append(dict(
                     frame=f, n_frames=n_frames, pts=sel_pts[:, :3].astype(np.float32),
-                    colors=hex_colors(sel_pts[:, 3:6]), anchor=anchor,
+                    colors=args.point_color or hex_colors(sel_pts[:, 3:6]), anchor=anchor,
                     n_sel=n_target, n_cloud=len(cloud), near_frac=near_frac, phase=phase,
+                    n_handle_total=n_handle_total, n_handle_sel=n_handle_sel,
+                    handle_recall=recall,
                 ))
 
             fig = build_figure(method, frames_data, ep, task, args)
@@ -341,8 +447,11 @@ def main() -> None:
             mb = out.stat().st_size / 1e6
             near = [fd["near_frac"] for fd in frames_data if fd["near_frac"] is not None]
             near_txt = f"{np.mean(near):.1%}" if near else "n/a"
+            rec = [fd["handle_recall"] for fd in frames_data if fd["n_handle_total"]]
+            rec_txt = f"{np.mean(rec):.1%}" if rec else "n/a"
             print(f"[{method:7s}] {len(frames_data)} frames -> {out} ({mb:.1f} MB) "
-                  f"mean budget within {args.near_radius:g} m of handle: {near_txt}")
+                  f"budget within {args.near_radius:g} m of handle: {near_txt} · "
+                  f"GT handle points kept: {rec_txt}")
             written.append(out)
 
     env.close()
