@@ -145,4 +145,22 @@ else
 fi
 
 # --- 3. train (resumes automatically if output_dir holds a checkpoint) ---
-bash "$SCRIPT"
+# Must go through `uv run` so the project venv is active: accelerate lives there, and plain
+# `bash` fails with "accelerate: command not found".
+START_TS=$SECONDS
+set +e
+uv run --no-sync bash "$SCRIPT"
+RC=$?
+set -e
+ELAPSED=$(( SECONDS - START_TS ))
+
+# A chain that resubmits on immediate failure just burns through slots (and, on a busy dev
+# QoS, other people's turn) without ever training. If we died quickly, stop the chain.
+if [ "${RC}" -ne 0 ] && [ "${ELAPSED}" -lt 600 ] && [ -n "${NEXT_ID:-}" ]; then
+    echo "Training failed after ${ELAPSED}s (rc=${RC}); cancelling successor ${NEXT_ID}" \
+         "rather than looping."
+    scancel "${NEXT_ID}" || true
+fi
+
+echo "training exited rc=${RC} after ${ELAPSED}s"
+exit "${RC}"
