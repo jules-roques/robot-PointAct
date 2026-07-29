@@ -172,6 +172,12 @@ def main(args: ClientArgs) -> None:
     max_steps = args.max_steps or env.max_episode_steps
 
     total_episodes, total_successes = 0, 0
+    # Per-trial outcomes. Every arm is evaluated on the SAME seeded scene stream, so trial i is
+    # the same kitchen for every policy: the arms are naturally PAIRED. Recording the per-trial
+    # outcome (rather than only the aggregate rate) is what makes a paired test -- McNemar on
+    # the discordant trials -- possible, which is markedly more powerful than comparing two
+    # independent proportions at these sample sizes.
+    per_trial: list[dict] = []
     import collections
 
     for episode_idx in tqdm.tqdm(range(args.num_trials)):
@@ -243,6 +249,7 @@ def main(args: ClientArgs) -> None:
 
         total_episodes += 1
         total_successes += int(success)
+        per_trial.append({"trial": int(episode_idx), "success": bool(success), "task": str(obs.get("task", ""))})
         suffix = "success" if success else "failure"
         if video_out_dir is not None:
             imageio.mimwrite(
@@ -258,6 +265,27 @@ def main(args: ClientArgs) -> None:
             )
 
     logging.info(f"Total success rate: {total_successes / max(total_episodes, 1):.4f}")
+
+    # Dump the paired record next to the run's other results, keyed by seed so two runs at
+    # different seeds can be pooled without double-counting scenes.
+    if args.save_dir:
+        out = Path(args.save_dir) / f"per_trial_seed{args.seed}_n{total_episodes}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as f:
+            json.dump(
+                {
+                    "seed": int(args.seed),
+                    "env_name": args.env_name,
+                    "num_trials": int(total_episodes),
+                    "successes": int(total_successes),
+                    "success_rate": total_successes / max(total_episodes, 1),
+                    "oracle_anchor": bool(args.oracle_anchor),
+                    "trials": per_trial,
+                },
+                f,
+                indent=2,
+            )
+        logging.info(f"wrote per-trial outcomes to {out}")
     logging.info(f"Total episodes: {total_episodes}")
     env.close()
 
