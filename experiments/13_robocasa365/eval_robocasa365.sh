@@ -17,7 +17,10 @@ options=$5         # e.g. " --args.save_video --args.verbose"
 
 host=localhost
 port=$((10000 + RANDOM % 10000))
-seed=7
+# Overridable so a follow-up eval can draw FRESH scenes. Each trial pulls the next scene from
+# this seeded stream, so re-running with the same seed replays the same episodes -- results
+# from two runs at the same seed must not be pooled as if they were independent trials.
+seed=${SEED:-7}
 num_denoise_steps=10
 
 # The checkout is at $HOME/code on CLEPS but $WORK/code on Jean Zay, so probe rather than
