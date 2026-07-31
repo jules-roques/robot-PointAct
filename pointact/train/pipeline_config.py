@@ -42,6 +42,10 @@ class TrainPipelineConfig(TrainingArguments):
     advantage_cfg_scale: float = field(default=1.0)
 
     """encdec3d model parameters"""
+    # "vlm": live Qwen2.5-VL forward (images + text). "text_cache": no VLM, no images -- the
+    # cross-attention context is a cached text-only embedding per instruction. The point
+    # branch is identical either way; only where `context` comes from changes.
+    context_source: str = field(default="vlm")  # vlm, text_cache
     ctx_embed_size: int = field(default=256)
     time_embed_size: int = field(default=256)
     ptv3_patch_size: int = field(default=1024)
@@ -122,6 +126,17 @@ class TrainPipelineConfig(TrainingArguments):
     """experiment parameters"""
     # if output_dir is not specified, it will be set to {output_base}/{timestamp}-{run_name}
     output_base: str = field(default="outputs", metadata={"help": "Base directory for output."})
+
+    # Ablation coordinates. These do nothing at train time -- they exist so that the whole
+    # TrainingArguments dump W&B logs to run config carries groupable columns. Group the runs
+    # table by exp_task > exp_sampling > exp_npoints to get the ablation grid as nested rows,
+    # which is why run names can stay short. Populated from the `meta:` block of a run yaml.
+    exp_task: str | None = field(default=None)
+    exp_sampling: str | None = field(default=None)  # uniform, eef, anchor
+    exp_npoints: int | None = field(default=None)
+    exp_context: str | None = field(default=None)  # vlm, text_cache
+    exp_seed: int | None = field(default=None)
+    exp_stage: str | None = field(default=None)  # A (npoints sweep), B (task transfer)
 
     def __post_init__(self):
         super().__post_init__()

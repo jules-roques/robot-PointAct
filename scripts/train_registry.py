@@ -41,6 +41,7 @@ def _point_config_kwargs(training_args: TrainPipelineConfig) -> dict[str, Any]:
         "action_chunk_size": training_args.chunk_size,
         "flow_matching_target": training_args.flow_matching_target,
         "flow_matching_loss": training_args.flow_matching_loss,
+        "context_source": training_args.context_source,
         "ctx_embed_size": training_args.ctx_embed_size,
         "time_embed_size": training_args.time_embed_size,
         "use_robot_state": training_args.use_robot_state,

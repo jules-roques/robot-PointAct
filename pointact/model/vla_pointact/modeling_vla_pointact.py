@@ -51,7 +51,16 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         vlm_backbone: Qwen2_5_VLForConditionalGeneration = None,
     ):
         super().__init__(config)
-        self.vlm_backbone = vlm_backbone or Qwen2_5_VLForConditionalGeneration(self.config)
+        if self.uses_vlm:
+            self.vlm_backbone = vlm_backbone or Qwen2_5_VLForConditionalGeneration(self.config)
+        else:
+            # text_cache: the 3B backbone is never built, so it costs neither parameters nor a
+            # forward pass. `config.text_config.hidden_size` is still available for ctx_proj.
+            self.vlm_backbone = None
+
+    @property
+    def uses_vlm(self) -> bool:
+        return getattr(self.config, "context_source", "vlm") == "vlm"
 
     def save_pretrained(self, *args, **kwargs):
         # When saving the model, we do not want to save the original format of the model, as it will cause issues when loading the new model.
@@ -59,6 +68,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         return super().save_pretrained(*args, **kwargs)
     
     def get_input_embeddings(self):
+        if not self.uses_vlm:
+            return None
         return self.vlm_backbone.get_input_embeddings()
 
     @abstractmethod
@@ -147,9 +158,22 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         points: torch.Tensor | None = None,
         npoints_in_batch: torch.Tensor | None = None,
         input_id_lens: list[int] = None,
+        ctx_embeds: torch.Tensor | None = None,
+        ctx_lens: torch.Tensor | None = None,
         **kwargs,
     ) -> VLADualOutputWithPast:
         """multi-modal forward pass, including image, video, state, action, and language."""
+
+        if not self.uses_vlm:
+            return self.forward_cached_context(
+                ctx_embeds=ctx_embeds,
+                ctx_lens=ctx_lens,
+                states=states,
+                actions=actions,
+                action_is_pad=action_is_pad,
+                points=points,
+                npoints_in_batch=npoints_in_batch,
+            )
 
         inputs_embeds = self.embed_prefix(
             input_ids,
@@ -243,7 +267,61 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             attentions=outputs.attentions,
             rope_deltas=self.vlm_backbone.model.rope_deltas,
         )
-    
+
+    def forward_cached_context(
+        self,
+        ctx_embeds: torch.Tensor,
+        ctx_lens: torch.Tensor,
+        states: torch.Tensor | None = None,
+        actions: torch.Tensor | None = None,
+        action_is_pad: torch.Tensor | None = None,
+        points: torch.Tensor | None = None,
+        npoints_in_batch: torch.Tensor | None = None,
+    ) -> VLADualOutputWithPast:
+        """Forward pass with no VLM: `ctx_embeds` replaces its `last_hidden_state`.
+
+        The collator supplies a padded (B, L, text_hidden_size) tensor of cached text-only
+        embeddings and their true lengths, which is exactly the contract `compute_action`
+        already expects, so the point branch and every cross-attention block below are
+        unchanged. There is no language-modelling head here, hence no text loss or logits.
+        """
+        if ctx_embeds is None:
+            raise ValueError(
+                "context_source='text_cache' requires `ctx_embeds` in the batch. Check that "
+                "the data config sets `text_context_file` and that the cache covers every "
+                "instruction in the dataset (build it with data_prep/cache_text_context.py)."
+            )
+
+        output_actions = None
+        if not (self.training or states is None):
+            output_actions = self.compute_action(
+                points, npoints_in_batch, ctx_embeds, ctx_lens, states,
+            )
+
+        loss = None
+        action_loss = None
+        if actions is not None:
+            action_loss = self.compute_action_loss(
+                points, npoints_in_batch,
+                ctx_embeds, ctx_lens,
+                states, actions, action_is_pad,
+            )
+            if isinstance(action_loss, tuple):
+                action_loss = action_loss[0]
+            loss = action_loss
+
+        return VLADualOutputWithPast(
+            loss=loss,
+            action_loss=action_loss,
+            text_loss=None,
+            actions=output_actions,
+            logits=None,
+            past_key_values=None,
+            hidden_states=None,
+            attentions=None,
+            rope_deltas=None,
+        )
+
     @torch.no_grad()
     def sample_actions(
         self,

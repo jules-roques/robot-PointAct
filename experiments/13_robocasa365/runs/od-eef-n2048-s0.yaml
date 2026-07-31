@@ -1,0 +1,19 @@
+# OpenDrawer / eef / 2048 points -- stage A.
+# EEF-density sampling: weight-proportional draw under a Gaussian-with-floor
+# density centred on the frame's own end-effector position. No cache needed.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: eef
+  npoints: 2048
+  context: text_cache
+  seed: 0
+  stage: A
+
+data:
+  lerobot_datasets:
+    - max_npoints: 2048
+      eef_sampling: true
+      eef_sampling_sigma: 0.08
+      eef_sampling_floor: 0.05

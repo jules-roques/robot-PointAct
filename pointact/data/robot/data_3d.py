@@ -81,6 +81,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         eef_sampling: bool = False,
         eef_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
         eef_sampling_floor: float = 0.05,   # minimum weight at infinite distance
+        # Cached text-only context (optional). When set, images are never decoded and the
+        # frame carries the precomputed VLM text embedding for its instruction instead.
+        text_context_file: str | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -133,6 +136,33 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.eef_sampling = eef_sampling
         self.eef_sampling_sigma = eef_sampling_sigma
         self.eef_sampling_floor = eef_sampling_floor
+
+        self.text_context = None
+        if text_context_file is not None:
+            path = os.path.join(self.root, text_context_file)
+            # Tiny (a handful of instructions x ~15 tokens x 2048), so it lives in memory and
+            # is forked into every dataloader worker rather than reopened per process.
+            self.text_context = torch.load(path, map_location="cpu", weights_only=True)
+
+    def lookup_text_context(self, task: str) -> torch.Tensor:
+        """Cached text-only VLM hidden states for one instruction, as (L, hidden_size)."""
+        embed = self.text_context.get(task)
+        if embed is None:
+            raise KeyError(
+                f"instruction {task!r} is missing from the text-context cache for "
+                f"{self.repo_id}. Rebuild it with data_prep/cache_text_context.py -- the "
+                f"cache must cover every string in meta/tasks.jsonl."
+            )
+        return embed
+
+    def add_video_frames(self, item: dict, ep_idx: int, query_indices: dict | None):
+        # Skip video decoding entirely under a cached text context: nothing downstream reads
+        # the frames. Worth doing explicitly because LeRobot decodes *every* key in
+        # meta.video_keys (three here: left, right, wrist), not just select_video_keys, so
+        # this removes three video decodes per sample rather than one.
+        if self.text_context is not None:
+            return item
+        return super().add_video_frames(item, ep_idx, query_indices)
 
     def __del__(self):
         if getattr(self, "_point_cloud_lmdb_txn", None) is not None:
@@ -210,6 +240,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.convert_eef_rotation(item)
         self.normalize_state_action(item)
         self.select_task_text(item, ep_idx, idx)
+
+        # Must follow select_task_text, which is what resolves item["task"].
+        if self.text_context is not None:
+            item["ctx_embeds"] = self.lookup_text_context(item["task"])
 
         return self.post_process(item)
 
@@ -365,6 +399,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         return point_cloud
 
     def post_process(self, item: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        ordered_keys = self.select_feature_keys + [OBS_POINTS, "task", f"{OBS_POINTS}.center"] + self.select_action_is_pad_keys
+        ordered_keys = (
+            self.select_feature_keys
+            + [OBS_POINTS, "task", f"{OBS_POINTS}.center", "ctx_embeds"]
+            + self.select_action_is_pad_keys
+        )
         item = {key: item[key] for key in ordered_keys if key in item}
         return item

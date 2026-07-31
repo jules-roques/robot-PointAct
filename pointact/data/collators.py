@@ -40,10 +40,18 @@ class DataCollator(DefaultDataCollator):
         batch_states = []
         batch_action_is_pad = []
 
+        batch_ctx_embeds = []
+
+        # A cached-text-context run carries no token ids at all -- see
+        # SupervisedDataset.build_cached_context_example.
+        is_cached_context = "ctx_embeds" in examples[0]
         is_labels_provided = "labels" in examples[0]
         for example in examples:
             keys = example.keys()
-            batch_input_ids.append(example["input_ids"])
+            if is_cached_context:
+                batch_ctx_embeds.append(example["ctx_embeds"])
+            else:
+                batch_input_ids.append(example["input_ids"])
 
             if is_labels_provided:
                 batch_label_ids.append(example["labels"])
@@ -69,14 +77,23 @@ class DataCollator(DefaultDataCollator):
                 batch_points.append(example["points"])
                 npoints_in_batch.append(example["npoints_in_batch"])
 
-        input_id_lens = torch.LongTensor([len(input_ids) for input_ids in batch_input_ids])
-        input_ids = pad_sequence(batch_input_ids, padding_side="right", padding_value=self.pad_token_id)
-        attention_mask = input_ids != self.pad_token_id
-        data_dict = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "input_id_lens": input_id_lens,
-        }
+        if is_cached_context:
+            # (B, Lmax, hidden) + true lengths: exactly the (ctx_embeds, ctx_lens) contract
+            # the point branch already expects from the VLM's last_hidden_state. The padding
+            # is never read, because prepare_ptv3_batch slices each row to its ctx_len.
+            data_dict = {
+                "ctx_embeds": pad_sequence(batch_ctx_embeds, padding_side="right", padding_value=0),
+                "ctx_lens": torch.LongTensor([len(embed) for embed in batch_ctx_embeds]),
+            }
+        else:
+            input_id_lens = torch.LongTensor([len(input_ids) for input_ids in batch_input_ids])
+            input_ids = pad_sequence(batch_input_ids, padding_side="right", padding_value=self.pad_token_id)
+            attention_mask = input_ids != self.pad_token_id
+            data_dict = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "input_id_lens": input_id_lens,
+            }
 
         if is_labels_provided:
             labels = pad_sequence(batch_label_ids, padding_side="right", padding_value=IGNORE_INDEX)

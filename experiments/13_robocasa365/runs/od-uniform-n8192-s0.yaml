@@ -1,0 +1,15 @@
+# OpenDrawer / uniform / 8192 points -- stage A.
+# Uniform point subsample: the baseline draw.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: uniform
+  npoints: 8192
+  context: text_cache
+  seed: 0
+  stage: A
+
+data:
+  lerobot_datasets:
+    - max_npoints: 8192

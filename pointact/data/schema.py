@@ -69,6 +69,12 @@ class LerobotConfig:
     eef_sampling_sigma: float = 0.08
     eef_sampling_floor: float = 0.05
 
+    # Cached text-only context (optional). Path (under `root`) of the .pt produced by
+    # data_prep/cache_text_context.py, mapping each instruction string to the frozen VLM's
+    # text-only hidden states. When set, the dataset emits `ctx_embeds` instead of images
+    # and token ids, and no video is decoded at all. Pair with `context_source=text_cache`.
+    text_context_file: str | None = None
+
     image_size: int | None = None
 
     class_name: str = 'LeRobotDataset'

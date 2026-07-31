@@ -91,7 +91,7 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         batch_size = len(batch[state_keys[0]])
         repo_ids = self._resolve_repo_ids(batch, batch_size)
 
-        batch_points, batch_point_centers = [], []
+        batch_points, batch_point_centers, batch_tasks = [], [], []
         for i, repo_id in enumerate(repo_ids):
             mini_batch = {k: v[i] for k, v in batch.items()}
 
@@ -138,10 +138,11 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                 state = torch.as_tensor(state, dtype=torch.float32)
                 batch_states.append(pad_vector(state, self.robot_config["max_state_dim"]))
             batch_messages.append(messages)
+            batch_tasks.append(mini_batch["task"])
             batch_point_centers.append(point_center.numpy())
             batch_points.append(point_cloud)
-            
-        return batch_messages, batch_states or None, batch_points, batch_point_centers, repo_ids
+
+        return batch_messages, batch_states or None, batch_points, batch_point_centers, repo_ids, batch_tasks
 
     def _action_dim(self, repo_id: str) -> int:
         select_action_keys = self.robot_config["select_action_keys"][repo_id]
@@ -172,15 +173,67 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
 
         return EasyDict({"action": output_actions})
 
+    def set_text_context(self, cache: dict) -> None:
+        """Install the instruction -> cached VLM hidden states map used by text_cache runs.
+
+        Same file the dataloader used during training (data_prep/cache_text_context.py), so
+        the policy sees byte-identical context at eval as it did at train time.
+        """
+        self.text_context = cache
+
+    def _sample_actions_cached_context(self, model, batch_tasks, batch_states, batch_points, device):
+        """Predict actions with no VLM forward: look the context up, then run the point branch."""
+        cache = getattr(self, "text_context", None)
+        if not cache:
+            raise RuntimeError(
+                "this checkpoint was trained with context_source='text_cache' but no text "
+                "context cache is loaded. Pass the cache to the policy server (it is the "
+                "`text_context_file` from the run's data config)."
+            )
+
+        missing = [task for task in batch_tasks if task not in cache]
+        if missing:
+            raise KeyError(f"instructions absent from the text-context cache: {sorted(set(missing))}")
+
+        embeds = [cache[task] for task in batch_tasks]
+        ctx_lens = torch.LongTensor([len(embed) for embed in embeds]).to(device)
+        max_len = int(ctx_lens.max())
+        ctx_embeds = torch.zeros(
+            (len(embeds), max_len, embeds[0].shape[-1]), dtype=embeds[0].dtype
+        )
+        for i, embed in enumerate(embeds):
+            ctx_embeds[i, : len(embed)] = embed
+
+        states = torch.stack(batch_states, dim=0).to(device) if batch_states else None
+        return model.compute_action(
+            torch.cat(batch_points, 0).to(device),
+            torch.LongTensor([len(x) for x in batch_points]).to(device),
+            ctx_embeds.to(device),
+            ctx_lens,
+            states,
+        )
+
     @torch.no_grad
     def select_action(
         self, model, batch: dict, pred_rot_type: str, use_cot=False, 
         points_workspace: dict=None, remove_arm: bool=False, **kwargs
     ):
-        batch_messages, batch_states, batch_points, batch_point_centers, repo_ids = self._prepare_robot_inputs(
-            batch, points_workspace=points_workspace, remove_arm=remove_arm
+        batch_messages, batch_states, batch_points, batch_point_centers, repo_ids, batch_tasks = (
+            self._prepare_robot_inputs(
+                batch, points_workspace=points_workspace, remove_arm=remove_arm
+            )
         )
         device = model.device
+
+        if getattr(model.config, "context_source", "vlm") != "vlm":
+            actions = self._sample_actions_cached_context(
+                model, batch_tasks, batch_states, batch_points, device
+            )
+            outs = self._build_action_output(repo_ids, actions.cpu(), pred_rot_type)
+            for i in range(len(outs.action)):
+                if not self._repo_config_flag("is_delta_action", repo_ids[i], default=False):
+                    outs.action[i, :, :3] += batch_point_centers[i][None, :]
+            return outs
 
         inputs = self.apply_chat_template(
             batch_messages,

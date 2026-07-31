@@ -238,10 +238,37 @@ class SupervisedDataset(Dataset):
             sources = self.mm_dataset[i]
         else:
             item = self.lerobot_dataset[i - len(self.mm_dataset)]
+            if self.args.context_source == "text_cache":
+                return self.build_cached_context_example(item)
             sources = self.prompt.build_robot_source(item, self.args)
 
         images, videos, pixel_key, grid_key, video_kwargs = self.load_vision_inputs(sources)
         return self.tensorize_source(sources, images, videos, pixel_key, grid_key, video_kwargs)
+
+    def build_cached_context_example(self, item: dict) -> dict[str, torch.Tensor]:
+        """Example for a VLM-free run: points, state, action and a cached text embedding.
+
+        Deliberately bypasses prompt construction, tokenisation and image preprocessing --
+        none of it is read by `forward_cached_context`, and skipping it is where the CPU
+        saving comes from (the video decode itself is already skipped in the LeRobot dataset).
+        """
+        _, actions, states, action_is_pads, points, _ = collect_robot_tensors(
+            item, self.args.max_action_dim, self.args.max_state_dim
+        )
+
+        # Leading singleton dim on actions/states mirrors tensorize_source's torch.stack, so
+        # the collator's torch.cat(..., dim=0) assembles the batch identically.
+        example = {
+            "ctx_embeds": item["ctx_embeds"],
+            "actions": torch.stack([actions], dim=0),
+            "action_is_pad": torch.stack([action_is_pads], dim=0),
+        }
+        if states is not None and self.args.use_robot_state:
+            example["states"] = torch.stack([states], dim=0)
+        if points is not None:
+            example["points"] = points
+            example["npoints_in_batch"] = points.size(0)
+        return example
 
     def load_vision_inputs(self, sources: dict):
         video_kwargs = {}

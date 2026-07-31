@@ -2,6 +2,7 @@ import os
 import dataclasses
 import json
 import numpy as np
+import torch
 import tyro
 from PIL import Image
 import time
@@ -57,6 +58,11 @@ class ServerArgs:
     # diffusion
     num_denoise_steps: int = 10
 
+    # Required for checkpoints trained with context_source="text_cache": the instruction ->
+    # cached-VLM-embedding map the run trained against (data_prep/cache_text_context.py).
+    # eval_robocasa365.sh derives this from the run's data config.
+    text_context_file: str = ""
+
     save_data: bool = False
     save_dir: str = "/scratch/shichen/datasets/VLA3D_exprs/server_test_data"
 
@@ -91,6 +97,17 @@ class Policy:
         ).eval() #.cuda()
         print(self.model)
         self.processor = processor_class.from_pretrained(args.pretrained_path)
+
+        if model_config.get("context_source", "vlm") != "vlm":
+            if not args.text_context_file:
+                raise ValueError(
+                    f"{args.pretrained_path} was trained with "
+                    f"context_source={model_config['context_source']!r}; pass "
+                    "--args.text_context_file pointing at the cache used for training."
+                )
+            self.processor.set_text_context(
+                torch.load(args.text_context_file, map_location="cpu", weights_only=True)
+            )
 
         self.model.config.num_denoise_steps = args.num_denoise_steps
 

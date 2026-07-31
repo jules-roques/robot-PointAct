@@ -1,0 +1,107 @@
+# Shared settings for every run in the point-count / task ablation.
+#
+# Per-run files `extends:` this and override only their ablation coordinates, so the arms are
+# provably identical everywhere else -- which is the whole basis for comparing them.
+#
+# Cluster paths come from the environment ($SCRATCH, $DSDIR); nothing machine-specific belongs
+# in here. Jean Zay provides the shared IDRIS model tree at $DSDIR, CLEPS does not, so the VLM
+# path is exported by the launcher (experiments/13_robocasa365/train.sh) rather than set here.
+#
+# Launch with:  accelerate launch scripts/train.py <run>.yaml
+
+train:
+  model_class: VLAEncDec3DWithActionRegressionModel
+  vlm_name_or_path: $POINTACT_VLM_PATH
+  # output_dir is derived as {output_base}/{run_name} -- deterministic, so a requeued job
+  # resumes rather than starting a second copy of the run.
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/ablation
+
+  # No live VLM and no images: the cross-attention context is a cached text embedding per
+  # instruction. Every run in this grid shares it; see the plan's "cached text embeddings"
+  # rationale. Language conditioning is kept, which OpenDrawer needs (left vs right drawer).
+  context_source: text_cache
+
+  chunk_size: 16
+  dataloader_num_workers: 8
+  bf16: true
+  fp16: false
+  tf32: true
+
+  # Budget is denominated in gradient steps, not epochs, so one checkpoint grid is
+  # comparable across tasks with different episode lengths. 50K steps at effective batch
+  # 128 is ~50 epochs on each of the three tasks here.
+  max_steps: 50000
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 1
+
+  learning_rate: 5.0e-5
+  merger_lr: 5.0e-5
+  vision_lr: 2.0e-5
+  weight_decay: 0.1
+  warmup_steps: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 3
+  gradient_checkpointing: true
+
+  # Evaluated checkpoints are 20K/30K/40K/50K. Saving every 5K keeps resume granularity and
+  # leaves room to add points to the curve later; the limit must exceed the number of
+  # checkpoints between the first evaluated one and the end, or 20K is evicted before use.
+  save_strategy: steps
+  save_steps: 5000
+  save_total_limit: 12
+  logging_steps: 10
+  log_level: info
+  report_to: [wandb]
+
+  attn_implementation: flash_attention_2
+  use_robot_state: true
+  ctx_embed_size: 512
+
+  ptv3_backend: concerto
+  ptv3_patch_size: 1024
+  ptv3_enc_mode: true
+  ptv3_enc_channels: [64, 128, 256, 512, 768]
+  ptv3_enc_depths: [3, 3, 3, 12, 3]
+  ptv3_enc_num_head: [4, 8, 16, 32, 48]
+  ptv3_input_channels: 6
+  ptv3_apply_point_ca: false
+  ptv3_init_ckpt_file: $SCRATCH/models/Pointcept-Concerto/concerto_large.pth
+
+  action_regression_loss: l2
+  regression_head_heatmap_temp: 0.1
+  action_head_pos_center: zero
+
+  # color_aug is a no-op without images, but leaving image_aug off also skips building the
+  # transform pipeline the dataloader would otherwise construct per worker.
+  image_aug: false
+
+data:
+  mm_datasets:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      root: robot_data/robocasa365/lerobot_point_lmdb
+      class_name: LeRobotPointCloudDataset
+
+      # No VLM, so no camera reaches a vision tower. The point cloud still comes from all
+      # three views via the points_3views LMDB. Leaving these set (rather than empty) keeps
+      # the stats/feature bookkeeping identical to the with-VLM runs.
+      select_video_keys: [observation.images.left_image, observation.images.right_image]
+      video_key_ids_for_vlm: [0, 1]
+
+      select_state_keys: [observation.state]
+      select_action_keys: [action]
+
+      converted_rot_type: rot6d
+      is_delta_action: false
+
+      points_workspace:
+        X_BBOX: [-0.8, 0.8]
+        Y_BBOX: [-0.8, 0.8]
+        Z_BBOX: [0.0, 1.0]
+
+      max_npoints: 4096
+      augment_pc_rot: 30
+      point_cloud_dirname: points_3views
+
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json

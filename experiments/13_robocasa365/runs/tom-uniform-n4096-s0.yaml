@@ -1,0 +1,17 @@
+# TurnOnMicrowave / uniform / 4096 points -- stage B.
+# Uniform point subsample: the baseline draw.
+extends: _base.yaml
+
+meta:
+  task: TurnOnMicrowave
+  sampling: uniform
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: B
+
+data:
+  lerobot_datasets:
+    - repo_id: TurnOnMicrowave
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/TurnOnMicrowave/robot_state_action_stats/rot6d.json
+      max_npoints: 4096

@@ -42,8 +42,9 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         ptv3_input_channels=6,
         ptv3_backend="concerto",
         action_regression_loss="l2",
-        action_head_pos_center="moe", 
+        action_head_pos_center="moe",
         regression_head_heatmap_temp=0.1,
+        context_source="vlm",
         **kwargs,
     ):
         if isinstance(vision_config, dict):
@@ -68,6 +69,12 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.max_state_dim = max_state_dim
         self.max_num_embodiments = max_num_embodiments
         self.use_robot_state = use_robot_state
+
+        # "vlm": run the Qwen2.5-VL forward every step and cross-attend to its hidden states.
+        # "text_cache": no VLM at all -- the context tensor is a precomputed text-only
+        # embedding looked up per instruction (see data_prep/cache_text_context.py). Same
+        # shape, so ctx_proj and every PTv3 cross-attention block are untouched.
+        self.context_source = context_source
 
         self.ctx_embed_size = ctx_embed_size
         self.ptv3_patch_size = ptv3_patch_size

@@ -43,12 +43,18 @@ def build_fresh_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, c
     config_class = _import_object(recipe.config_class)
     model_class = _import_object(recipe.model_class)
 
+    # The VLM config is still read even for a point-only run: it carries the text/vision
+    # hyperparameters (notably text_config.hidden_size, which sizes ctx_proj) that the cached
+    # context tensors were produced with. Only the 3B weights are skipped.
     config = config_class.from_pretrained(
         training_args.vlm_name_or_path,
         dtype=compute_dtype,
         attn_implementation=training_args.attn_implementation,
         **recipe.config_kwargs_fn(training_args),
     )
+
+    if getattr(config, "context_source", "vlm") != "vlm":
+        return model_class(config, vlm_backbone=None)
 
     vlm_backbone = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         training_args.vlm_name_or_path,
@@ -164,9 +170,14 @@ def preview_sample(trainer, processor, data_module) -> None:
         return
 
     dataset = data_module["train_dataset"]
+    sample = dataset[0]
+    if "input_ids" not in sample:
+        # Cached-context run: no prompt was tokenised, so report the context shape instead.
+        print(f"sample: ctx_embeds{tuple(sample['ctx_embeds'].shape)} (no VLM prompt)")
+        return
+
     dataset.info_qwen_vision_fetch()
-    input_ids = dataset[0]["input_ids"]
-    print(f"sample: {processor.tokenizer.decode(input_ids)}")
+    print(f"sample: {processor.tokenizer.decode(sample['input_ids'])}")
 
 
 def train():
@@ -180,11 +191,15 @@ def train():
         maybe_load_ptv3_checkpoint(model, training_args)
 
     processor = load_processor(recipe, training_args)
-    # Add new tokens to processor and model
-    smart_tokenizer_and_embedding_resize(processor, model)
-    # Freeze the vlm or not
-    configure_vlm(model.vlm_backbone, training_args, compute_dtype, training_args.device)
-    
+    if model.vlm_backbone is not None:
+        # Add new tokens to processor and model
+        smart_tokenizer_and_embedding_resize(processor, model)
+        # Freeze the vlm or not
+        configure_vlm(model.vlm_backbone, training_args, compute_dtype, training_args.device)
+    # A cached-context run has no VLM to resize or freeze. The processor is still loaded and
+    # configured below: it owns the robot state/action stats used at inference.
+
+
     model = apply_lora(model, training_args, compute_dtype)
 
     create_data_module = _import_object(recipe.data_module_fn)
@@ -194,7 +209,11 @@ def train():
 
     model.config.use_cache = False
     if training_args.gradient_checkpointing:
-        model.enable_input_require_grads()
+        # enable_input_require_grads hooks the input embedding layer, which only exists when
+        # there is a VLM. A cached-context run feeds float context tensors straight in, so
+        # there is no embedding lookup to force gradients through.
+        if model.get_input_embeddings() is not None:
+            model.enable_input_require_grads()
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
     log_trainable_parameters(model, logger)
