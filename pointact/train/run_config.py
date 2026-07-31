@@ -46,12 +46,33 @@ TASK_ABBREV = {
 }
 
 
+def _merge_lists(base: list, override: list) -> list:
+    """Element-wise merge for lists of dicts; plain lists are replaced outright.
+
+    This exists for `data.lerobot_datasets`. A run file wants to override two or three fields
+    of the dataset entry (`max_npoints`, the sampling flags), and whole-list replacement would
+    silently drop everything else in the base entry -- root, class_name, point_cloud_dirname
+    -- producing a config that fails far from its cause, or worse, trains on the wrong thing.
+    Value lists like ptv3_enc_channels must still replace, hence the all-dicts guard.
+    """
+    if not (base and override and all(isinstance(x, dict) for x in base + override)):
+        return copy.deepcopy(override)
+
+    merged = [
+        _deep_merge(base[i], item) if i < len(base) else copy.deepcopy(item)
+        for i, item in enumerate(override)
+    ]
+    return merged
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursive dict merge; scalars and lists in `override` win outright."""
+    """Recursive dict merge; scalars win outright, lists follow `_merge_lists`."""
     merged = copy.deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
+        elif isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = _merge_lists(merged[key], value)
         else:
             merged[key] = copy.deepcopy(value)
     return merged

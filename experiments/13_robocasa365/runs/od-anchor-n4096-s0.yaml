@@ -14,7 +14,12 @@ meta:
 data:
   lerobot_datasets:
     - max_npoints: 4096
-      eef_sampling: true
-      eef_sampling_sigma: 0.08
-      eef_sampling_floor: 0.05
-      roi_point_cloud_dirname: points_3views_labels
+      oracle_sampling: true
+      oracle_label_dirname: points_3views_labels
+      # Label 4 = the handle alone; fall back to the drawer panel (3) when the handle is
+      # occluded by the gripper or facing away. Sigma/floor match the eef arm exactly, so the
+      # two differ only in where the density bump is centred.
+      oracle_anchor_labels: [4]
+      oracle_anchor_fallback_labels: [3]
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05

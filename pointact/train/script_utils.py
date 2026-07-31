@@ -15,8 +15,8 @@ def parse_training_args(logger=None) -> TrainPipelineConfig:
     parser = HfArgumentParser(TrainPipelineConfig)
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         (training_args,) = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
-        training_args = _parse_run_yaml(parser, os.path.abspath(sys.argv[1]), logger)
+    elif len(sys.argv) >= 2 and sys.argv[1].endswith(".yaml"):
+        training_args = _parse_run_yaml(parser, os.path.abspath(sys.argv[1]), sys.argv[2:], logger)
     else:
         (training_args,) = parser.parse_args_into_dataclasses()
 
@@ -28,10 +28,21 @@ def parse_training_args(logger=None) -> TrainPipelineConfig:
     return training_args
 
 
-def _parse_run_yaml(parser: HfArgumentParser, path: str, logger=None) -> TrainPipelineConfig:
-    """Build TrainPipelineConfig from a run yaml (see pointact/train/run_config.py)."""
+def _parse_run_yaml(
+    parser: HfArgumentParser,
+    path: str,
+    overrides: list[str] | None = None,
+    logger=None,
+) -> TrainPipelineConfig:
+    """Build TrainPipelineConfig from a run yaml, with optional CLI overrides on top.
+
+    The yaml is folded in as argparse defaults, so anything given on the command line wins.
+    That is what lets the launcher derive gradient accumulation from the GPUs SLURM actually
+    granted while everything scientific stays in the (version-controlled) yaml.
+    """
     meta, data, train = resolve_run_config(path)
-    (training_args,) = parser.parse_dict(train)
+    parser.set_defaults(**train)
+    (training_args,) = parser.parse_args_into_dataclasses(args=list(overrides or []))
 
     # The data block is written beside the checkpoints rather than merged into the training
     # args: the data layer already knows how to read a DataConfig yaml, and archiving the
