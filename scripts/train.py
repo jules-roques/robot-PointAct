@@ -11,6 +11,7 @@ from pointact.train.script_utils import (
     parse_training_args,
     train_or_resume,
 )
+from pointact.train.viz_callback import SamplingVizCallback
 from pointact.train.train_utils import (
     add_handler_to_logger,
     configure_vlm,
@@ -220,6 +221,9 @@ def train():
 
     trainer_class = _import_object(recipe.trainer_class)
     trainer = trainer_class(model=model, processing_class=processor, args=training_args, **data_module)
+    # Show what this arm actually feeds the network, not just the loss it produces.
+    # Added after construction so it runs after HF's WandbCallback has created the run.
+    trainer.add_callback(SamplingVizCallback())
     preview_sample(trainer, processor, data_module)
 
     train_or_resume(
