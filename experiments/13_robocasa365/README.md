@@ -57,7 +57,59 @@ Note: only the eef rotation quat at `[3:7]` is converted to rot6d; the base rota
 `[12:16]` passes through unchanged. Fine for fixed-base tasks like OpenDrawer — revisit for
 navigation tasks where the base actually turns.
 
-## Training
+## Point-count / task ablation (the current grid)
+
+Three tasks x point counts x sampling arms, trained **without the VLM**: the context the
+point-action expert cross-attends to is a cached text-only embedding per instruction rather
+than a live Qwen forward. With `--ptv3_apply_point_ca False` (every run here) that context
+was the VLM's only contribution, so dropping the 3B forward and the images leaves the point
+branch untouched while cutting the grid from ~2,160 to ~380 H100-hours. Language
+conditioning survives, which OpenDrawer needs — its instruction carries left/right and the
+target drawer is resampled per episode.
+
+**One yaml per run** (`runs/`), holding the ablation coordinates, the data config and the
+training args together; `runs/_base.yaml` carries everything the arms share.
+
+```bash
+# 0. Build the text-context cache once per task (needs the Qwen weights, not a GPU-heavy job)
+python data_prep/cache_text_context.py \
+    --dataset-dir $SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer \
+    --vlm-path $SCRATCH/models/Qwen2.5-VL-3B-Instruct
+
+# 1. One run
+sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
+       experiments/13_robocasa365/train.slurm
+
+# 2. Or the whole of stage A (9 runs + their eval arrays + the gate)
+bash experiments/13_robocasa365/submit_stage_a.sh
+
+# 3. Evaluate one run at 20/30/40/50K (array; skips checkpoints not yet written)
+sbatch --export=ALL,RUN=od-eef-n4096-s0 experiments/13_robocasa365/eval_grid.slurm
+
+# 4. Push its results into W&B as a success-vs-checkpoint curve
+python experiments/13_robocasa365/log_eval_to_wandb.py \
+    --run-dir $SCRATCH/PointAct_exprs/robocasa365/ablation/od-eef-n4096-s0
+```
+
+Stage B (the two new tasks) **does not auto-launch**. When stage A finishes, a gate job mails
+the point-count x sampling table; pick a point count, then
+`python experiments/13_robocasa365/runs/generate_stage_b.py --npoints <N>`.
+
+Budget is denominated in **gradient steps**, not epochs — 50K steps at effective batch 128 is
+~50 epochs on each of the three tasks, since their episode lengths are within ~10% of each
+other. Fixing steps is what keeps one checkpoint grid comparable across tasks; epochs are
+logged alongside. If a future task's frames-per-epoch differs by more than ~3-4x, equalise the
+dataset (temporal stride or demo subsampling) rather than switching axes.
+
+### W&B conventions
+
+Run names are short (`od-eef-n4096-s0`); identity lives in config columns. Group the runs
+table by `exp_task` > `exp_sampling` > `exp_npoints` to get the grid as nested rows, and save
+one workspace view per figure. `WANDB_RUN_ID` is pinned from the output dir so a requeued job
+resumes one run instead of creating a second. Training runs are `job_type=train`, eval runs
+`job_type=eval`, and both share a `group` per arm.
+
+## Training (pre-ablation baseline runs)
 
 Same architecture as Libero (frozen vision tower + LLM + merger; trainable PTv3 point-action
 expert). Effective batch size 128 on 1–2 H100. RoboCasa365 training has no simulator

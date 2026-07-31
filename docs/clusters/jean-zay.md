@@ -9,10 +9,21 @@ Notes accumulated while building the RoboCasa365 / ROI-sampling pipeline. Verifi
 |---|---|---|
 | V100 | `--account=rgx@v100` | Default. Works. |
 | H100 | `--account=rgx@h100 --partition=gpu_p6 --constraint=h100`, plus `module load arch/h100` | Works. |
-| A100 | `--account=rgx@a100 --partition=gpu_p5` | **Rejected**: `IDRIS: Account rgx@a100 ----- Job type v100 / Invalid account/partition`. |
+| A100 | `--account=rgx@a100 --partition=gpu_p5 --qos=qos_gpu_a100-t3` | Works. |
 
-The A100 rejection is an allocation issue, not a syntax one — if a job needs A100
-specifically, confirm the allocation before assuming a script is broken.
+**The A100 allocation exists** (corrected 2026-08-01). `sacctmgr -n show assoc user=$USER`
+lists `rgx@a100` with `qos_gpu_a100-dev` and `qos_gpu_a100-t3`:
+
+```
+rgx@a100    qos_gpu_a100-dev,qos_gpu_a100-t3
+rgx@cpu     qos_cpu-dev,qos_cpu-t3,qos_cpu-t4
+rgx@h100    qos_gpu_h100-dev,qos_gpu_h100-t3,qos_gpu_h100-t4
+rgx@v100    qos_gpu-dev,qos_gpu-t3,qos_gpu-t4
+```
+
+Note there is **no `t4` QoS on a100**, unlike h100 — asking for one is the likeliest cause
+of the earlier `Invalid account/partition` rejection recorded here. Always pass an explicit
+`--qos` from the list above.
 
 ## Which GPU for which job
 
@@ -25,9 +36,9 @@ The constraints pull in opposite directions, so this is worth stating explicitly
 - Pure-torch inference (e.g. the YOLO-World ROI detection pass) has no simulator
   dependency and runs happily on H100.
 
-That leaves rollout-plus-model workloads (i.e. policy evaluation) wanting A100 — the one
-tier whose account currently rejects jobs. Resolve the allocation before planning an
-evaluation campaign here.
+That leaves rollout-plus-model workloads (i.e. policy evaluation) wanting A100, which is
+available here via `rgx@a100 --partition=gpu_p5 --qos=qos_gpu_a100-t3`. Jean Zay and CLEPS
+therefore both contribute eval capacity; training stays on H100.
 
 ## Compute nodes have no internet
 
