@@ -1,5 +1,8 @@
 # PickPlaceCounterToStove / uniform / 4096 points -- stage B.
 # Uniform point subsample: the baseline draw.
+#
+# Point count chosen from the stage-A sweep on OpenDrawer; regenerate with
+# generate_stage_b.py --npoints <N> if that choice changes.
 extends: _base.yaml
 
 meta:
@@ -14,4 +17,5 @@ data:
   lerobot_datasets:
     - repo_id: PickPlaceCounterToStove
       state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 4096

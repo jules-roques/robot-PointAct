@@ -7,8 +7,10 @@
 # their own CUDA runtime, and ffmpeg's shared libs come from a dedicated conda env
 # (`conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1`) via LD_LIBRARY_PATH below.
 #
-# Submit:
-#   sbatch experiments/13_robocasa365/train.slurm [concerto|concerto_eefdensity]
+# Submit either:
+#   sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
+#          experiments/13_robocasa365/train.slurm          # ablation grid (one yaml per run)
+#   sbatch experiments/13_robocasa365/train.slurm concerto # legacy per-variant payload script
 #
 #SBATCH --job-name=rc365-train-od
 #SBATCH --account=willow
@@ -40,9 +42,16 @@ mkdir -p "$WANDB_DIR"
 REPO="$HOME/code/robot-PointAct"
 cd "$REPO"
 
-VARIANT="${1:-concerto}"
-echo "host=$(hostname) variant=$VARIANT gpus=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "host=$(hostname) gpus=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L
 
 # accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
-uv run --no-sync bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
+if [ -n "${RUN_CONFIG:-}" ]; then
+    # Ablation grid: everything about the run lives in the yaml.
+    uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
+else
+    # Legacy path, kept so the pre-ablation baseline/eefdensity/roi runs remain reproducible.
+    VARIANT="${1:-concerto}"
+    echo "variant=$VARIANT"
+    uv run --no-sync bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
+fi

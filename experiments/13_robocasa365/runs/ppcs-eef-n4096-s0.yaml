@@ -1,6 +1,9 @@
 # PickPlaceCounterToStove / eef / 4096 points -- stage B.
 # EEF-density sampling: weight-proportional draw under a Gaussian-with-floor
 # density centred on the frame's own end-effector position. No cache needed.
+#
+# Point count chosen from the stage-A sweep on OpenDrawer; regenerate with
+# generate_stage_b.py --npoints <N> if that choice changes.
 extends: _base.yaml
 
 meta:
@@ -15,6 +18,7 @@ data:
   lerobot_datasets:
     - repo_id: PickPlaceCounterToStove
       state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 4096
       eef_sampling: true
       eef_sampling_sigma: 0.08
