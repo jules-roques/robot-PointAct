@@ -31,12 +31,27 @@ export HF_HUB_OFFLINE=1
 export UV_OFFLINE=1
 
 # W&B offline: compute nodes have no internet. Runs are written under WANDB_DIR; upload them
-# afterwards from a login node with:  wandb sync $SCRATCH/wandb/offline-run-*
+# afterwards from a LOGIN node with:
+#     bash experiments/13_robocasa365/wandb_sync_jeanzay.sh
+# (runs live at $WANDB_DIR/wandb/offline-run-*, one level deeper than WANDB_DIR)
 export WANDB_MODE=offline
 export WANDB_DIR="$SCRATCH/wandb"
 mkdir -p "$WANDB_DIR"
 
-REPO="$HOME/code/robot-PointAct"
+# The repo lives at a different place on each cluster ($HOME/code on CLEPS, $WORK/code on
+# Jean Zay), and sbatch is always run from the repo root, so trust the submit dir first and
+# fall back to the known locations. Hardcoding $HOME/code here silently broke Jean Zay jobs.
+REPO=""
+for candidate in "${SLURM_SUBMIT_DIR:-}" "$HOME/code/robot-PointAct" "${WORK:-}/code/robot-PointAct"; do
+    if [ -n "$candidate" ] && [ -d "$candidate/experiments/13_robocasa365" ]; then
+        REPO="$candidate"
+        break
+    fi
+done
+if [ -z "$REPO" ]; then
+    echo "Could not locate the robot-PointAct checkout" >&2
+    exit 1
+fi
 cd "$REPO"
 
 VARIANT="${1:-concerto}"

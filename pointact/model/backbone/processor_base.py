@@ -273,6 +273,73 @@ class RobotPointProcessorBase(RobotProcessorBase):
         ridxs = np.random.choice(len(point_cloud), size=max_npoints, replace=False)
         return point_cloud[ridxs]
 
+    # --- density-weighted sampling, to match how a policy was TRAINED --------------------
+    # A policy trained on clouds concentrated near the end-effector (or near the task's
+    # handle) must be evaluated on clouds sampled the same way; feeding it a uniform cloud is
+    # a train/test mismatch that shows up as a spurious drop in success rate. These default
+    # to "uniform", so a baseline policy behaves exactly as before.
+    point_sampling: str = "uniform"        # "uniform" | "eef" | "anchor"
+    point_sampling_sigma: float = 0.08
+    point_sampling_floor: float = 0.05
+
+    def _sampling_anchor(self, mini_batch: dict) -> np.ndarray | None:
+        """Centre of the sampling density for this frame, in the point-cloud (base) frame."""
+        # mini_batch is already per-sample here (the caller does {k: v[i] ...}), so these are
+        # 1-D vectors, not batches; ravel rather than indexing a leading batch axis.
+        key = {
+            "eef": "observation.state",
+            "anchor": "observation.sampling_anchor",
+        }.get(self.point_sampling)
+        if key is None:
+            return None
+        value = mini_batch.get(key)
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+        value = np.asarray(value, dtype=np.float64).reshape(-1)
+        if len(value) < 3 or not np.isfinite(value[:3]).all():
+            return None
+        # The first three entries are the position, in the same (robot-base) frame as the
+        # point cloud at this stage -- centering happens after sampling, exactly as in training.
+        return value[:3]
+
+    def _sample_point_cloud(
+        self, point_cloud: np.ndarray, max_npoints: int, mini_batch: dict
+    ) -> np.ndarray:
+        if len(point_cloud) <= max_npoints or self.point_sampling == "uniform":
+            return self._subsample_point_cloud(point_cloud, max_npoints)
+
+        anchor = self._sampling_anchor(mini_batch)
+        if anchor is None:
+            # No usable anchor this frame (e.g. the handle is occluded): fall back to the
+            # uniform draw rather than silently biasing the sample. Falling back on EVERY
+            # frame means the anchor never arrived, which silently turns a non-uniform policy
+            # into a uniformly-sampled one, so make that visible instead of invisible.
+            self._anchor_misses = getattr(self, "_anchor_misses", 0) + 1
+            if self._anchor_misses in (1, 10, 100, 1000):
+                print(
+                    f"[processor] WARNING: point_sampling={self.point_sampling} but no anchor "
+                    f"available ({self._anchor_misses} frames so far); falling back to uniform "
+                    f"sampling, which does NOT match how this policy was trained.",
+                    flush=True,
+                )
+            return self._subsample_point_cloud(point_cloud, max_npoints)
+        if anchor.shape != (3,):
+            raise ValueError(f"sampling anchor must be a 3-vector, got shape {anchor.shape}")
+
+        # Same weighting and draw as the dataloader, imported rather than reimplemented so the
+        # two paths cannot drift apart.
+        from pointact.roi_sampling.geometry import eef_density_weights
+        from pointact.roi_sampling.sampling import density_weighted_indices
+
+        weights = eef_density_weights(
+            point_cloud[:, :3], anchor, self.point_sampling_sigma, self.point_sampling_floor
+        )
+        rng = np.random.default_rng(np.random.randint(2**31 - 1))
+        ridxs = density_weighted_indices(len(point_cloud), max_npoints, weights, rng)
+        return point_cloud[ridxs]
+
     @staticmethod
     def _remove_robot_arm_points(point_cloud: np.ndarray, mini_batch: dict) -> np.ndarray:
         import open3d as o3d
@@ -304,7 +371,9 @@ class RobotPointProcessorBase(RobotProcessorBase):
         point_cloud = self._voxel_downsample_point_cloud(point_cloud, voxel_size=voxel_size)
         if remove_arm and (not has_existing_point_cloud or "observation.robot_joints_bbox" in mini_batch):
             point_cloud = self._remove_robot_arm_points(point_cloud, mini_batch)
-        point_cloud = self._subsample_point_cloud(point_cloud, self.robot_config["max_npoints"][repo_id])
+        point_cloud = self._sample_point_cloud(
+            point_cloud, self.robot_config["max_npoints"][repo_id], mini_batch
+        )
         return point_cloud
 
     @staticmethod

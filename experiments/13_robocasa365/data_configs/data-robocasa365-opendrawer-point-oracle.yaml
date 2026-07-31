@@ -1,0 +1,60 @@
+# Oracle variant of data-robocasa365-opendrawer-point.yaml.
+# IDENTICAL to the baseline config except for the oracle_* fields at the bottom, which replace
+# the dataloader's uniform subsample with exactly the same Gaussian-with-floor density as the
+# eefdensity config -- only the centre differs: the handle the gripper is reaching for, instead
+# of the gripper itself. Pairing the two arms this way isolates *where to look* from *how to
+# weight*, since the weighting function is identical.
+#
+# This is the UPPER BOUND for the sampling ablations, not a deployable policy: the labels are
+# simulator-privileged information used only to choose which points to keep. If knowing exactly
+# where the handle is does not beat uniform sampling here, no learned/detected ROI (see the roi
+# and eefdensity configs) can be expected to either.
+#
+# Needs the label LMDB from:
+#   replay.py --labels-only  ->  export_point_labels.py
+
+mm_datasets:
+
+lerobot_datasets:
+
+  - repo_id: OpenDrawer
+    root: robot_data/robocasa365/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+
+    # The VLM sees both external agentview cameras for scene context, but NOT the
+    # egocentric wrist view (matches the uniform baseline config).
+    select_video_keys: [observation.images.left_image, observation.images.right_image]
+    video_key_ids_for_vlm: [0, 1]
+
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+
+    converted_rot_type: rot6d  # euler, rot6d
+    is_delta_action: False
+
+    points_workspace: {
+      'X_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Y_BBOX': [-0.8, 0.8],   # 0 = robot base
+      'Z_BBOX': [0.0, 1.0],    # 0 = floor
+    }
+
+    max_npoints: 4096
+    augment_pc_rot: 30
+    point_cloud_dirname: points_3views
+
+    state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+
+    # --- Oracle sampling (the only difference vs. the baseline config) ---
+    oracle_sampling: True
+    oracle_label_dirname: points_3views_labels
+    # Anchor the Gaussian on label 4 = the handle alone (a compact few-cm cluster), so the
+    # budget concentrates on the contact point rather than the whole drawer front.
+    oracle_anchor_labels: [4]
+    # The handle is occluded by the gripper or facing away in some frames; fall back to the
+    # drawer panel it sits on (label 3) rather than losing all guidance. Frames with neither
+    # visible revert to a plain uniform draw.
+    oracle_anchor_fallback_labels: [3]
+    # Same values as the eefdensity config, deliberately: with an identical density shape and
+    # bandwidth, any difference between the two runs is attributable to the anchor.
+    oracle_sampling_sigma: 0.08
+    oracle_sampling_floor: 0.05

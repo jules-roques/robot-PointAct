@@ -55,6 +55,14 @@ class ServerArgs:
     host: str = "127.0.0.1"
     port: int = 5555
 
+    # Point sampling at inference. Must match how the checkpoint was TRAINED: a policy trained
+    # on clouds concentrated around the end-effector ("eef") or around a supplied anchor
+    # ("anchor", e.g. the simulator's ground-truth handle) sees a different input distribution
+    # than a uniformly sampled cloud, and evaluating it uniformly is a train/test mismatch.
+    point_sampling: str = "uniform"   # "uniform" | "eef" | "anchor"
+    point_sampling_sigma: float = 0.08
+    point_sampling_floor: float = 0.05
+
     # diffusion
     num_denoise_steps: int = 10
 
@@ -97,6 +105,15 @@ class Policy:
         ).eval() #.cuda()
         print(self.model)
         self.processor = processor_class.from_pretrained(args.pretrained_path)
+        if args.point_sampling not in ("uniform", "eef", "anchor"):
+            raise ValueError(f"Unknown point_sampling {args.point_sampling!r}")
+        self.processor.point_sampling = args.point_sampling
+        self.processor.point_sampling_sigma = args.point_sampling_sigma
+        self.processor.point_sampling_floor = args.point_sampling_floor
+        print(
+            f"[server] point_sampling={args.point_sampling} "
+            f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor}"
+        )
 
         if model_config.get("context_source", "vlm") != "vlm":
             if not args.text_context_file:

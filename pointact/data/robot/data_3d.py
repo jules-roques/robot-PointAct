@@ -84,6 +84,21 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # Cached text-only context (optional). When set, images are never decoded and the
         # frame carries the precomputed VLM text embedding for its instruction instead.
         text_context_file: str | None = None,
+        # Oracle sampling (optional): the upper bound on what any learned sampler could buy.
+        # Uses the SAME Gaussian-with-floor density as eef_sampling above, so the two arms
+        # differ only in where the bump is centred: the gripper (eef_sampling) vs. the handle
+        # it is reaching for (here). The anchor is the centroid of the points the simulator
+        # labels as the handle, read from a sibling label LMDB written by convert.py
+        # --point-labels. Privileged information: preprocessing only, never a policy input.
+        oracle_sampling: bool = False,
+        oracle_label_dirname: str | None = None,
+        # Labels whose centroid anchors the Gaussian. Default (4,) = the handle alone.
+        oracle_anchor_labels: tuple[int, ...] = (4,),
+        # Used when no anchor-labelled point is visible this frame (the handle can be occluded
+        # by the gripper or face away): default (3,) = the drawer front panel it sits on.
+        oracle_anchor_fallback_labels: tuple[int, ...] = (3,),
+        oracle_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
+        oracle_sampling_floor: float = 0.05,   # minimum weight at infinite distance
         **kwargs,
     ):
         super().__init__(
@@ -136,6 +151,24 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.eef_sampling = eef_sampling
         self.eef_sampling_sigma = eef_sampling_sigma
         self.eef_sampling_floor = eef_sampling_floor
+
+        self.oracle_sampling = oracle_sampling
+        self.oracle_anchor_labels = tuple(int(label) for label in oracle_anchor_labels)
+        self.oracle_anchor_fallback_labels = tuple(
+            int(label) for label in oracle_anchor_fallback_labels
+        )
+        self.oracle_sampling_sigma = oracle_sampling_sigma
+        self.oracle_sampling_floor = oracle_sampling_floor
+        if oracle_sampling and oracle_label_dirname is None:
+            raise ValueError("oracle_sampling requires oracle_label_dirname")
+        self.oracle_label_dir = (
+            os.path.join(self.root, oracle_label_dirname)
+            if oracle_label_dirname is not None
+            else None
+        )
+        self._oracle_lmdb_env = None
+        self._oracle_lmdb_txn = None
+        self._oracle_lmdb_pid = None
 
         self.text_context = None
         if text_context_file is not None:
@@ -232,8 +265,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
         # Frame-level halo (anchor, radius): unaffected by the workspace crop below.
         roi_halo = self.load_roi_halo(ep_idx, frame_idx)
-        point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
-        point_cloud = self.augment_point_cloud(point_cloud, item, roi_halo)
+        # Per-point ground-truth labels must be cropped alongside the cloud to stay aligned.
+        point_labels = self.load_point_labels(ep_idx, frame_idx) if self.oracle_sampling else None
+        point_cloud, point_labels = self.filter_point_cloud_by_workspace(point_cloud, point_labels)
+        point_cloud = self.augment_point_cloud(point_cloud, item, roi_halo, point_labels)
         point_cloud = self.center_point_cloud(point_cloud, item)
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
@@ -255,9 +290,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise KeyError(f"Point cloud '{point_key}' not found in {self.point_cloud_dir}")
         return msgpack.unpackb(point_cloud).copy().astype(np.float32)
 
-    def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray):
+    def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray, point_labels=None):
+        """Crop to the workspace box, keeping any per-point labels in lockstep."""
         if self.points_workspace is None:
-            return point_cloud
+            return point_cloud, point_labels
 
         workspace = self.points_workspace
         point_mask = (
@@ -268,7 +304,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             & (point_cloud[:, 2] > workspace["Z_BBOX"][0])
             & (point_cloud[:, 2] < workspace["Z_BBOX"][1])
         )
-        return point_cloud[point_mask]
+        if point_labels is not None:
+            point_labels = point_labels[point_mask]
+        return point_cloud[point_mask], point_labels
 
     def get_point_cloud_lmdb_txn(self):
         current_pid = os.getpid()
@@ -308,6 +346,36 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         return self._roi_lmdb_txn
 
+    def get_oracle_lmdb_txn(self):
+        current_pid = os.getpid()
+        if self._oracle_lmdb_pid != current_pid:
+            self._oracle_lmdb_env = None
+            self._oracle_lmdb_txn = None
+            self._oracle_lmdb_pid = current_pid
+
+        if self._oracle_lmdb_env is None:
+            self._oracle_lmdb_env = lmdb.open(
+                self.oracle_label_dir,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                max_spare_txns=1,
+            )
+            self._oracle_lmdb_txn = self._oracle_lmdb_env.begin(buffers=True)
+
+        return self._oracle_lmdb_txn
+
+    def load_point_labels(self, ep_idx: int, frame_idx: int):
+        """Ground-truth label per point, aligned with load_point_cloud's output order."""
+        if self.oracle_label_dir is None:
+            return None
+        txn = self.get_oracle_lmdb_txn()
+        point_key = f"{ep_idx}-{frame_idx}"
+        buf = txn.get(point_key.encode("ascii"))
+        if buf is None:
+            raise KeyError(f"Point labels '{point_key}' not found in {self.oracle_label_dir}")
+        return msgpack.unpackb(buf).copy().astype(np.uint8)
+
     def load_roi_halo(self, ep_idx: int, frame_idx: int):
         """Return (anchor_xyz, radius) for this frame, or None.
 
@@ -327,13 +395,47 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             return None
         return rec[:3].astype(np.float64), float(rec[3])
 
-    def augment_point_cloud(self, point_cloud: np.ndarray, item: dict, roi_halo: tuple | None = None):
+    def oracle_anchor(self, point_cloud: np.ndarray, point_labels: np.ndarray):
+        """Centroid of the ground-truth handle points, or None if nothing usable is visible.
+
+        The handle is a small compact cluster (a few cm across), so its centroid is a good
+        Gaussian centre. It can be occluded by the gripper or face away from every camera, in
+        which case we fall back to the drawer panel it sits on rather than to no guidance at
+        all; only when neither is visible does the caller revert to a uniform draw.
+        """
+        for labels in (self.oracle_anchor_labels, self.oracle_anchor_fallback_labels):
+            if not labels:
+                continue
+            mask = np.isin(point_labels, labels)
+            if mask.any():
+                return point_cloud[mask, :3].mean(axis=0).astype(np.float64)
+        return None
+
+    def augment_point_cloud(
+        self,
+        point_cloud: np.ndarray,
+        item: dict,
+        roi_halo: tuple | None = None,
+        point_labels: np.ndarray | None = None,
+    ):
         # Baseline count rule is preserved exactly; only the *selection* changes when a
         # valid halo is present.
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = None
-            if self.eef_sampling:
+            if self.oracle_sampling and point_labels is not None:
+                # Same Gaussian-with-floor density as the eef arm, centred on the handle the
+                # gripper is reaching for instead of on the gripper itself. Frames with no
+                # visible anchor fall through to the uniform draw below.
+                anchor = self.oracle_anchor(point_cloud, point_labels)
+                if anchor is not None:
+                    rng = np.random.default_rng(np.random.randint(2**31 - 1))
+                    w = eef_density_weights(
+                        point_cloud[:, :3], anchor,
+                        self.oracle_sampling_sigma, self.oracle_sampling_floor,
+                    )
+                    ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
+            elif self.eef_sampling:
                 rng = np.random.default_rng(np.random.randint(2**31 - 1))
                 eef_pos = item[OBS_STATE][:3].numpy()
                 w = eef_density_weights(

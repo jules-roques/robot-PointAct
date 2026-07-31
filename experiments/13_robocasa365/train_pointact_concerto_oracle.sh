@@ -1,10 +1,10 @@
 ulimit -u 2048
 
-# EEF-density-sampling training run. IDENTICAL to train_pointact_concerto.sh except:
-#   - default data config is the eef-density variant (Gaussian-with-floor sampling around
-#     the end-effector, in place of uniform subsampling),
+# Oracle-sampling training run. IDENTICAL to train_pointact_concerto.sh except:
+#   - default data config is the oracle variant (ground-truth drawer/handle labels drive the
+#     point budget, in place of uniform subsampling),
 #   - epoch defaults to 20, matching the uniform baseline (5 epochs badly underfits this task).
-# The run_name (derived from the config basename) contains "eefdensity", giving a distinct
+# The run_name (derived from the config basename) contains "oracle", giving a distinct
 # output_dir that will not collide with the baseline run.
 
 export TRANSFORMERS_OFFLINE=1
@@ -37,14 +37,11 @@ else
 fi
 
 # datasets (eef-density variant by default)
-dataset=${1:-experiments/13_robocasa365/data_configs/data-robocasa365-opendrawer-point-eefdensity.yaml}
-# NOTE: 'leftview' is a MISNOMER -- this run feeds the VLM both agentview cameras, exactly
-# like the baseline (verified at runtime: two <|vision_start|> blocks, 162 image_pad
-# tokens, identical to concerto.sh). The label is wrong; the training is not. It is left
-# alone deliberately: run_name determines output_dir, so correcting it mid-run would
-# orphan the checkpoints and restart the chain. Change it to 'leftright' once the
-# current run finishes.
-dataset_name=$(basename ${dataset%.*})-rot6d-image.leftview
+dataset=${1:-experiments/13_robocasa365/data_configs/data-robocasa365-opendrawer-point-oracle.yaml}
+# 'leftright' describes what the VLM is actually fed: both agentview cameras
+# (select_video_keys + video_key_ids_for_vlm [0,1] in the data config). This is a
+# label only -- it feeds run_name and nothing else -- but it must not lie.
+dataset_name=$(basename ${dataset%.*})-rot6d-image.leftright
 
 # hparams
 lr=5e-5
