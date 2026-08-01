@@ -22,7 +22,7 @@
 # on one node); the script adapts the batch split automatically:
 #   sbatch --gres=gpu:2 --cpus-per-task=48 ... same as above
 #
-#SBATCH --job-name=rc365-dev
+#SBATCH --job-name=dev
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --nodes=1

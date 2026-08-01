@@ -12,7 +12,7 @@
 #   sbatch --account=rgx@cpu --partition=cpu_p1 --mail-type=END \
 #          --mail-user=jules28.roques@gmail.com --wrap='echo mail probe'
 #
-#SBATCH --job-name=rc365-gate-stageA
+#SBATCH --job-name=gate-stageA
 #SBATCH --account=rgx@cpu
 #SBATCH --partition=cpu_p1
 #SBATCH --cpus-per-task=2

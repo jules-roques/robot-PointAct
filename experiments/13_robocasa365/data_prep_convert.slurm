@@ -6,7 +6,7 @@
 #
 #   sbatch experiments/13_robocasa365/data_prep_convert.slurm
 #
-#SBATCH --job-name=rc365-convert-od
+#SBATCH --job-name=convert-od
 #SBATCH --account=willow
 #SBATCH --partition=cpu_homogen
 #SBATCH --cpus-per-task=16

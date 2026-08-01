@@ -14,7 +14,7 @@
 # --resume skips already-cached episodes, so resubmitting continues past the walltime limit
 # rather than starting over.
 #
-#SBATCH --job-name=rc365-replay
+#SBATCH --job-name=replay
 #SBATCH --account=rgx@v100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=10

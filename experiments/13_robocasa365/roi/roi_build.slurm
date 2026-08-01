@@ -7,7 +7,7 @@
 #   sbatch --constraint=h100 --export=ALL,EPISODES="0 1 2" --qos=qos_gpu_h100-dev --time=00:30:00 \
 #          experiments/13_robocasa365/roi/roi_build.slurm                          # dev subset
 #
-#SBATCH --job-name=rc365-roi-build
+#SBATCH --job-name=roi-build
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --gres=gpu:1

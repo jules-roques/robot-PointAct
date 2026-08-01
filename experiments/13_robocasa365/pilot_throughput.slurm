@@ -6,7 +6,7 @@
 # Uses the 2h dev QoS -- twelve short runs (six configurations x two step counts) fit
 # comfortably, and dev turns around far faster than t3/t4 for a job this small.
 #
-#SBATCH --job-name=rc365-pilot
+#SBATCH --job-name=pilot
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --constraint=h100

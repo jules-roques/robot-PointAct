@@ -10,7 +10,7 @@
 #
 # RoboCasa365 does not run correctly on H100, so this targets the V100 partition.
 #
-#SBATCH --job-name=rc365-replay
+#SBATCH --job-name=replay
 #SBATCH --account=rgx@v100
 #SBATCH --partition=gpu_p13
 #SBATCH --gres=gpu:1

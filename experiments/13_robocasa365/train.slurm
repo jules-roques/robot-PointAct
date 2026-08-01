@@ -12,7 +12,7 @@
 #          experiments/13_robocasa365/train.slurm          # ablation grid (one yaml per run)
 #   sbatch experiments/13_robocasa365/train.slurm concerto # legacy per-variant payload script
 #
-#SBATCH --job-name=rc365-train-od
+#SBATCH --job-name=train-od
 #SBATCH --account=willow
 #SBATCH --partition=gpu
 #SBATCH --ntasks=1

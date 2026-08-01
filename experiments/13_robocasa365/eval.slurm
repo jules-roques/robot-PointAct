@@ -11,7 +11,7 @@
 # Full (50 trials -> success rate):
 #   sbatch --export=ALL,CKPT_STEP=final-48750 experiments/13_robocasa365/eval.slurm
 #
-#SBATCH --job-name=rc365-eval-od
+#SBATCH --job-name=eval-od
 #SBATCH --account=willow
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1

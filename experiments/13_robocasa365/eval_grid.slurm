@@ -17,7 +17,7 @@
 # eval_grid_jeanzay.slurm, whose account/QoS differ (rgx@a100, qos_gpu_a100-t3; note there is
 # no t4 QoS for a100).
 #
-#SBATCH --job-name=rc365-evalgrid
+#SBATCH --job-name=evalgrid
 #SBATCH --account=willow
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1

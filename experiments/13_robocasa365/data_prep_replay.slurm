@@ -8,7 +8,7 @@
 #
 #   sbatch experiments/13_robocasa365/data_prep_replay.slurm
 #
-#SBATCH --job-name=rc365-replay-od
+#SBATCH --job-name=replay-od
 #SBATCH --account=willow
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:v100:1

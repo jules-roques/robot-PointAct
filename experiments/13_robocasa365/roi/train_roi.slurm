@@ -6,7 +6,7 @@
 #   module load arch/h100
 #   sbatch --constraint=h100 experiments/13_robocasa365/roi/train_roi.slurm
 #
-#SBATCH --job-name=rc365-train-od-roi
+#SBATCH --job-name=train-od-roi
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --ntasks=1

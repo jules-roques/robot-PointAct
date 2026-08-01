@@ -16,7 +16,7 @@
 #   sbatch --mail-type=END --mail-user=jules28.roques@gmail.com --wrap='echo mail probe'
 # -- otherwise the summary still lands in the log and $SUMMARY_OUT, but nothing tells you.
 #
-#SBATCH --job-name=rc365-gate-stageA
+#SBATCH --job-name=gate-stageA
 #SBATCH --account=willow
 #SBATCH --partition=cpu_homogen
 #SBATCH --cpus-per-task=2

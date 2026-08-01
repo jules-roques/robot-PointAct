@@ -55,11 +55,11 @@ for config in "$RUNS_DIR"/od-*.yaml; do
     run=$(basename "$config" .yaml)
     echo "submitting $run"
 
-    train_id=$(submit --job-name="rc365-$run" $TRAIN_EXTRA \
+    train_id=$(submit --job-name="$run" $TRAIN_EXTRA \
                       --export=ALL,RUN_CONFIG="$config" "$TRAIN_SLURM")
     echo "  train: $train_id"
 
-    eval_id=$(submit --job-name="rc365-eval-$run" \
+    eval_id=$(submit --job-name="eval-$run" \
                      --dependency=afterany:"$train_id" \
                      --export=ALL,RUN="$run" "$EVAL_SLURM")
     echo "  eval : $eval_id"

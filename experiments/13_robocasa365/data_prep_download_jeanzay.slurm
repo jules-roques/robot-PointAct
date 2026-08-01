@@ -11,7 +11,7 @@
 # ~500 human demos per task. Budget roughly 60-70 GB of raw data per task before replay, going
 # by OpenDrawer's footprint on this cluster.
 #
-#SBATCH --job-name=rc365-download
+#SBATCH --job-name=download
 #SBATCH --account=rgx@cpu
 #SBATCH --partition=prepost
 #SBATCH --cpus-per-task=8

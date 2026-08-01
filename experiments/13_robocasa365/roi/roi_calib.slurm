@@ -2,7 +2,7 @@
 # Stage A: dump RoboCASA left/right camera calibration (robocasa365 env, V100/EGL).
 #   sbatch experiments/13_robocasa365/roi/roi_calib.slurm
 #
-#SBATCH --job-name=rc365-roi-calib
+#SBATCH --job-name=roi-calib
 #SBATCH --account=rgx@v100
 #SBATCH --partition=gpu_p13
 #SBATCH --gres=gpu:1

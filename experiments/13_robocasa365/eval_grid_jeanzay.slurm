@@ -12,7 +12,7 @@
 # Array tasks whose checkpoint does not exist yet exit 0, so this can be submitted with
 # --dependency=afterany on the training job and resubmitted later for the stragglers.
 #
-#SBATCH --job-name=rc365-evalgrid
+#SBATCH --job-name=evalgrid
 #SBATCH --account=rgx@a100
 #SBATCH --partition=gpu_p5
 #SBATCH --constraint=a100

@@ -8,7 +8,7 @@
 #   module load arch/h100
 #   sbatch --constraint=h100 experiments/13_robocasa365/train_jeanzay.slurm [concerto|concerto_eefdensity|utonia]
 #
-#SBATCH --job-name=rc365-train-od
+#SBATCH --job-name=train-od
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --ntasks=1

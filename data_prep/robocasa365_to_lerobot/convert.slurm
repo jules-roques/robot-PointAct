@@ -5,7 +5,7 @@
 # Submit:
 #   sbatch data_prep/robocasa365_to_lerobot/convert.slurm
 #
-#SBATCH --job-name=rc365-convert
+#SBATCH --job-name=convert
 #SBATCH --account=rgx@cpu
 #SBATCH --partition=cpu_p1
 #SBATCH --cpus-per-task=20

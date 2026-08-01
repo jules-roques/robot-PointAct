@@ -4,7 +4,7 @@
 #
 #   sbatch --export=ALL,TASK=TurnOnMicrowave experiments/13_robocasa365/data_prep_convert_jeanzay.slurm
 #
-#SBATCH --job-name=rc365-convert
+#SBATCH --job-name=convert
 #SBATCH --account=rgx@cpu
 #SBATCH --partition=cpu_p1
 #SBATCH --cpus-per-task=16

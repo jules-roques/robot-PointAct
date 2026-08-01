@@ -7,7 +7,7 @@
 # GPU per task -- a V100 is plenty, and V100 is the Jean Zay tier with the least queue.
 # (FlashAttention would rule out V100, but the cache script asks for sdpa.)
 #
-#SBATCH --job-name=rc365-textctx
+#SBATCH --job-name=textctx
 #SBATCH --account=rgx@v100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=10
