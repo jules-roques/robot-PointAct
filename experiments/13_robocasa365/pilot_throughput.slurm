@@ -24,6 +24,10 @@ set -euo pipefail
 
 module purge
 module load arch/h100
+# The vlm arm decodes video, so torchcodec needs libav* from the ffmpeg module. The
+# text_cache arm does not (it skips decoding entirely), which is why only the vlm cells
+# failed without this.
+module load ffmpeg/6.1.1
 
 WORKTREE="$WORK/code/robot-PointAct/.claude/worktrees/pointcount-ablation"
 cd "$WORKTREE"
@@ -51,4 +55,5 @@ nvidia-smi -L
 uv run --project "$WORK/code/robot-PointAct" --no-sync \
     python experiments/13_robocasa365/pilot_throughput.py \
         --gpus "${SLURM_GPUS_ON_NODE:-4}" \
+        --short-steps 40 --long-steps 160 \
         --out "$SCRATCH/pilot_throughput.json"

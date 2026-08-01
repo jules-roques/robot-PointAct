@@ -127,8 +127,11 @@ def main() -> None:
                         default=Path("experiments/13_robocasa365/runs/_base.yaml"))
     parser.add_argument("--contexts", nargs="+", default=["text_cache", "vlm"])
     parser.add_argument("--npoints", nargs="+", type=int, default=[2048, 4096, 8192])
-    parser.add_argument("--short-steps", type=int, default=20)
-    parser.add_argument("--long-steps", type=int, default=60)
+    # Wide enough that the difference clears run-to-run startup noise. At 20/60 the
+    # cheapest cell (n2048) produced a *negative* delta -- ~20s of node-to-node
+    # variation swamped 40 steps of a sub-0.5s/step configuration.
+    parser.add_argument("--short-steps", type=int, default=40)
+    parser.add_argument("--long-steps", type=int, default=160)
     parser.add_argument("--gpus", type=int, default=int(os.environ.get("SLURM_GPUS_ON_NODE", 4)))
     parser.add_argument("--per-device-batch", type=int, default=32)
     parser.add_argument("--effective-batch", type=int, default=128)
