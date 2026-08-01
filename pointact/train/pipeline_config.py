@@ -165,6 +165,19 @@ class TrainPipelineConfig(TrainingArguments):
         elif self.lora_namespan_exclude is None:
             self.lora_namespan_exclude = []
 
+        if self.context_source != "vlm" and self.gradient_checkpointing:
+            # Gradient checkpointing only ever applied to the Qwen backbone -- PTv3 does not
+            # implement HF's `_set_gradient_checkpointing`, so with no VLM there is nothing
+            # that supports it and `gradient_checkpointing_enable()` raises outright. Turning
+            # it off is the right answer rather than a workaround: it existed to fit a 3B
+            # backbone in memory, and the point expert is ~100M, so this also buys throughput.
+            self.gradient_checkpointing = False
+            warnings.warn(
+                "`gradient_checkpointing` is set to False when `context_source` is not 'vlm' "
+                "(no VLM to checkpoint; the point expert trains unchecked).",
+                stacklevel=2,
+            )
+
         if self.processor_name_or_path is None:
             self.processor_name_or_path = self.model_name_or_path or self.vlm_name_or_path
 

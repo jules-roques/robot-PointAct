@@ -64,6 +64,30 @@ def build_pilot_config(base: Path, out_dir: Path, context: str, npoints: int, st
     return path
 
 
+def first_error(blob: str, context: int = 12) -> str:
+    """The child process's own traceback, not torchrun's wrapper.
+
+    A failing rank makes accelerate print a ChildFailedError banner that says only "exitcode
+    1"; tailing the output shows that banner and buries the actual exception hundreds of lines
+    up. This finds the real one.
+    """
+    lines = blob.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("Traceback (most recent call")]
+    bounds = list(zip(starts, starts[1:] + [len(lines)]))
+    for start, stop in bounds:
+        block = lines[start:stop]
+        # Skip torchrun's own traceback -- it only ever reports "exitcode 1".
+        if any("distributed/launcher" in line or "CalledProcessError" in line for line in block):
+            continue
+        # A traceback ends at its first unindented line: the exception itself.
+        end = next(
+            (start + i for i, line in enumerate(block) if i and line and not line[0].isspace()),
+            stop - 1,
+        )
+        return "\n".join(lines[start : end + 1])
+    return "\n".join(lines[-context:]) or "(no output)"
+
+
 def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Path) -> dict:
     """Launch one pilot run and return its parsed train_* metrics."""
     command = [
@@ -82,8 +106,7 @@ def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Pa
     blob = result.stdout + result.stderr
     runtime = RUNTIME_RE.search(blob)
     if runtime is None:
-        tail = "\n".join(blob.strip().splitlines()[-25:])
-        raise RuntimeError(f"no train_runtime in output of {config.name}:\n{tail}")
+        raise RuntimeError(f"no train_runtime in output of {config.name}:\n{first_error(blob)}")
     steps_per_sec = STEPS_PER_SEC_RE.search(blob)
     return {
         "runtime": float(runtime.group(1)),
