@@ -38,9 +38,6 @@ fi
 TRAIN_SLURM=${TRAIN_SLURM:-experiments/13_robocasa365/train${SUFFIX}.slurm}
 EVAL_SLURM=${EVAL_SLURM:-experiments/13_robocasa365/eval_grid${SUFFIX}.slurm}
 GATE_SLURM=${GATE_SLURM:-experiments/13_robocasa365/gate_stage_a${SUFFIX}.slurm}
-# Offline W&B needs an explicit push on Jean Zay; on CLEPS compute nodes reach the API,
-# so there is no equivalent file and the step is skipped.
-SYNC_SLURM=${SYNC_SLURM:-experiments/13_robocasa365/wandb_sync_once${SUFFIX}.slurm}
 echo "cluster files: $TRAIN_SLURM / $EVAL_SLURM / $GATE_SLURM"
 
 submit() {
@@ -67,16 +64,6 @@ for config in "$RUNS_DIR"/od-*.yaml; do
                      --export=ALL,RUN="$run" "$EVAL_SLURM")
     echo "  eval : $eval_id"
     eval_job_ids+=("$eval_id")
-
-    # Guarantee the W&B curves reach the cloud once this run ends, however it ended. On Jean
-    # Zay compute nodes have no internet, so training logs offline and something with outbound
-    # access has to push it. afterany, not afterok: a run killed at its walltime still has
-    # curves worth keeping.
-    if [ -n "$SYNC_SLURM" ] && [ -f "$SYNC_SLURM" ]; then
-        sync_id=$(submit --job-name="sync-$run" \
-                         --dependency=afterany:"$train_id" "$SYNC_SLURM")
-        echo "  sync : $sync_id"
-    fi
 done
 
 # The gate waits on every eval array. afterok here (unlike above): a summary assembled from a
@@ -87,3 +74,10 @@ gate_id=$(submit --dependency=afterok:"$dependency" "$GATE_SLURM")
 echo
 echo "gate: $gate_id (mails the point-count table when all ${#eval_job_ids[@]} eval arrays finish)"
 echo "then: python $RUNS_DIR/generate_stage_b.py --npoints <your choice>"
+
+# W&B is offline on Jean Zay compute nodes; nothing pushes it automatically, by choice.
+if [ -n "${DSDIR:-}" ]; then
+    echo
+    echo "W&B curves stay local until you push them. From a Jean Zay LOGIN node:"
+    echo "  bash experiments/13_robocasa365/wandb_sync_jeanzay.sh"
+fi
