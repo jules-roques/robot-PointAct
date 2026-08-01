@@ -33,6 +33,12 @@ WORKTREE="$WORK/code/robot-PointAct/.claude/worktrees/pointcount-ablation"
 cd "$WORKTREE"
 export PYTHONPATH="$WORKTREE:${PYTHONPATH:-}"
 
+# Point uv at the MAIN checkout's simulator env, never the worktree's: the worktree has
+# no envs/robocasa365/.venv, and uv would silently build an empty one (thousands of
+# inodes on a WORK filesystem already at 93%) that lacks robocasa entirely. PYTHONPATH
+# above is what makes the worktree's own code shadow the installed copy. See docs/envs.md.
+ROBOCASA_ENV="$WORK/code/robot-PointAct/envs/robocasa365"
+
 export MUJOCO_GL=egl
 export HF_HOME="$SCRATCH/.cache/huggingface"
 export HF_HUB_OFFLINE=1
@@ -62,7 +68,7 @@ EOF
 )
 echo "shard $SHARD/$NUM_SHARDS: $(echo $EPISODES | wc -w) episodes"
 
-uv run --project envs/robocasa365 --no-sync \
+uv run --project "$ROBOCASA_ENV" --no-sync \
     python data_prep/robocasa365_to_lerobot/replay.py \
         --input-dir "$INPUT_DIR/lerobot" \
         --cache-dir "$INPUT_DIR/replay_cache" \
