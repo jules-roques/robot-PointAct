@@ -146,8 +146,11 @@ which is the ~20 h/run figure the budget was originally built on.
 
 ### W&B conventions
 
-Run names are short (`od-eef-n4096-s0`); identity lives in config columns. Group the runs
-table by `exp_task` > `exp_sampling` > `exp_npoints` to get the grid as nested rows, and save
+Run names are short (`od-eef-n4096-s0`); identity lives in config columns. Beware
+`train_sampling_strategy` -- that is the dataloader's sampler (always `random`), not the
+ablation arm, which is `sampling_strategy`. Group the runs
+table by `task_name` > `sampling_strategy` > `cloud_size` to get the grid as nested rows,
+and save
 one workspace view per figure. `WANDB_RUN_ID` is pinned from the output dir so a requeued job
 resumes one run instead of creating a second. Training runs are `job_type=train`, eval runs
 `job_type=eval`, and both share a `group` per arm.

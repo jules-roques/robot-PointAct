@@ -138,16 +138,19 @@ class TrainPipelineConfig(TrainingArguments):
     # effective batch; per_device_train_batch_size remains the memory knob.
     effective_batch: int | None = field(default=None)
 
-    # Ablation coordinates. These do nothing at train time -- they exist so that the whole
-    # TrainingArguments dump W&B logs to run config carries groupable columns. Group the runs
-    # table by exp_task > exp_sampling > exp_npoints to get the ablation grid as nested rows,
-    # which is why run names can stay short. Populated from the `meta:` block of a run yaml.
-    exp_task: str | None = field(default=None)
-    exp_sampling: str | None = field(default=None)  # uniform, eef, anchor
-    exp_npoints: int | None = field(default=None)
-    exp_context: str | None = field(default=None)  # vlm, text_cache
-    exp_seed: int | None = field(default=None)
-    exp_stage: str | None = field(default=None)  # A (npoints sweep), B (task transfer)
+    # Ablation coordinates. These do nothing at train time -- they exist so the
+    # TrainingArguments dump W&B logs as run config carries groupable columns. Group the runs
+    # table by task_name > sampling_strategy > cloud_size to get the grid as nested rows, which
+    # is what lets run names stay short. Populated from the `meta:` block of a run yaml.
+    #
+    # Named for the W&B dropdown rather than for the code. Note `train_sampling_strategy` is a
+    # different, pre-existing field (the dataloader's sampler, always "random" here) -- it is
+    # not the ablation arm, and confusing the two is easy.
+    task_name: str | None = field(default=None)
+    sampling_strategy: str | None = field(default=None)  # uniform, eef, anchor
+    cloud_size: int | None = field(default=None)         # points fed per frame
+    arm_seed: int | None = field(default=None)           # not `seed`: TrainingArguments owns that
+    stage: str | None = field(default=None)              # A (cloud-size sweep), B (task transfer)
 
     def __post_init__(self):
         super().__post_init__()

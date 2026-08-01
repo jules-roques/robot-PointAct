@@ -74,11 +74,14 @@ def main() -> None:
         return
 
     training_args = json.loads((run_dir / "training_args.json").read_text())
-    config = {key: value for key, value in training_args.items() if key.startswith("exp_")}
+    ABLATION_KEYS = ("task_name", "sampling_strategy", "cloud_size", "arm_seed", "stage",
+                     "context_source")
+    config = {k: training_args[k] for k in ABLATION_KEYS if training_args.get(k) is not None}
     config["run"] = run_dir.name
 
     group = "/".join(
-        str(config[key]) for key in ("exp_task", "exp_sampling", "exp_npoints") if config.get(key)
+        str(config[key]) for key in ("task_name", "sampling_strategy", "cloud_size")
+        if config.get(key)
     )
 
     # Deterministic id derived from the training run's, so reruns resume rather than fork.

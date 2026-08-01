@@ -30,12 +30,13 @@ import yaml
 #: Fields of `meta` that become `exp_*` columns in the W&B run config. Grouping the runs
 #: table by these reproduces the ablation grid, which is what lets run names stay short.
 META_TO_EXP_FIELD = {
-    "task": "exp_task",
-    "sampling": "exp_sampling",
-    "npoints": "exp_npoints",
-    "context": "exp_context",
-    "seed": "exp_seed",
-    "stage": "exp_stage",
+    "task": "task_name",
+    "sampling": "sampling_strategy",
+    "npoints": "cloud_size",
+    "seed": "arm_seed",
+    "stage": "stage",
+    # `context` is deliberately absent: context_source is already a real training argument, so
+    # duplicating it would put two columns with the same value in the group-by dropdown.
 }
 
 #: Short tokens used to build run names, e.g. OpenDrawer/eef/4096 -> od-eef-n4096-s0.
