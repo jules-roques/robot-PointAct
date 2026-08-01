@@ -103,6 +103,7 @@ uv run --no-sync scripts/run_server.py \
     --args.pretrained_path ${ckpt_dir}/checkpoint-${ckpt_step} \
     --args.num_denoise_steps ${num_denoise_steps} \
     --args.point_sampling ${POINT_SAMPLING} \
+    ${TEXT_CONTEXT_FILE:+--args.text_context_file ${TEXT_CONTEXT_FILE}} \
     --args.host ${host} --args.port ${port} &
 SERVER_PID=$!
 echo "Server started, PID=$SERVER_PID"

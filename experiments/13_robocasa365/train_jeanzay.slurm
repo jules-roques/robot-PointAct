@@ -54,9 +54,24 @@ if [ -z "$REPO" ]; then
 fi
 cd "$REPO"
 
-VARIANT="${1:-concerto}"
-echo "host=$(hostname) variant=$VARIANT gpus=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "host=$(hostname) gpus=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L
 
+# --project must name a checkout that HAS a .venv. When REPO is a worktree it does not, and a
+# bare `uv run` would silently build an empty one there (see docs/envs.md). PYTHONPATH, set by
+# train.sh from $(pwd), is what makes the worktree's own code shadow the installed package.
+POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
+
 # accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
-uv run --no-sync bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
+if [ -n "${RUN_CONFIG:-}" ]; then
+    # Ablation grid: everything about the run lives in the yaml.
+    echo "run_config=$RUN_CONFIG"
+    uv run --project "$POINTACT_ENV" --no-sync \
+        bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
+else
+    # Legacy path, kept so the pre-ablation baseline/eefdensity/roi runs stay reproducible.
+    VARIANT="${1:-concerto}"
+    echo "variant=$VARIANT"
+    uv run --project "$POINTACT_ENV" --no-sync \
+        bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
+fi
