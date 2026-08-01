@@ -44,6 +44,9 @@ def attach(run_dir: Path, project: str, entity: str, key: str, delete_stale: boo
         try:
             api_run = wandb.Api().run(f"{entity}/{project}/{run_id}")
             for remote in api_run.files():
+                # Delete every matching HTML, including one attached by an earlier run of this
+                # script: a fresh copy is logged immediately below, so the end state is exactly
+                # one file and re-running is idempotent.
                 if key.split("/")[-1] in remote.name and remote.name.endswith(".html"):
                     remote.delete()
                     print(f"  deleted stale {remote.name}")
@@ -74,6 +77,11 @@ def main() -> None:
 
     if os.environ.get("WANDB_MODE") == "offline":
         sys.exit("WANDB_MODE=offline: this needs to reach the API. Run it from a login node.")
+
+    # Keep wandb's scratch files off $WORK: its inode quota is the tight one on Jean Zay, and
+    # the default would drop a run directory into the checkout for every invocation.
+    os.environ.setdefault("WANDB_DIR", os.path.expandvars("$SCRATCH/wandb-attach"))
+    Path(os.environ["WANDB_DIR"]).mkdir(parents=True, exist_ok=True)
 
     done = sum(attach(d, args.project, args.entity, args.key, args.delete_stale)
                for d in args.run_dirs)
