@@ -38,15 +38,20 @@ def build_episode_html(
     dataset_cfg: dict,
     out_dir: Path,
     episode: int = 0,
-    num_frames: int = 30,
-    display_points: int = 2000,
+    num_frames: int = 20,
+    display_points: int = 0,
 ) -> Path | None:
     """Render one episode under this run's sampling strategy; return the HTML path.
 
-    `--plotlyjs cdn` rather than inline: plotly.js alone is ~3.5 MB, which would dominate the
-    artefact and is paid once per run. W&B renders the page in the viewer's browser, which can
-    fetch it. Frame count and displayed points are also cut from the script's defaults -- this
-    is a thumbnail of the sampling, not the full-quality copy.
+    `display_points=0` disables the renderer's display subsample, so every point the network
+    was actually given is drawn. This matters: capping the display at a fixed count makes a
+    2048-point run and an 8192-point run render identically, which is exactly the comparison
+    the artefact exists to show. Size is controlled with the frame count instead, which costs
+    temporal resolution rather than the thing being measured -- and the files legitimately
+    differ in size across the sweep, because they carry different amounts of data.
+
+    `--plotlyjs cdn` rather than inline: plotly.js alone is ~3.5 MB, which would otherwise
+    dominate. W&B renders the page in the viewer's browser, which can fetch it.
     """
     method = _sampling_method(dataset_cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
