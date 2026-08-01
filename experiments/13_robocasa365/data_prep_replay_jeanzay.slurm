@@ -7,8 +7,12 @@
 # no Ampere features -- and RoboCasa365 sim misbehaves on H100 anyway. V100 is also the Jean Zay
 # tier with the shortest queue.
 #
-# --resume skips already-cached episodes, so resubmitting this same job continues past the
-# walltime limit rather than starting over.
+# Sharded 8 ways as an array. ~500 episodes in a single 20h job is uncomfortably tight, and
+# the cache is one .npz + one .npy per episode (replay.py:episode_cache_path), so array tasks
+# writing disjoint episode sets into the same cache dir never touch the same file.
+#
+# --resume skips already-cached episodes, so resubmitting continues past the walltime limit
+# rather than starting over.
 #
 #SBATCH --job-name=rc365-replay
 #SBATCH --account=rgx@v100
@@ -16,8 +20,9 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.out
+#SBATCH --array=0-7
+#SBATCH --output=%x_%A_%a.out
+#SBATCH --error=%x_%A_%a.out
 
 set -euo pipefail
 
@@ -45,8 +50,21 @@ if [ ! -d "$INPUT_DIR/lerobot" ]; then
     exit 1
 fi
 
+# Stride the episodes across the array rather than splitting into contiguous blocks: episode
+# length varies a lot within a task, and striding keeps each shard's total work comparable.
+NUM_SHARDS=${SLURM_ARRAY_TASK_COUNT:-1}
+SHARD=${SLURM_ARRAY_TASK_ID:-0}
+EPISODES=$(python - <<EOF
+import json
+total = json.load(open("$INPUT_DIR/lerobot/meta/info.json"))["total_episodes"]
+print(" ".join(str(i) for i in range($SHARD, total, $NUM_SHARDS)))
+EOF
+)
+echo "shard $SHARD/$NUM_SHARDS: $(echo $EPISODES | wc -w) episodes"
+
 uv run --project envs/robocasa365 --no-sync \
     python data_prep/robocasa365_to_lerobot/replay.py \
         --input-dir "$INPUT_DIR/lerobot" \
         --cache-dir "$INPUT_DIR/replay_cache" \
+        --episodes $EPISODES \
         --resume
