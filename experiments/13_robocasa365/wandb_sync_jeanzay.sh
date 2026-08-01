@@ -44,7 +44,14 @@ done
 [ -z "$REPO" ] && { echo "Could not locate the robot-PointAct checkout" >&2; exit 1; }
 cd "$REPO"
 
-export UV_OFFLINE=1
+# Use the main checkout's venv explicitly. `uv run` resolves the project from the CWD, and
+# when that is a worktree (which has no .venv) it builds an empty one and `wandb` is not found.
+# See docs/envs.md.
+WANDB_BIN="${POINTACT_ENV:-${WORK:-$HOME}/code/robot-PointAct}/.venv/bin/wandb"
+if [ ! -x "$WANDB_BIN" ]; then
+    echo "no wandb binary at $WANDB_BIN -- set POINTACT_ENV to a checkout that has a .venv" >&2
+    exit 1
+fi
 shopt -s nullglob
 synced=0
 skipped=0
@@ -71,7 +78,7 @@ for run in "$RUN_ROOT"/offline-run-*; do
     fi
 
     echo "--- syncing $(basename "$run")"
-    if uv run --no-sync wandb sync "$run" 2>&1 | tail -3; then
+    if "$WANDB_BIN" sync "$run" 2>&1 | tail -3; then
         synced=$((synced + 1))
     else
         echo "    FAILED: $(basename "$run")" >&2
