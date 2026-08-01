@@ -11,6 +11,7 @@ from pointact.train.script_utils import (
     parse_training_args,
     train_or_resume,
 )
+from pointact.train.text_context import ensure_text_context
 from pointact.train.viz_callback import SamplingVizCallback
 from pointact.train.train_utils import (
     add_handler_to_logger,
@@ -202,6 +203,10 @@ def train():
 
 
     model = apply_lora(model, training_args, compute_dtype)
+
+    # Before the dataloader (and its workers) exist: a cached-context run needs its text
+    # embeddings on disk, and building them here means never having to remember to.
+    ensure_text_context(training_args, logger)
 
     create_data_module = _import_object(recipe.data_module_fn)
     data_module = create_data_module(processor=processor, args=training_args)

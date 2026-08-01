@@ -46,6 +46,10 @@ class TrainPipelineConfig(TrainingArguments):
     # cross-attention context is a cached text-only embedding per instruction. The point
     # branch is identical either way; only where `context` comes from changes.
     context_source: str = field(default="vlm")  # vlm, text_cache
+    # Build the text-context cache at startup when it is missing or does not cover every
+    # instruction in the dataset, instead of requiring data_prep/cache_text_context.py to have
+    # been run first. Costs one VLM load (~1 min) only when something is actually missing.
+    text_context_autobuild: bool = field(default=True)
     ctx_embed_size: int = field(default=256)
     time_embed_size: int = field(default=256)
     ptv3_patch_size: int = field(default=1024)
