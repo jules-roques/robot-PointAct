@@ -19,17 +19,14 @@ configurations.
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
+import time
 import tempfile
 from pathlib import Path
 
 import yaml
 
-# HF prints a dict of train_* metrics when training ends.
-RUNTIME_RE = re.compile(r"'train_runtime':\s*([0-9.]+)")
-STEPS_PER_SEC_RE = re.compile(r"'train_steps_per_second':\s*([0-9.]+)")
 
 
 def build_pilot_config(base: Path, out_dir: Path, context: str, npoints: int, steps: int) -> Path:
@@ -88,30 +85,40 @@ def first_error(blob: str, context: int = 12) -> str:
     return "\n".join(lines[-context:]) or "(no output)"
 
 
-def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Path) -> dict:
-    """Launch one pilot run and return its parsed train_* metrics."""
-    command = [
-        "accelerate", "launch",
-        "--multi_gpu" if gpus > 1 else "--num_processes=1",
-    ]
-    if gpus > 1:
-        command += [f"--num_processes={gpus}", "--num_machines=1", "--machine_rank=0"]
+def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Path,
+            log_dir: Path) -> dict:
+    """Launch one pilot run; return its wall-clock time.
+
+    Timed end to end rather than scraped from HF's train_* metrics: those are logged through
+    the callback stack and simply do not appear on stdout under `report_to: []`, which is how
+    an earlier version of this script recorded six successful runs as failures. Wall clock is
+    also the honest quantity -- the marginal subtraction across two step counts removes
+    startup, model loading and the final checkpoint write, whatever HF chooses to print.
+    """
+    command = ["accelerate", "launch"]
+    command += ["--multi_gpu", f"--num_processes={gpus}", "--num_machines=1", "--machine_rank=0"] \
+        if gpus > 1 else ["--num_processes=1"]
     command += [
         "scripts/train.py", str(config),
         "--gradient-accumulation-steps", str(accum),
         "--per-device-train-batch-size", str(per_device_batch),
     ]
-    print(f"    $ {' '.join(command[-6:])}", flush=True)
-    result = subprocess.run(command, cwd=repo, capture_output=True, text=True)
-    blob = result.stdout + result.stderr
-    runtime = RUNTIME_RE.search(blob)
-    if runtime is None:
-        raise RuntimeError(f"no train_runtime in output of {config.name}:\n{first_error(blob)}")
-    steps_per_sec = STEPS_PER_SEC_RE.search(blob)
-    return {
-        "runtime": float(runtime.group(1)),
-        "hf_steps_per_second": float(steps_per_sec.group(1)) if steps_per_sec else None,
-    }
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{config.stem}.log"
+    print(f"    $ train.py {config.name}  (log: {log_path})", flush=True)
+
+    started = time.monotonic()
+    with log_path.open("w") as log:
+        # Child output goes to a file rather than a pipe we discard: swallowing it is what made
+        # the previous failure undiagnosable from the job log.
+        result = subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, text=True)
+    elapsed = time.monotonic() - started
+
+    if result.returncode != 0:
+        blob = log_path.read_text(errors="replace")
+        raise RuntimeError(f"{config.name} exited {result.returncode}:\n{first_error(blob)}")
+    return {"runtime": elapsed}
 
 
 def main() -> None:
@@ -136,6 +143,7 @@ def main() -> None:
           f"{args.per_device_batch} x accum {accum}\n")
 
     results = {}
+    log_dir = args.out.parent / "pilot_logs"
     with tempfile.TemporaryDirectory(prefix="pilot-") as tmp:
         tmp_dir = Path(tmp)
         for context in args.contexts:
@@ -147,7 +155,7 @@ def main() -> None:
                     for steps in (args.short_steps, args.long_steps):
                         config = build_pilot_config(args.base, tmp_dir, context, npoints, steps)
                         timings[steps] = run_one(
-                            config, args.gpus, args.per_device_batch, accum, repo
+                            config, args.gpus, args.per_device_batch, accum, repo, log_dir
                         )["runtime"]
                     delta_steps = args.long_steps - args.short_steps
                     delta_time = timings[args.long_steps] - timings[args.short_steps]
