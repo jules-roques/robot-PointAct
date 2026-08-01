@@ -74,25 +74,40 @@ echo "port=$port"
 POINT_SAMPLING="${POINT_SAMPLING:-}"
 ORACLE_ANCHOR=""
 if [ -z "$POINT_SAMPLING" ]; then
-    DATA_CFG=$(python3 -c "
-import json,sys
+    # Prefer the copy archived beside the checkpoint: every run writes data_config.yaml into
+    # its own output_dir, so the mode is recoverable without depending on a repo file that may
+    # have moved since. Fall back to the data_path recorded in training_args.json, which is how
+    # runs launched before that existed are resolved.
+    DATA_CFG="${ckpt_dir}/data_config.yaml"
+    if [ ! -f "$DATA_CFG" ]; then
+        DATA_CFG=$(python3 -c "
+import json
 try:
     print(json.load(open('${ckpt_dir}/training_args.json')).get('data_path',''))
 except Exception:
     print('')
 " 2>/dev/null)
+    fi
+
     if [ -n "$DATA_CFG" ] && [ -f "$DATA_CFG" ]; then
-        if grep -qE '^\s*oracle_sampling:\s*True' "$DATA_CFG"; then
+        # yaml booleans are True/true depending on writer (hand-edited vs yaml.safe_dump).
+        if grep -qiE '^\s*oracle_sampling:\s*true' "$DATA_CFG"; then
             POINT_SAMPLING=anchor
-        elif grep -qE '^\s*eef_sampling:\s*True' "$DATA_CFG"; then
+        elif grep -qiE '^\s*eef_sampling:\s*true' "$DATA_CFG"; then
             POINT_SAMPLING=eef
         else
             POINT_SAMPLING=uniform
         fi
         echo "derived point_sampling=${POINT_SAMPLING} from ${DATA_CFG}"
     else
-        POINT_SAMPLING=uniform
-        echo "WARNING: no data config found for ${ckpt_dir}; defaulting to uniform sampling" >&2
+        # Deliberately fatal. Defaulting to uniform here silently evaluates an eef- or
+        # oracle-trained policy on uniformly drawn clouds -- a train/test mismatch that shows
+        # up as a plausible-looking but wrong success rate, i.e. the one failure mode this
+        # whole ablation cannot afford. Pass POINT_SAMPLING=... explicitly if you mean it.
+        echo "ERROR: cannot determine the sampling mode for ${ckpt_dir}." >&2
+        echo "  Looked for ${ckpt_dir}/data_config.yaml and the data_path in training_args.json." >&2
+        echo "  Set POINT_SAMPLING=uniform|eef|anchor explicitly to override." >&2
+        exit 1
     fi
 fi
 [ "$POINT_SAMPLING" = "anchor" ] && ORACLE_ANCHOR="--args.oracle_anchor"

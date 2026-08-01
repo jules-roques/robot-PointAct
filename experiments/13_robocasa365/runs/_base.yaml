@@ -31,8 +31,12 @@ train:
   # comparable across tasks with different episode lengths. 50K steps at effective batch
   # 128 is ~50 epochs on each of the three tasks here.
   max_steps: 50000
+  # Ablation arms are only comparable at equal effective batch, so it is stated here and
+  # gradient_accumulation_steps is derived from the GPUs actually granted -- a fallback from
+  # 4 GPUs to 2 adjusts accumulation instead of silently halving the batch.
+  # per_device_train_batch_size is the memory knob; lower it if a large point count OOMs.
+  effective_batch: 128
   per_device_train_batch_size: 32
-  gradient_accumulation_steps: 1
 
   learning_rate: 5.0e-5
   merger_lr: 5.0e-5

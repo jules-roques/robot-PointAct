@@ -127,6 +127,13 @@ class TrainPipelineConfig(TrainingArguments):
     # if output_dir is not specified, it will be set to {output_base}/{timestamp}-{run_name}
     output_base: str = field(default="outputs", metadata={"help": "Base directory for output."})
 
+    # Total batch per optimiser step: world_size x per_device_train_batch_size x accumulation.
+    # Set this instead of gradient_accumulation_steps and the accumulation is derived from the
+    # GPUs actually granted (see derive_gradient_accumulation), which is what keeps ablation
+    # arms comparable when a job falls back from 4 GPUs to 2. Optimisation depends only on the
+    # effective batch; per_device_train_batch_size remains the memory knob.
+    effective_batch: int | None = field(default=None)
+
     # Ablation coordinates. These do nothing at train time -- they exist so that the whole
     # TrainingArguments dump W&B logs to run config carries groupable columns. Group the runs
     # table by exp_task > exp_sampling > exp_npoints to get the ablation grid as nested rows,

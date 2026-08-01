@@ -24,8 +24,41 @@ def parse_training_args(logger=None) -> TrainPipelineConfig:
     if logger is not None:
         logger.info(f"set output-dir to {training_args.output_dir}")
 
+    derive_gradient_accumulation(training_args, logger)
     configure_wandb_identity(training_args)
     return training_args
+
+
+def derive_gradient_accumulation(training_args: TrainPipelineConfig, logger=None) -> None:
+    """Turn `effective_batch` into gradient_accumulation_steps for the GPUs actually granted.
+
+    Ablation arms are only comparable at equal effective batch: 2 GPUs x 32 is not equivalent
+    to 4 x 32, it halves the batch and doubles the optimiser steps. Deriving the accumulation
+    here rather than in the launcher means the invariant holds however the job was submitted,
+    including a dev-QoS fallback from 4 GPUs to 2, and needs no command-line arguments -- the
+    run yaml stays the single source of truth.
+    """
+    if training_args.effective_batch is None:
+        return
+
+    world_size = max(1, training_args.world_size)
+    per_step = world_size * training_args.per_device_train_batch_size
+    accum, remainder = divmod(training_args.effective_batch, per_step)
+    if remainder or accum < 1:
+        raise ValueError(
+            f"effective_batch={training_args.effective_batch} is not reachable with "
+            f"{world_size} process(es) x per_device_train_batch_size="
+            f"{training_args.per_device_train_batch_size} (= {per_step} per step). "
+            "Adjust per_device_train_batch_size in the run yaml, or request a GPU count that "
+            "divides the effective batch."
+        )
+
+    training_args.gradient_accumulation_steps = accum
+    if logger is not None:
+        logger.info(
+            f"effective batch {training_args.effective_batch} = {world_size} proc x "
+            f"{training_args.per_device_train_batch_size} x accum {accum}"
+        )
 
 
 def _parse_run_yaml(
@@ -43,6 +76,7 @@ def _parse_run_yaml(
     meta, data, train = resolve_run_config(path)
     parser.set_defaults(**train)
     (training_args,) = parser.parse_args_into_dataclasses(args=list(overrides or []))
+    training_args.run_config_path = path
 
     # The data block is written beside the checkpoints rather than merged into the training
     # args: the data layer already knows how to read a DataConfig yaml, and archiving the
@@ -56,9 +90,41 @@ def _parse_run_yaml(
         training_args.data_path = str(data_path)
 
     training_args.run_meta = meta
+    training_args.run_data_config = data
     if logger is not None:
         logger.info(f"loaded run config {path} -> run_name={training_args.run_name}")
     return training_args
+
+
+def save_resolved_run_config(training_args: TrainPipelineConfig) -> Path | None:
+    """Write the fully-resolved run config -- meta, every train argument, and data -- as one yaml.
+
+    `training_args.json` already records the train arguments, but as HF's flattened dump rather
+    than something you can feed back to `scripts/train.py`. This writes the round-trippable
+    form: re-running it reproduces the run. It is also the artifact uploaded to W&B, so a run's
+    page carries the config that produced it rather than only the flattened columns.
+    """
+    meta = getattr(training_args, "run_meta", None)
+    data = getattr(training_args, "run_data_config", None)
+    if meta is None and data is None:
+        return None
+
+    # dataclasses.asdict chokes on TrainingArguments' non-serialisable members (accelerator
+    # state, devices); to_dict() is HF's own JSON-safe projection.
+    train_block = {
+        key: value
+        for key, value in training_args.to_dict().items()
+        # Derived at startup from the granted GPU count -- recording it would make the file
+        # look reusable on a different topology when it is not. effective_batch is the input.
+        if key != "gradient_accumulation_steps"
+    }
+
+    document = {"meta": meta or {}, "train": train_block, "data": data or {}}
+    path = Path(training_args.output_dir) / "run_config.resolved.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(document, handle, sort_keys=False, default_flow_style=False)
+    return path
 
 
 def configure_wandb_identity(training_args: TrainPipelineConfig) -> None:
@@ -131,6 +197,7 @@ def train_or_resume(
         output_dir.mkdir(parents=True, exist_ok=True)
         with open(output_dir / "training_args.json", "w") as outf:
             outf.write(training_args.to_json_string())
+        save_resolved_run_config(training_args)
 
     if resume_from_checkpoint is None:
         resume_from_checkpoint = has_resume_checkpoint(output_dir)

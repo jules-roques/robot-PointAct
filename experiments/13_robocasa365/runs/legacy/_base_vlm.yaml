@@ -1,0 +1,75 @@
+# Shared settings for the pre-ablation, with-VLM RoboCasa365 runs.
+#
+# These reproduce the four train_pointact_concerto*.sh scripts that this replaces, and with
+# them the reported numbers: the sampling ablation (uniform 30.7% / eef 51.3% / oracle 66.7%
+# at 20 epochs) and the 50-epoch 60% baseline. run_name and output_dir are pinned to the
+# original strings so the archived checkpoints stay discoverable and a re-run resumes rather
+# than starting a parallel copy.
+#
+#   sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/legacy/concerto-uniform.yaml \
+#          experiments/13_robocasa365/train_jeanzay.slurm
+#
+# Differences from ../_base.yaml, all deliberate: a live VLM (context_source: vlm) with images,
+# 20 epochs rather than 50K steps, save_steps 1000, and gradient checkpointing on (which the
+# VLM both needs and supports).
+
+train:
+  model_class: VLAEncDec3DWithActionRegressionModel
+  vlm_name_or_path: $POINTACT_VLM_PATH
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/pointact
+
+  context_source: vlm
+  chunk_size: 16
+  dataloader_num_workers: 8
+
+  freeze_vision_tower: true
+  freeze_llm: true
+  freeze_merger: true
+
+  bf16: true
+  fp16: false
+  # The shell script probed compute capability and disabled tf32 below Ampere. Every GPU these
+  # runs target (H100/A100) is Ampere+, so it is simply on here.
+  tf32: true
+
+  num_train_epochs: 20
+  effective_batch: 128
+  per_device_train_batch_size: 32
+
+  learning_rate: 5.0e-5
+  merger_lr: 5.0e-5
+  vision_lr: 2.0e-5
+  weight_decay: 0.1
+  warmup_steps: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 3
+  gradient_checkpointing: true
+
+  save_strategy: steps
+  # 200/3, not the shell script's 1000/10 defaults: the reported runs were launched with
+  # SAVE_STEPS/SAVE_TOTAL_LIMIT env overrides, so the script's defaults never described what
+  # actually ran. Verified against the archived training_args.json of all three arms.
+  save_steps: 200
+  save_total_limit: 3
+  logging_steps: 10
+  log_level: info
+  report_to: [wandb]
+
+  attn_implementation: flash_attention_2
+  color_aug: true
+  use_robot_state: true
+  ctx_embed_size: 512
+
+  ptv3_backend: concerto
+  ptv3_patch_size: 1024
+  ptv3_enc_mode: true
+  ptv3_enc_channels: [64, 128, 256, 512, 768]
+  ptv3_enc_depths: [3, 3, 3, 12, 3]
+  ptv3_enc_num_head: [4, 8, 16, 32, 48]
+  ptv3_input_channels: 6
+  ptv3_apply_point_ca: false
+  ptv3_init_ckpt_file: $SCRATCH/models/Pointcept-Concerto/concerto_large.pth
+
+  action_regression_loss: l2
+  regression_head_heatmap_temp: 0.1
+  action_head_pos_center: zero

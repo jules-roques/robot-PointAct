@@ -1,3 +1,11 @@
+# DEPRECATED as a launch input -- kept for compatibility, do not edit for new work.
+#
+# Run configuration now lives in one yaml per run under experiments/13_robocasa365/runs/,
+# which carries its own `data:` block; nothing launches from this file any more. It survives
+# because checkpoints archived before that change record this path in their
+# training_args.json, and eval_robocasa365.sh reads it to recover the sampling mode. Deleting
+# it would make those evals unable to tell how their policy was trained.
+#
 # Oracle variant of data-robocasa365-opendrawer-point.yaml.
 # IDENTICAL to the baseline config except for the oracle_* fields at the bottom, which replace
 # the dataloader's uniform subsample with exactly the same Gaussian-with-floor density as the

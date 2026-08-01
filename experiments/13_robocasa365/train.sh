@@ -25,24 +25,14 @@ RUN_CONFIG=${1:?usage: train.sh <run.yaml>}
 POINTACT_VLM_PATH=${DSDIR:+$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct}
 export POINTACT_VLM_PATH=${POINTACT_VLM_PATH:-$SCRATCH/models/Qwen2.5-VL-3B-Instruct}
 
-# Effective batch is pinned at 128 for every arm. Ablation arms are only comparable at equal
-# effective batch: 2 GPUs x 32 is not equivalent to 4 x 32, it halves the effective batch and
-# doubles the optimiser steps. Derive the split from what SLURM actually granted, so a
-# fallback from 4 to 2 GPUs adjusts accumulation instead of silently changing the recipe.
-EFFECTIVE_BATCH=128
+# GPU topology only -- how many processes accelerate should spawn. Batch sizes are NOT set
+# here: the run yaml states effective_batch and per_device_train_batch_size, and train.py
+# derives gradient accumulation from the world size (see derive_gradient_accumulation). That
+# keeps every training argument in one file that can be logged and re-run.
 GPUS=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L 2>/dev/null | wc -l)}
 GPUS=${GPUS:-1}
 NUM_NODES=${NUM_NODES:-1}
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-32}
-
 TOTAL_PROCS=$((GPUS * NUM_NODES))
-ACCUM=$((EFFECTIVE_BATCH / (TOTAL_PROCS * PER_DEVICE_BATCH_SIZE)))
-if [ $((TOTAL_PROCS * PER_DEVICE_BATCH_SIZE * ACCUM)) -ne $EFFECTIVE_BATCH ]; then
-    echo "refusing to run: ${TOTAL_PROCS} proc x ${PER_DEVICE_BATCH_SIZE} x accum ${ACCUM}" \
-         "!= effective batch ${EFFECTIVE_BATCH}" >&2
-    exit 1
-fi
-echo "effective batch ${EFFECTIVE_BATCH} = ${TOTAL_PROCS} proc x ${PER_DEVICE_BATCH_SIZE} x accum ${ACCUM}"
 
 if [ "$TOTAL_PROCS" -eq 1 ]; then
     ACCELERATE_ARGS="--num_processes 1 --num_machines 1"
@@ -68,6 +58,5 @@ if [ -n "$COMPUTE_CAP" ] && [ "${COMPUTE_CAP%%.*}" -lt 8 ]; then
     export POINTACT_DISABLE_TF32=1
 fi
 
-accelerate launch $ACCELERATE_ARGS scripts/train.py "$RUN_CONFIG" \
-    --gradient-accumulation-steps ${ACCUM} \
-    --per-device-train-batch-size ${PER_DEVICE_BATCH_SIZE}
+# No training arguments on the command line, by design: the run yaml is the whole config.
+accelerate launch $ACCELERATE_ARGS scripts/train.py "$RUN_CONFIG"

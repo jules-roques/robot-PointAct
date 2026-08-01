@@ -123,6 +123,26 @@ class SamplingVizCallback(TrainerCallback):
     def __init__(self) -> None:
         self._done = False
 
+    @staticmethod
+    def _upload_run_config(args) -> None:
+        """Attach the resolved run yaml to the W&B run.
+
+        HF already logs every training argument as flat config columns, which is what makes
+        the runs table groupable -- but not something you can re-run. The yaml is, so the run
+        page carries the exact file that produced it.
+        """
+        try:
+            import wandb
+
+            if wandb.run is None:
+                return
+            resolved = Path(args.output_dir) / "run_config.resolved.yaml"
+            if resolved.exists():
+                wandb.save(str(resolved), base_path=str(resolved.parent), policy="now")
+                print(f"[config] uploaded {resolved.name} to W&B")
+        except Exception as exc:  # noqa: BLE001 - never fail training over bookkeeping
+            print(f"[config] could not upload run config: {type(exc).__name__}: {exc}")
+
     def on_train_begin(self, args, state, control, **kwargs):
         # A resumed run has already logged this, and re-logging would land at a step behind
         # the run's current one.
@@ -132,6 +152,8 @@ class SamplingVizCallback(TrainerCallback):
 
         if "wandb" not in (args.report_to or []):
             return
+
+        self._upload_run_config(args)
 
         try:
             import yaml

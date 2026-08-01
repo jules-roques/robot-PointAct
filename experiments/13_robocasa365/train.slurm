@@ -7,10 +7,9 @@
 # their own CUDA runtime, and ffmpeg's shared libs come from a dedicated conda env
 # (`conda create -n ffmpeg-libs -c conda-forge ffmpeg=6.1`) via LD_LIBRARY_PATH below.
 #
-# Submit either:
+# Submit:
 #   sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
-#          experiments/13_robocasa365/train.slurm          # ablation grid (one yaml per run)
-#   sbatch experiments/13_robocasa365/train.slurm concerto # legacy per-variant payload script
+#          experiments/13_robocasa365/train.slurm
 #
 #SBATCH --job-name=train-od
 #SBATCH --account=willow
@@ -46,12 +45,6 @@ echo "host=$(hostname) gpus=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L
 
 # accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
-if [ -n "${RUN_CONFIG:-}" ]; then
-    # Ablation grid: everything about the run lives in the yaml.
-    uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
-else
-    # Legacy path, kept so the pre-ablation baseline/eefdensity/roi runs remain reproducible.
-    VARIANT="${1:-concerto}"
-    echo "variant=$VARIANT"
-    uv run --no-sync bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
-fi
+RUN_CONFIG="${RUN_CONFIG:?set RUN_CONFIG=<experiments/13_robocasa365/runs/*.yaml> via --export}"
+# Everything about the run lives in that yaml -- no training arguments here.
+uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"

@@ -40,4 +40,4 @@ nvidia-smi -L
 
 # Code from the worktree (PYTHONPATH is prepended inside the train script via $(pwd)),
 # training environment (.venv) from the main checkout via `uv run --project`.
-uv run --project "$MAIN_REPO" --no-sync bash "experiments/13_robocasa365/train_pointact_concerto_roi.sh"
+uv run --project "$MAIN_REPO" --no-sync bash experiments/13_robocasa365/train.sh experiments/13_robocasa365/runs/legacy/concerto-roi.yaml

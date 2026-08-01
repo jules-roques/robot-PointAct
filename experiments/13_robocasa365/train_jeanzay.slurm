@@ -1,12 +1,13 @@
 #!/bin/bash
-# Jean Zay counterpart to train.slurm (CLEPS). Same payload scripts
-# (train_pointact_{concerto,concerto_eefdensity,concerto_roi,utonia}.sh), but Jean Zay and
-# CLEPS are separate SLURM controllers, so #SBATCH account/partition/module directives cannot
-# be shared between them — this file carries Jean Zay's.
+# Jean Zay counterpart to train.slurm (CLEPS). Same payload (train.sh + a run yaml), but Jean
+# Zay and CLEPS are separate SLURM controllers, so #SBATCH account/partition/module directives
+# cannot be shared between them — this file carries Jean Zay's.
 #
 # Submit (arch/h100 must be loaded in the submitting shell):
 #   module load arch/h100
-#   sbatch --constraint=h100 experiments/13_robocasa365/train_jeanzay.slurm [concerto|concerto_eefdensity|utonia]
+#   sbatch --constraint=h100 \
+#          --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
+#          experiments/13_robocasa365/train_jeanzay.slurm
 #
 #SBATCH --job-name=train-od
 #SBATCH --account=rgx@h100
@@ -63,15 +64,8 @@ nvidia-smi -L
 POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
 
 # accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
-if [ -n "${RUN_CONFIG:-}" ]; then
-    # Ablation grid: everything about the run lives in the yaml.
-    echo "run_config=$RUN_CONFIG"
-    uv run --project "$POINTACT_ENV" --no-sync \
-        bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
-else
-    # Legacy path, kept so the pre-ablation baseline/eefdensity/roi runs stay reproducible.
-    VARIANT="${1:-concerto}"
-    echo "variant=$VARIANT"
-    uv run --project "$POINTACT_ENV" --no-sync \
-        bash "experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
-fi
+RUN_CONFIG="${RUN_CONFIG:?set RUN_CONFIG=<experiments/13_robocasa365/runs/*.yaml> via --export}"
+# Everything about the run lives in that yaml -- no training arguments here.
+echo "run_config=$RUN_CONFIG"
+uv run --project "$POINTACT_ENV" --no-sync \
+    bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"

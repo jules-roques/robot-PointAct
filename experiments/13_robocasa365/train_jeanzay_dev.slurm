@@ -101,15 +101,18 @@ if [ -z "$REPO" ]; then
 fi
 cd "$REPO"
 
-SCRIPT="experiments/13_robocasa365/train_pointact_${VARIANT}.sh"
-if [ ! -f "$SCRIPT" ]; then
-    echo "No such training variant: $SCRIPT" >&2
+RUN_CONFIG="${RUN_CONFIG:?set RUN_CONFIG=<runs/*.yaml> via --export}"
+if [ ! -f "$RUN_CONFIG" ]; then
+    echo "No such run config: $RUN_CONFIG" >&2
     exit 1
 fi
 
-# Ask the payload script where it will write, without starting it, so the completion guard and
-# the log agree with the real output_dir instead of duplicating its naming rules here.
-OUTPUT_DIR=$(POINTACT_PRINT_OUTPUT_DIR=1 bash "$SCRIPT" | tail -1)
+# Resolve where this run writes without starting it, so the completion guard and the log agree
+# with the real output_dir instead of duplicating the naming rules. The run yaml is the single
+# source of truth, so this asks it directly.
+OUTPUT_DIR=$(PYTHONPATH="$REPO" "${POINTACT_ENV:-$WORK/code/robot-PointAct}/.venv/bin/python" -c "
+from pointact.train.run_config import resolve_run_config
+print(resolve_run_config('$RUN_CONFIG')[2]['output_dir'])")
 
 # Every 2 h slice is a fresh process, so wandb.init() would mint a NEW run id each time and
 # scatter one training run's curves across a dozen W&B runs. Pin a stable id derived from the
@@ -118,7 +121,7 @@ OUTPUT_DIR=$(POINTACT_PRINT_OUTPUT_DIR=1 bash "$SCRIPT" | tail -1)
 export WANDB_RUN_ID="chain-$(printf '%s' "$(basename "${OUTPUT_DIR}")" | md5sum | cut -c1-12)"
 export WANDB_RESUME=allow
 
-echo "host=$(hostname) variant=${VARIANT} chain_remaining=${CHAIN_REMAINING}"
+echo "host=$(hostname) run_config=${RUN_CONFIG} chain_remaining=${CHAIN_REMAINING}"
 echo "wandb_run_id=${WANDB_RUN_ID} (resume=${WANDB_RESUME})"
 echo "gpus=${GPUS} per_device_bs=${PER_DEVICE_BATCH_SIZE} grad_accum=${GRAD_ACCUM}" \
      "-> effective batch ${EFFECTIVE_BATCH}"
@@ -159,7 +162,7 @@ fi
 # `bash` fails with "accelerate: command not found".
 START_TS=$SECONDS
 set +e
-uv run --no-sync bash "$SCRIPT"
+uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
 RC=$?
 set -e
 ELAPSED=$(( SECONDS - START_TS ))
