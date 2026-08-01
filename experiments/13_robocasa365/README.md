@@ -101,6 +101,33 @@ other. Fixing steps is what keeps one checkpoint grid comparable across tasks; e
 logged alongside. If a future task's frames-per-epoch differs by more than ~3-4x, equalise the
 dataset (temporal stride or demo subsampling) rather than switching axes.
 
+### Measured throughput (pilot, 2026-08-01)
+
+`pilot_throughput.py` on 4x H100 (gpu_p6), effective batch 128, marginal rate over a 40->160
+step window so startup and CUDA warm-up are excluded. Projected to the 50K-step budget:
+
+| points | cached-context s/step | live-VLM s/step | speedup | cached GPU-h | VLM GPU-h |
+|---|---|---|---|---|---|
+| 2048 | 0.259 | 1.346 | **5.2x** | 14.4 | 74.8 |
+| 4096 | 0.469 | 1.537 | **3.3x** | 26.1 | 85.4 |
+| 8192 | 0.550 | 1.820 | **3.3x** | 30.6 | 101.1 |
+
+Two things this settles:
+
+- **Dropping the VLM buys 3.3x** at the point counts that matter, so the plan's assumed 3x was
+  about right (and 5.2x at 2048, where the point branch is cheapest and the VLM dominates most).
+- **Point-count scaling is strongly sublinear: 0.55x / 1.00x / 1.17x**, not the 0.5x / 1x / 2x
+  assumed. Doubling 4096 -> 8192 costs only 17% more, because fixed per-step costs dominate
+  per-point compute at these sizes. If 8192 wins on success rate it is nearly free to adopt --
+  the opposite of what the budget implied.
+
+Resulting budget: **stage A 213 H100-h** (plan: 272), stage B **104 h at 4096** or **122 h at
+8192**, so the whole grid lands at **317-335 H100-h** against the 380 planned. For reference,
+the naive 27-run grid with a live VLM would be ~2,350 H100-h.
+
+Sanity check on the whole exercise: live-VLM at 4096 measures 21.4 h for 50K steps on 4 GPUs,
+which is the ~20 h/run figure the budget was originally built on.
+
 ### W&B conventions
 
 Run names are short (`od-eef-n4096-s0`); identity lives in config columns. Group the runs
