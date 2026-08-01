@@ -19,6 +19,7 @@ configurations.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,7 +30,8 @@ import yaml
 
 
 
-def build_pilot_config(base: Path, out_dir: Path, context: str, npoints: int, steps: int) -> Path:
+def build_pilot_config(base: Path, out_dir: Path, run_root: Path, context: str, npoints: int,
+                       steps: int) -> Path:
     """A run yaml for one pilot point: no checkpoints, no W&B, a handful of steps."""
     document = {
         "extends": str(base.resolve()),
@@ -47,7 +49,10 @@ def build_pilot_config(base: Path, out_dir: Path, context: str, npoints: int, st
             "save_strategy": "no",
             "report_to": [],
             "logging_steps": max(1, steps // 4),
-            "output_dir": str(out_dir / f"{context}-n{npoints}-s{steps}"),
+            # On $SCRATCH, never the node's /tmp: train.py always writes a final checkpoint,
+            # and a vlm-arm checkpoint is ~7GB, which fills /tmp and kills the run at the very
+            # end -- after all the timed work is done.
+            "output_dir": str(run_root / f"{context}-n{npoints}-s{steps}"),
         },
         "data": {"lerobot_datasets": [{"max_npoints": npoints}]},
     }
@@ -147,6 +152,7 @@ def main() -> None:
 
     results = {}
     log_dir = args.out.parent / "pilot_logs"
+    run_root = args.out.parent / "pilot_runs"
     with tempfile.TemporaryDirectory(prefix="pilot-") as tmp:
         tmp_dir = Path(tmp)
         for context in args.contexts:
@@ -156,7 +162,9 @@ def main() -> None:
                 try:
                     timings = {}
                     for steps in (args.short_steps, args.long_steps):
-                        config = build_pilot_config(args.base, tmp_dir, context, npoints, steps)
+                        config = build_pilot_config(
+                            args.base, tmp_dir, run_root, context, npoints, steps
+                        )
                         timings[steps] = run_one(
                             config, args.gpus, args.per_device_batch, accum, repo, log_dir
                         )["runtime"]
@@ -173,6 +181,9 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001 - one bad cell must not lose the rest
                     print(f"    !! FAILED: {exc}\n", flush=True)
                     results[label] = {"error": str(exc)}
+                finally:
+                    # Reclaim the checkpoints: 12 runs at up to ~7GB each otherwise.
+                    shutil.rmtree(run_root, ignore_errors=True)
 
     print(report(results, args))
     args.out.write_text(json.dumps(results, indent=2))
