@@ -95,11 +95,27 @@ Stage B (the two new tasks) **does not auto-launch**. When stage A finishes, a g
 the point-count x sampling table; pick a point count, then
 `python experiments/13_robocasa365/runs/generate_stage_b.py --npoints <N>`.
 
-Budget is denominated in **gradient steps**, not epochs — 50K steps at effective batch 128 is
-~50 epochs on each of the three tasks, since their episode lengths are within ~10% of each
-other. Fixing steps is what keeps one checkpoint grid comparable across tasks; epochs are
-logged alongside. If a future task's frames-per-epoch differs by more than ~3-4x, equalise the
-dataset (temporal stride or demo subsampling) rather than switching axes.
+### Steps, not epochs — and what the datasets actually measure
+
+Budget is denominated in **gradient steps**. Measured after conversion (2026-08-01):
+
+| task | episodes | frames | frames/ep | steps/epoch @128 | epochs at 50K |
+|---|---|---|---|---|---|
+| OpenDrawer | 496 | 124,800 | 252 | 975 | 51.3 |
+| PickPlaceCounterToStove | 501 | 122,274 | 244 | 955 | 52.3 |
+| TurnOnMicrowave | 543 | 72,335 | 133 | 565 | **88.5** |
+
+Note the planning estimate was wrong for TurnOnMicrowave. `docs/atomic_tasks/
+atomic_episode_lengths.js` gives it `mean_seconds: 23`, but the target split averages 133
+frames = 6.65 s at 20 fps — the doc figures are pretrain-split and run up to ~3.5x high. **Use
+converted frame counts, not the docs, for any steps-per-epoch reasoning.**
+
+So the three tasks are not equally exposed: two get ~52 epochs, TurnOnMicrowave gets 88.5, a
+1.7x spread. Fixing steps remains right — it is compute-matched and it is what makes one
+checkpoint grid (20/30/40/50K) comparable across tasks — and 1.7x is well inside the ~3-4x
+threshold at which the dataset itself should be equalised instead. But **TurnOnMicrowave is
+the over-exposure risk**: watch for its duration curve peaking before 50K and declining. That
+is a finding to report, not a bug to patch.
 
 ### Measured throughput (pilot, 2026-08-01)
 
