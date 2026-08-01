@@ -16,7 +16,18 @@ set -uo pipefail
 
 RUN_ROOT="${WANDB_DIR:-$SCRATCH/wandb}/wandb"
 FINISHED_ONLY=0
-[ "${1:-}" = "--finished-only" ] && FINISHED_ONLY=1
+# Re-push only runs whose .wandb changed in the last N minutes, i.e. still being written.
+# Without this a periodic watcher re-uploads every finished run on every pass for the rest of
+# the campaign; a run that is done and already synced has nothing new to send.
+ACTIVE_WITHIN=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --finished-only) FINISHED_ONLY=1 ;;
+        --active-within) ACTIVE_WITHIN="$2"; shift ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
 
 if [ ! -d "$RUN_ROOT" ]; then
     echo "No W&B run directory at $RUN_ROOT" >&2
@@ -44,6 +55,12 @@ for run in "$RUN_ROOT"/offline-run-*; do
 
     if [ -e "$marker" ]; then
         if [ "$FINISHED_ONLY" = "1" ]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        # Already synced and no longer being written: nothing new to push.
+        if [ -n "$ACTIVE_WITHIN" ] && \
+           [ -z "$(find "$run" -name 'run-*.wandb' -mmin "-${ACTIVE_WITHIN}" -print -quit)" ]; then
             skipped=$((skipped + 1))
             continue
         fi
