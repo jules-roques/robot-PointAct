@@ -46,6 +46,12 @@ CKPT_STEP="${STEPS[$SLURM_ARRAY_TASK_ID]}"
 # short walltime killed it.
 export NUM_TRIALS="${NUM_TRIALS:-${TRIALS[$SLURM_ARRAY_TASK_ID]}}"
 
+# Capture rollout animations at the final checkpoint only. They cost buffering and render
+# time, and the figure worth keeping is the one from the policy the headline number describes.
+if [ "$CKPT_STEP" = "50000" ]; then
+    export VIZ_ROLLOUTS="${VIZ_ROLLOUTS:-1}"
+fi
+
 if [ ! -d "$CKPT_DIR/checkpoint-$CKPT_STEP" ]; then
     echo "checkpoint-$CKPT_STEP not written yet under $CKPT_DIR; nothing to do."
     exit 0

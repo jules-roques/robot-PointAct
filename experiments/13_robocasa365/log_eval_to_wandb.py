@@ -38,8 +38,14 @@ def load_results(run_dir: Path) -> list[dict]:
     """
     by_step: dict[int, dict] = {}
     for ckpt_dir in sorted((run_dir / "results").glob("checkpoint-*")):
-        # "final-48750" also occurs; take the trailing integer so it sorts with the rest.
-        step = int(ckpt_dir.name.removeprefix("checkpoint-").rsplit("-", 1)[-1])
+        try:
+            # "final-48750" also occurs; take the trailing integer so it sorts with the rest.
+            step = int(ckpt_dir.name.removeprefix("checkpoint-").rsplit("-", 1)[-1])
+        except ValueError:
+            # e.g. checkpoint-50000-viz, written by a rollout-only pass. Its trials must never
+            # be pooled into the real result -- a handful of viz episodes would shift the
+            # headline number. Only its figures are picked up, by rollout_media below.
+            continue
         entry = by_step.setdefault(
             step, {"ckpt_step": step, "successes": 0, "trials": 0, "dir": ckpt_dir}
         )
@@ -51,10 +57,15 @@ def load_results(run_dir: Path) -> list[dict]:
 
 
 def rollout_media(ckpt_dir: Path) -> dict:
-    """The success/failure rollout animations captured for this checkpoint, if any."""
+    """The success/failure rollout animations for this checkpoint, if any.
+
+    Looks in the checkpoint's own directory and in a `-viz` sibling, so figures produced by a
+    separate rollout-only pass are picked up without their trials polluting the pooled rate.
+    """
+    search = [ckpt_dir, ckpt_dir.with_name(ckpt_dir.name + "-viz")]
     media = {}
     for outcome in ("success", "failure"):
-        matches = sorted(ckpt_dir.glob(f"rollout_{outcome}_*.html"))
+        matches = sorted(m for d in search if d.is_dir() for m in d.glob(f"rollout_{outcome}_*.html"))
         if matches:
             media[f"eval/rollout_{outcome}"] = wandb.Html(
                 matches[0].read_text(encoding="utf-8"), inject=False
