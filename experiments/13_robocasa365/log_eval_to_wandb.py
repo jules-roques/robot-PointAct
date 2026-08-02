@@ -98,6 +98,11 @@ def log_run(run_dir: Path, project: str, entity: str) -> bool:
         rate = entry["successes"] / max(entry["trials"], 1)
         payload = {
             "eval/ckpt_step": entry["ckpt_step"],
+            # Also emitted on the training axis. Eval rows otherwise carry no
+            # train/global_step, so any panel using the workspace default x-axis reports
+            # "no data" -- and semantically the eval of checkpoint N *is* the policy at
+            # global step N, so this puts it exactly where it belongs against the loss curve.
+            "train/global_step": entry["ckpt_step"],
             "eval/success_rate": rate,
             "eval/successes": entry["successes"],
             "eval/trials": entry["trials"],
@@ -109,13 +114,55 @@ def log_run(run_dir: Path, project: str, entity: str) -> bool:
         print(f"  {run_dir.name} @{entry['ckpt_step']}: "
               f"{entry['successes']}/{entry['trials']} = {rate:.1%} [{low:.1%}, {high:.1%}]")
 
-    # Summary columns so the runs table sorts by final success directly.
+    # Summary columns so the runs table sorts by final success directly. update() rather than
+    # item assignment: assigning on a resumed run did not persist.
     final = results[-1]
-    run.summary["eval/final_success_rate"] = final["successes"] / max(final["trials"], 1)
-    run.summary["eval/final_ckpt_step"] = final["ckpt_step"]
-    run.summary["eval/final_trials"] = final["trials"]
+    summary = {
+        "eval/final_success_rate": final["successes"] / max(final["trials"], 1),
+        "eval/final_ckpt_step": final["ckpt_step"],
+        "eval/final_trials": final["trials"],
+    }
+    summary.update(duration_summary(run, run_dir))
+    run.summary.update(summary)
     run.finish()
     return True
+
+
+def duration_summary(run, run_dir: Path) -> dict:
+    """Training cost, in the units anyone actually asks about.
+
+    HF records train_runtime in seconds and nothing else; wall-clock hours, GPU-hours and the
+    epoch equivalent are what the budget and the steps-vs-epochs question are argued in.
+    """
+    runtime = run.summary.get("train_runtime")
+    if not runtime:
+        return {}
+    out = {"duration/train_runtime_h": runtime / 3600.0}
+
+    args_file = run_dir / "training_args.json"
+    if args_file.exists():
+        args = json.loads(args_file.read_text())
+        steps = args.get("max_steps") or 0
+        world = args.get("world_size") or 4
+        if steps:
+            out["duration/seconds_per_step"] = runtime / steps
+            out["duration/gpu_hours"] = runtime / 3600.0 * world
+        # Frames come from the dataset the run actually used, so the epoch equivalent is real
+        # rather than assumed -- 50K steps is ~51 epochs on OpenDrawer but ~88 on TurnOnMicrowave.
+        info = run_dir / "data_config.yaml"
+        if info.exists() and steps:
+            import yaml
+            entry = yaml.safe_load(info.read_text())["lerobot_datasets"][0]
+            meta = Path(entry["root"]) / entry["repo_id"] / "meta" / "info.json"
+            candidates = [meta, Path(os.path.expandvars("$SCRATCH/datasets")) / meta]
+            for path in candidates:
+                if path.exists():
+                    frames = json.loads(path.read_text())["total_frames"]
+                    eff = args.get("effective_batch") or 128
+                    out["duration/steps_per_epoch"] = frames / eff
+                    out["duration/epochs_equivalent"] = steps / (frames / eff)
+                    break
+    return out
 
 
 def main() -> None:

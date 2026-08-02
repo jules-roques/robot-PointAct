@@ -38,8 +38,10 @@ CKPT_DIR="$EXPRS_DIR/$RUN"
 
 # 50 trials on the intermediate points (enough to draw a curve), 150 at 50K (what it took to
 # separate adjacent sampling arms in the earlier ablation).
-STEPS=(20000 30000 40000 50000)
-TRIALS=(50 50 50 150)
+# Overridable so a checkpoint outside the default grid can be evaluated without editing this
+# file, e.g. EVAL_STEPS="10000" EVAL_TRIALS="50" --array=0.
+read -r -a STEPS <<< "${EVAL_STEPS:-20000 30000 40000 50000}"
+read -r -a TRIALS <<< "${EVAL_TRIALS:-50 50 50 150}"
 CKPT_STEP="${STEPS[$SLURM_ARRAY_TASK_ID]}"
 # Overridable so a smoke test can ask for a handful of trials; the client only
 # writes results at the end, so a long default would produce nothing before a
