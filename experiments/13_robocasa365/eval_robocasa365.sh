@@ -41,17 +41,32 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 # client without imageio -- the failure mode that killed the first stage-A eval sweep. Resolve
 # the environments from a checkout that actually has them; PYTHONPATH above is what makes the
 # worktree's own code shadow the installed package (docs/envs.md).
+# Probe by CAPABILITY, not by path: a stray `uv run` in a worktree leaves an EMPTY .venv
+# behind, and testing only for .venv/bin/python happily selects it -- which is exactly how the
+# first fix for this still produced "No module named numpy".
+env_has() { [ -x "$1/bin/python" ] && "$1/bin/python" -c "import $2" >/dev/null 2>&1; }
+
 POINTACT_ENV="${POINTACT_ENV:-}"
 if [ -z "$POINTACT_ENV" ]; then
-    for candidate in "$REPO" "${WORK:-}/code/robot-PointAct" "$HOME/code/robot-PointAct"; do
-        if [ -n "$candidate" ] && [ -x "$candidate/.venv/bin/python" ]; then
+    for candidate in "${WORK:-}/code/robot-PointAct" "$HOME/code/robot-PointAct" "$REPO"; do
+        if [ -n "$candidate" ] && env_has "$candidate/.venv" numpy; then
             POINTACT_ENV="$candidate"
             break
         fi
     done
 fi
-[ -z "$POINTACT_ENV" ] && { echo "No checkout with a .venv found for the policy server" >&2; exit 1; }
-ROBOCASA_ENV="${ROBOCASA_ENV:-$POINTACT_ENV/envs/robocasa365}"
+[ -z "$POINTACT_ENV" ] && { echo "No checkout whose .venv can import numpy" >&2; exit 1; }
+
+ROBOCASA_ENV="${ROBOCASA_ENV:-}"
+if [ -z "$ROBOCASA_ENV" ]; then
+    for candidate in "$POINTACT_ENV" "${WORK:-}/code/robot-PointAct" "$HOME/code/robot-PointAct"; do
+        if [ -n "$candidate" ] && env_has "$candidate/envs/robocasa365/.venv" imageio; then
+            ROBOCASA_ENV="$candidate/envs/robocasa365"
+            break
+        fi
+    done
+fi
+[ -z "$ROBOCASA_ENV" ] && { echo "No envs/robocasa365/.venv that can import imageio" >&2; exit 1; }
 echo "pointact env=$POINTACT_ENV  robocasa env=$ROBOCASA_ENV"
 
 # Client-side rendering + offline (treat compute nodes as if they had no network, for
