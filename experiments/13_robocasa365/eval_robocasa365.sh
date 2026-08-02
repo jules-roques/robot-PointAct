@@ -176,8 +176,18 @@ uv run --project "$ROBOCASA_ENV" --no-sync \
     ${ORACLE_ANCHOR} \
     ${options}
 
-echo ${ckpt_dir}/checkpoint-${ckpt_step}
 echo "Client finished"
+
+# Render the rollout dumps in the POINTACT env: the sim env the client ran in has neither
+# plotly nor lmdb, which the figure code needs.
+if [ -n "${VIZ_ROLLOUTS:-}" ]; then
+    uv run --project "$POINTACT_ENV" --no-sync \
+        python experiments/13_robocasa365/render_rollouts.py \
+        "${ckpt_dir}/results/checkpoint-${ckpt_step}${SAVE_SUFFIX:-}" || \
+        echo "rollout rendering failed (eval results are unaffected)" >&2
+fi
+
+echo ${ckpt_dir}/checkpoint-${ckpt_step}
 
 # Tolerate the server's kill signal so `set -e` doesn't mark the job FAILED after a clean run.
 kill "$SERVER_PID" 2>/dev/null || true

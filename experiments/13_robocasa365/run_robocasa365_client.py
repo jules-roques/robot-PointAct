@@ -167,46 +167,25 @@ def choose_rollouts(kept: dict) -> list[tuple[str, int, list]]:
     return picked
 
 
-def render_rollouts(kept: dict, save_dir: pathlib.Path, sampling: str, sigma: float, floor: float):
-    """Write the chosen rollouts as point-cloud animations, matching the training figures.
+def save_rollout_npz(kept: dict, save_dir: pathlib.Path, sampling: str) -> list:
+    """Dump the chosen rollouts as .npz for later rendering.
 
-    Reuses viz_sampling_episode.build_figure so eval and training artefacts render identically
-    (same weight colour scale, same controls). Weights are recomputed here from the buffered
-    cloud and eef rather than returned by the server, which keeps the wire protocol unchanged.
+    Rendering happens in a separate step, not here: this client runs in the robocasa365 env,
+    which has neither plotly nor lmdb (the viz module imports both), while the pointact env
+    has all three. Writing raw arrays keeps this side numpy-only.
     """
-    import types
-
-    from data_prep.roi_sampling.viz_sampling_episode import (
-        CLOG_MAX, CLOG_MIN, build_figure, oversampling_factor,
-    )
-    from pointact.roi_sampling.geometry import eef_density_weights
-
-    style = types.SimpleNamespace(
-        color_by="weight", dark=True, frame_ms=120, point_size=2.0,
-        near_radius=0.15, roi_radius=0.15, roi_radius_scale=1.0,
-    )
     written = []
     for outcome, trial, frames in choose_rollouts(kept):
-        frames_data = []
-        for fd in frames:
-            pts, eef = fd["points"], fd["eef"]
-            weights = (eef_density_weights(pts[:, :3], eef, sigma, floor)
-                       if sampling in ("eef", "anchor") else None)
-            logw = np.log2(np.clip(oversampling_factor(weights, len(pts)), 1e-6, None))
-            frames_data.append({
-                "pts": pts[:, :3], "colors": logw.astype(np.float32), "n_sel": len(pts),
-                "anchor": eef if weights is not None else None, "frame": fd["step"],
-                "near_frac": None, "n_handle_total": 0, "n_handle_sel": 0,
-                "handle_recall": None, "n_cloud": len(pts), "n_frames": len(frames),
-                "phase": outcome,
-            })
-        if not frames_data:
+        if not frames:
             continue
-        fig = build_figure(sampling, frames_data, trial, f"rollout {outcome}", style)
-        out = save_dir / f"rollout_{outcome}_{trial}.html"
-        # CDN plotly: inlining it would add ~3.5MB to every figure, and W&B renders these in
-        # the viewer's browser, which can fetch it.
-        fig.write_html(str(out), include_plotlyjs="cdn", auto_play=False)
+        payload = {"sampling": np.array(sampling), "trial": np.array(trial),
+                   "outcome": np.array(outcome), "n_frames": np.array(len(frames))}
+        for i, fd in enumerate(frames):
+            payload[f"points_{i}"] = fd["points"].astype(np.float32)
+            payload[f"eef_{i}"] = fd["eef"].astype(np.float32)
+            payload[f"step_{i}"] = np.array(fd["step"])
+        out = save_dir / f"rollout_{outcome}_{trial}.npz"
+        np.savez_compressed(out, **payload)
         written.append(out)
     return written
 
@@ -422,15 +401,12 @@ def main(args: ClientArgs) -> None:
 
         if args.viz_rollouts and kept_rollouts:
             try:
-                paths = render_rollouts(
-                    kept_rollouts, Path(args.save_dir), args.point_sampling_for_viz,
-                    args.viz_sigma, args.viz_floor,
-                )
-                for path in paths:
-                    logging.info(f"wrote rollout animation {path} "
+                for path in save_rollout_npz(kept_rollouts, Path(args.save_dir),
+                                             args.point_sampling_for_viz):
+                    logging.info(f"wrote rollout data {path} "
                                  f"({path.stat().st_size / 1e6:.1f} MB)")
             except Exception as exc:  # noqa: BLE001 - a figure must never lose the eval result
-                logging.warning(f"rollout rendering failed: {type(exc).__name__}: {exc}")
+                logging.warning(f"rollout dump failed: {type(exc).__name__}: {exc}")
     logging.info(f"Total episodes: {total_episodes}")
     env.close()
 
