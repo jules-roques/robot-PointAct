@@ -80,10 +80,10 @@ python data_prep/cache_text_context.py \
 sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
        experiments/13_robocasa365/train.slurm
 
-# 2. Or the whole of stage A (9 runs + their eval arrays + the gate)
+# 2. Or the whole of stage 1 (9 runs + their eval arrays + the gate)
 bash experiments/13_robocasa365/submit_stage_a.sh
 
-# 3. Evaluate one run at 20/30/40/50K (array; skips checkpoints not yet written)
+# 3. Evaluate one run at 10/20/30/40/50K (array; skips checkpoints not yet written)
 sbatch --export=ALL,RUN=od-eef-n4096-s0 experiments/13_robocasa365/eval_grid.slurm
 
 # 4. Push its results into W&B as a success-vs-checkpoint curve
@@ -91,9 +91,37 @@ python experiments/13_robocasa365/log_eval_to_wandb.py \
     --run-dir $SCRATCH/PointAct_exprs/robocasa365/ablation/od-eef-n4096-s0
 ```
 
-Stage B (the two new tasks) **does not auto-launch**. When stage A finishes, a gate job mails
+Stage 2 (the two new tasks) **does not auto-launch**. When stage 1 finishes, a gate job mails
 the point-count x sampling table; pick a point count, then
 `python experiments/13_robocasa365/runs/generate_stage_b.py --npoints <N>`.
+
+### The three stages
+
+`meta.stage` in each run yaml becomes a W&B tag and the `exp_stage` config column, so the runs
+table filters straight to one stage.
+
+| stage | tag | runs | what it asks |
+|---|---|---|---|
+| 0 | `Stage 0: Two camera views` | `od-{uniform,eef,anchor}-n4096-vlm-s0` | does image conditioning help, at matched budget? |
+| 1 | `Stage 1: Num points & Train steps` | the nine `od-*-n{2048,4096,8192}-s0` | how many points, and how long to train? |
+| 2 | `Stage 2: Task transfer` | `ppcs-*`, `tom-*` | does the sampling result hold on other tasks? |
+
+**Stage 0** is the with-VLM control, and the only reason it is a full retrain rather than a
+comparison against the old 20-epoch runs: those stopped at 19,500 steps under a cosine schedule
+annealed to *that* horizon, so their checkpoints are not a prefix of a 50K run and cannot be
+read as a point on its duration curve. At 4096 points the image-free arms beat them, and stage
+0 asks whether images simply converge more slowly. Everything except `context_source` matches
+`_base.yaml` — see `runs/_base_2views.yaml` for the two settings that cannot match
+(`gradient_checkpointing`, which needs a VLM to exist, and `image_aug`, which needs images).
+
+Stage 0 costs ~3x stage 1 per step (1.54 vs 0.51 s/step at 4096), so ~21.4 h per run — past the
+20 h `qos_gpu_h100-t3` cap. Submit them under `t4`:
+
+```bash
+RUNS="od-uniform-n4096-vlm-s0 od-eef-n4096-vlm-s0 od-anchor-n4096-vlm-s0" \
+SUBMIT_GATE=0 TRAIN_EXTRA="--qos=qos_gpu_h100-t4 --time=30:00:00 --constraint=h100" \
+bash experiments/13_robocasa365/submit_stage_a.sh
+```
 
 ### Steps, not epochs — and what the datasets actually measure
 
@@ -158,14 +186,19 @@ Same architecture as Libero (frozen vision tower + LLM + merger; trainable PTv3 
 expert). Effective batch size 128 on 1–2 H100. RoboCasa365 training has no simulator
 dependency, so it runs in the `pointact` (root) env and can use H100.
 
+The three 20-epoch with-VLM runs that produced the first sampling ablation (uniform 30.7% /
+eef 51.3% / oracle 66.7%) live in `runs/legacy/`, which reproduces the shell scripts they were
+launched from:
+
 ```bash
-# PTv3 = Concerto
-bash experiments/13_robocasa365/train_pointact_concerto.sh
-# PTv3 = Utonia
-bash experiments/13_robocasa365/train_pointact_utonia.sh
-# PTv3 = Concerto, EEF-density point sampling ablation (see below)
-bash experiments/13_robocasa365/train_pointact_concerto_eefdensity.sh
+sbatch --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/legacy/concerto-uniform.yaml \
+       experiments/13_robocasa365/train_jeanzay.slurm
 ```
+
+**Their checkpoints have been deleted** (2026-08-02, 123 GB) — superseded by the stage-0 arms
+above, which train the same three arms to 50K on the current recipe. Each run directory keeps
+its `results/`, `trainer_state.json` and `training_args.json`, so the published numbers stay
+auditable; only the weights are gone.
 
 On CLEPS, submit via `sbatch experiments/13_robocasa365/train.slurm [concerto|concerto_eefdensity]`
 (`--account=willow --partition=gpu --gres=gpu:h100:4`; see `train.slurm` for details — CLEPS has
@@ -199,6 +232,13 @@ A100** GPU, driven by `eval.slurm` (CLEPS) / `eval_jeanzay.slurm` (Jean Zay) —
 (`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. A100 (not V100) is required
 because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only);
 H100 is avoided because RoboCasa365 does not run correctly there.
+
+**100 trials per checkpoint, at 10/20/30/40/50K** — the `eval_grid*.slurm` default, and the
+convention for everything from here on. The first sweep used 50 on the intermediate points and
+150 at 50K; that turned out backwards, because the 10K column carried the most interesting
+result (anchor already at 76% while uniform sat at 22%) and was the least precise. A single
+trial count also means a duration curve does not change resolution halfway along. At n=100 the
+Wilson half-width is ~±10 pp near 50%, ~±8 pp near 80%.
 
 ```bash
 # Full 50-trial success rate (default checkpoint = the OpenDrawer concerto run):

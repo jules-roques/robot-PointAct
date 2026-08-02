@@ -1,5 +1,5 @@
 #!/bin/bash
-# Jean Zay counterpart to eval_grid.slurm: evaluate one ablation run at 20/30/40/50K as an
+# Jean Zay counterpart to eval_grid.slurm: evaluate one ablation run at 10/20/30/40/50K as an
 # array, one task per checkpoint.
 #
 #   sbatch --export=ALL,RUN=od-eef-n4096-s0 experiments/13_robocasa365/eval_grid_jeanzay.slurm
@@ -20,8 +20,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_a100-t3
-#SBATCH --time=10:00:00
-#SBATCH --array=0-3
+#SBATCH --time=12:00:00
+#SBATCH --array=0-4
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
 
@@ -36,12 +36,11 @@ RUN="${RUN:?set RUN=<run name, e.g. od-eef-n4096-s0> via --export}"
 EXPRS_DIR="${EXPRS_DIR:-$SCRATCH/PointAct_exprs/robocasa365/ablation}"
 CKPT_DIR="$EXPRS_DIR/$RUN"
 
-# 50 trials on the intermediate points (enough to draw a curve), 150 at 50K (what it took to
-# separate adjacent sampling arms in the earlier ablation).
-# Overridable so a checkpoint outside the default grid can be evaluated without editing this
-# file, e.g. EVAL_STEPS="10000" EVAL_TRIALS="50" --array=0.
-read -r -a STEPS <<< "${EVAL_STEPS:-20000 30000 40000 50000}"
-read -r -a TRIALS <<< "${EVAL_TRIALS:-50 50 50 150}"
+# 100 trials at every checkpoint -- see eval_grid.slurm for why the 50/50/50/150 split was
+# dropped. Overridable so a checkpoint outside the default grid can be evaluated without
+# editing this file, e.g. EVAL_STEPS="15000" EVAL_TRIALS="50" --array=0.
+read -r -a STEPS <<< "${EVAL_STEPS:-10000 20000 30000 40000 50000}"
+read -r -a TRIALS <<< "${EVAL_TRIALS:-100 100 100 100 100}"
 CKPT_STEP="${STEPS[$SLURM_ARRAY_TASK_ID]}"
 # Overridable so a smoke test can ask for a handful of trials; the client only
 # writes results at the end, so a long default would produce nothing before a

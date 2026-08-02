@@ -1,0 +1,46 @@
+# Two-camera-view counterpart to _base.yaml.
+#
+# Same task, same point budget, same 50K-step schedule, same effective batch -- the ONLY
+# difference from the stage-A arms is where the cross-attention context comes from: a live
+# Qwen2.5-VL forward over the left and right images plus the instruction, instead of a cached
+# text-only embedding. That is what makes "images help / images do not help" a statement about
+# images rather than about training length.
+#
+# These supersede the three 20-epoch with-VLM runs under $SCRATCH/.../pointact/ (see
+# legacy/_base_vlm.yaml). Those stopped at 19,500 steps, which is where the comparison against
+# the image-free arms was made -- and the image-free arms were still improving well past that.
+# Running to 50K asks whether the with-image models are simply slower to converge.
+#
+# Cost: ~1.54 s/step measured (pilot_throughput.json, vlm/n4096) against 0.51 s/step for the
+# image-free arm, so ~21.4 h on 4xH100 per run. That is past the 20 h qos_gpu_h100-t3 cap --
+# submit under qos_gpu_h100-t4, which train_jeanzay.slurm already defaults to.
+
+extends: _base.yaml
+
+train:
+  context_source: vlm
+
+  # The VLM is conditioning, not something to fit. Same freeze set as every earlier with-VLM
+  # run on this task; without it the 3B backbone would train and the comparison would be to a
+  # different model entirely.
+  freeze_vision_tower: true
+  freeze_llm: true
+  freeze_merger: true
+
+  # Images are back, so the augmentation pipeline is too. _base.yaml turns it off because it
+  # is a no-op with no images; these are the defaults the 20-epoch runs used.
+  image_aug: true
+  color_aug: true
+
+  # gradient_checkpointing stays at _base.yaml's `true`: with a VLM present there is finally
+  # something that implements it, and pipeline_config only force-disables it for the cached
+  # context. It is the one recipe difference from the image-free arms that cannot be avoided,
+  # and it changes speed and memory, not the function being learned.
+
+data:
+  lerobot_datasets:
+    # Nulled deliberately. LeRobotPointCloudDataset switches to cached context on the presence
+    # of this field, NOT on train.context_source -- leaving it set would skip video decoding
+    # and emit ctx_embeds while the model waited for pixels. Setting it null is what puts the
+    # images back.
+    - text_context_file: null

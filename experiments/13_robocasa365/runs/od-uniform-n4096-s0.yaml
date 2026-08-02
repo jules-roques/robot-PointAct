@@ -8,7 +8,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: A
+  stage: "Stage 1: Num points & Train steps"
 
 data:
   lerobot_datasets:

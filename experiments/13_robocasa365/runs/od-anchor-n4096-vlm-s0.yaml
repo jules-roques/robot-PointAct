@@ -1,0 +1,21 @@
+# OpenDrawer / anchor / 4096 points, two camera views -- stage A follow-up.
+# The image-conditioned counterpart of od-anchor-n4096-s0; sampling fields are identical to it.
+extends: _base_2views.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: anchor
+  npoints: 4096
+  context: vlm
+  seed: 0
+  stage: "Stage 0: Two camera views"
+
+data:
+  lerobot_datasets:
+    - max_npoints: 4096
+      oracle_sampling: true
+      oracle_label_dirname: points_3views_labels
+      oracle_anchor_labels: [4]
+      oracle_anchor_fallback_labels: [3]
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05

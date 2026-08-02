@@ -12,7 +12,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: B
+  stage: "Stage 2: Task transfer"
 
 data:
   lerobot_datasets:

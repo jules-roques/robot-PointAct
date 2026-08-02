@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluate one ablation run at all four checkpoints, as a SLURM array (one task per step).
+# Evaluate one ablation run at all five checkpoints, as a SLURM array (one task per step).
 #
 #   sbatch --export=ALL,RUN=od-eef-n4096-s0 experiments/13_robocasa365/eval_grid.slurm
 #
@@ -8,9 +8,12 @@
 # Array tasks whose checkpoint is not written yet exit 0 and are simply re-submitted later --
 # they never block the ones that are ready.
 #
-# 50 trials at 20K/30K/40K, 150 at 50K: the intermediate points only have to draw a curve,
-# while the headline arm comparison at 50K needs the resolution (n=150 was what separated
-# adjacent sampling arms in the earlier ablation; n=50 only separated the endpoints).
+# 100 trials at every checkpoint. The first sweep used 50 on the intermediate points and 150
+# at 50K, on the theory that only the endpoint needed resolution -- but the 10K column turned
+# out to carry the most interesting result (anchor already at 76% while uniform sat at 22%),
+# and a 50-trial point is +/-14pp, too wide to say much. One number everywhere also means the
+# duration curves are directly comparable point-to-point instead of changing precision
+# halfway along. Fixed at 100 from here on.
 #
 # A100, not V100: PTv3 uses FlashAttention (Ampere+) and V100 has no bf16. Not H100 either --
 # RoboCasa365 does not render correctly there. Available on both clusters; on Jean Zay use
@@ -23,8 +26,8 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --hint=nomultithread
-#SBATCH --time=08:00:00
-#SBATCH --array=0-3
+#SBATCH --time=12:00:00
+#SBATCH --array=0-4
 #SBATCH --output=/scratch/jroques/logs/robocasa365/%x_%A_%a.out
 #SBATCH --error=/scratch/jroques/logs/robocasa365/%x_%A_%a.out
 
@@ -39,8 +42,8 @@ CKPT_DIR="$EXPRS_DIR/$RUN"
 
 # Overridable so a checkpoint outside the default grid can be evaluated without editing this
 # file, e.g. EVAL_STEPS="10000" EVAL_TRIALS="50" --array=0.
-read -r -a STEPS <<< "${EVAL_STEPS:-20000 30000 40000 50000}"
-read -r -a TRIALS <<< "${EVAL_TRIALS:-50 50 50 150}"
+read -r -a STEPS <<< "${EVAL_STEPS:-10000 20000 30000 40000 50000}"
+read -r -a TRIALS <<< "${EVAL_TRIALS:-100 100 100 100 100}"
 CKPT_STEP="${STEPS[$SLURM_ARRAY_TASK_ID]}"
 # Overridable so a smoke test can ask for a handful of trials; the client only
 # writes results at the end, so a long default would produce nothing before a

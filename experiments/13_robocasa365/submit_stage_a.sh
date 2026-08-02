@@ -1,8 +1,16 @@
 #!/bin/bash
-# Submit all nine stage-A runs plus the gate that mails their summary.
+# Submit a set of ablation runs, each followed by its eval array.
 #
-#   bash experiments/13_robocasa365/submit_stage_a.sh            # submit
+#   bash experiments/13_robocasa365/submit_stage_a.sh            # the nine stage-1 arms + gate
 #   DRY_RUN=1 bash experiments/13_robocasa365/submit_stage_a.sh  # print what it would submit
+#
+# The stage-0 (two-camera-view) arms are a separate submission: they are ~3x slower per step,
+# so they need the longer QoS, and the point-count gate does not apply to them.
+#
+#   RUNS="od-uniform-n4096-vlm-s0 od-eef-n4096-vlm-s0 od-anchor-n4096-vlm-s0" \
+#   SUBMIT_GATE=0 \
+#   TRAIN_EXTRA="--qos=qos_gpu_h100-t4 --time=30:00:00 --constraint=h100" \
+#   bash experiments/13_robocasa365/submit_stage_a.sh
 #
 # Each run is one allocation (the longest, 8192 points, is ~12h and fits comfortably in the
 # 48h CLEPS / 100h Jean Zay limits). train_jeanzay_dev.slurm and its 2h chaining remain
@@ -50,9 +58,18 @@ submit() {
     sbatch --parsable "$@"
 }
 
+# Named explicitly rather than globbed. `od-*.yaml` used to be the whole grid, but the
+# directory now also holds the stage-0 two-camera-view arms -- a glob would have silently
+# grown this submission by three 21-hour runs.
+DEFAULT_RUNS=(od-uniform-n2048-s0 od-eef-n2048-s0 od-anchor-n2048-s0
+              od-uniform-n4096-s0 od-eef-n4096-s0 od-anchor-n4096-s0
+              od-uniform-n8192-s0 od-eef-n8192-s0 od-anchor-n8192-s0)
+read -r -a RUN_LIST <<< "${RUNS:-${DEFAULT_RUNS[*]}}"
+
 eval_job_ids=()
-for config in "$RUNS_DIR"/od-*.yaml; do
-    run=$(basename "$config" .yaml)
+for run in "${RUN_LIST[@]}"; do
+    config="$RUNS_DIR/$run.yaml"
+    [ -f "$config" ] || { echo "no such run config: $config" >&2; exit 1; }
     echo "submitting $run"
 
     train_id=$(submit --job-name="$run" $TRAIN_EXTRA \
@@ -67,13 +84,16 @@ for config in "$RUNS_DIR"/od-*.yaml; do
 done
 
 # The gate waits on every eval array. afterok here (unlike above): a summary assembled from a
-# crashed eval would quietly under-report an arm, and choosing the stage-B point count off
-# that is exactly the mistake this gate exists to prevent.
-dependency=$(IFS=:; echo "${eval_job_ids[*]}")
-gate_id=$(submit --dependency=afterok:"$dependency" "$GATE_SLURM")
-echo
-echo "gate: $gate_id (mails the point-count table when all ${#eval_job_ids[@]} eval arrays finish)"
-echo "then: python $RUNS_DIR/generate_stage_b.py --npoints <your choice>"
+# crashed eval would quietly under-report an arm, and choosing the point count off that is
+# exactly the mistake this gate exists to prevent. Off for submissions that are not the
+# point-count sweep -- there is nothing for them to gate.
+if [ "${SUBMIT_GATE:-1}" = "1" ]; then
+    dependency=$(IFS=:; echo "${eval_job_ids[*]}")
+    gate_id=$(submit --dependency=afterok:"$dependency" "$GATE_SLURM")
+    echo
+    echo "gate: $gate_id (mails the point-count table when all ${#eval_job_ids[@]} eval arrays finish)"
+    echo "then: python $RUNS_DIR/generate_stage_b.py --npoints <your choice>"
+fi
 
 # W&B is offline on Jean Zay compute nodes; nothing pushes it automatically, by choice.
 if [ -n "${DSDIR:-}" ]; then

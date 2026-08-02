@@ -1,0 +1,15 @@
+# OpenDrawer / uniform / 4096 points, two camera views -- stage A follow-up.
+# The image-conditioned counterpart of od-uniform-n4096-s0.
+extends: _base_2views.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: uniform
+  npoints: 4096
+  context: vlm
+  seed: 0
+  stage: "Stage 0: Two camera views"
+
+data:
+  lerobot_datasets:
+    - max_npoints: 4096
