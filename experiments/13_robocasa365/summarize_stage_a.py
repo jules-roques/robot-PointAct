@@ -48,6 +48,11 @@ def collect(exprs_dir: Path) -> dict:
             continue
         for ckpt_dir in sorted((run_dir / "results").iterdir()):
             step = ckpt_dir.name.removeprefix("checkpoint-")
+            # Skip rollout-only passes (checkpoint-<step>-viz): a handful of episodes captured
+            # for figures, not a measurement. They are already excluded from the real cell by
+            # living in their own directory; this keeps them out of the table too.
+            if not step.isdigit():
+                continue
             for result_file in sorted(ckpt_dir.glob("per_trial_seed*_n*.json")):
                 record = json.loads(result_file.read_text())
                 key = (match["sampling"], int(match["npoints"]), step)
