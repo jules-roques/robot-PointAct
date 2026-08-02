@@ -36,6 +36,24 @@ done
 cd "$REPO"
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
+# REPO may be a worktree, which has no .venv of its own. `uv run` resolves the project from the
+# CWD, so it would build an empty environment there and the server starts without numpy and the
+# client without imageio -- the failure mode that killed the first stage-A eval sweep. Resolve
+# the environments from a checkout that actually has them; PYTHONPATH above is what makes the
+# worktree's own code shadow the installed package (docs/envs.md).
+POINTACT_ENV="${POINTACT_ENV:-}"
+if [ -z "$POINTACT_ENV" ]; then
+    for candidate in "$REPO" "${WORK:-}/code/robot-PointAct" "$HOME/code/robot-PointAct"; do
+        if [ -n "$candidate" ] && [ -x "$candidate/.venv/bin/python" ]; then
+            POINTACT_ENV="$candidate"
+            break
+        fi
+    done
+fi
+[ -z "$POINTACT_ENV" ] && { echo "No checkout with a .venv found for the policy server" >&2; exit 1; }
+ROBOCASA_ENV="${ROBOCASA_ENV:-$POINTACT_ENV/envs/robocasa365}"
+echo "pointact env=$POINTACT_ENV  robocasa env=$ROBOCASA_ENV"
+
 # Client-side rendering + offline (treat compute nodes as if they had no network, for
 # reproducibility with Jean Zay even though CLEPS compute nodes do have internet access).
 export MUJOCO_GL=egl
@@ -113,7 +131,7 @@ fi
 [ "$POINT_SAMPLING" = "anchor" ] && ORACLE_ANCHOR="--args.oracle_anchor"
 
 # --- Policy server (pointact / root env) ---
-uv run --no-sync scripts/run_server.py \
+uv run --project "$POINTACT_ENV" --no-sync scripts/run_server.py \
     --args.seed ${seed} \
     --args.pretrained_path ${ckpt_dir}/checkpoint-${ckpt_step} \
     --args.num_denoise_steps ${num_denoise_steps} \
@@ -125,7 +143,7 @@ echo "Server started, PID=$SERVER_PID"
 sleep 20
 
 # --- Sim client (robocasa365 env) ---
-uv run --project envs/robocasa365 --no-sync \
+uv run --project "$ROBOCASA_ENV" --no-sync \
     experiments/13_robocasa365/run_robocasa365_client.py \
     --args.seed ${seed} \
     --args.host ${host} --args.port ${port} \
