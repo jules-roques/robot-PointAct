@@ -41,7 +41,10 @@ CKPT_DIR="$EXPRS_DIR/$RUN"
 STEPS=(20000 30000 40000 50000)
 TRIALS=(50 50 50 150)
 CKPT_STEP="${STEPS[$SLURM_ARRAY_TASK_ID]}"
-export NUM_TRIALS="${TRIALS[$SLURM_ARRAY_TASK_ID]}"
+# Overridable so a smoke test can ask for a handful of trials; the client only
+# writes results at the end, so a long default would produce nothing before a
+# short walltime killed it.
+export NUM_TRIALS="${NUM_TRIALS:-${TRIALS[$SLURM_ARRAY_TASK_ID]}}"
 
 if [ ! -d "$CKPT_DIR/checkpoint-$CKPT_STEP" ]; then
     echo "checkpoint-$CKPT_STEP not written yet under $CKPT_DIR; nothing to do."
