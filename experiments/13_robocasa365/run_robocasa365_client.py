@@ -254,6 +254,42 @@ def main(args: ClientArgs) -> None:
     # independent proportions at these sample sizes.
     per_trial: list[dict] = []
     kept_rollouts: dict[str, list] = {}
+    # Episodes the simulator could not present a usable observation for (see the guard in the
+    # rollout loop). Skipped rather than counted as policy failures, and reported so the
+    # denominator is never silently smaller than it looks.
+    skipped_episodes: list[dict] = []
+
+    def dump_results(final: bool = False):
+        """Write the per-trial record. Called after EVERY episode, not just at the end.
+
+        A single bad scene used to abort the job and lose every completed trial with it -- one
+        150-trial run died after 1h18 with nothing to show. Rewriting the file each episode
+        costs nothing at this size and means a crash costs one episode.
+        """
+        if not args.save_dir:
+            return None
+        # The in-progress file must NOT match the per_trial_seed*_n*.json glob that pooling
+        # uses: naming it by episode count would leave one file per episode and every trial
+        # would be counted many times over.
+        out = Path(args.save_dir) / (
+            f"per_trial_seed{args.seed}_n{total_episodes}.json" if final
+            else f"per_trial_seed{args.seed}_partial.json"
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as f:
+            json.dump({
+                "seed": int(args.seed),
+                "env_name": args.env_name,
+                "num_trials": int(total_episodes),
+                "successes": int(total_successes),
+                "success_rate": total_successes / max(total_episodes, 1),
+                "oracle_anchor": bool(args.oracle_anchor),
+                "skipped": skipped_episodes,
+                "trials": per_trial,
+            }, f, indent=2)
+        if final:
+            (Path(args.save_dir) / f"per_trial_seed{args.seed}_partial.json").unlink(missing_ok=True)
+        return out
     import collections
 
     for episode_idx in tqdm.tqdm(range(args.num_trials)):
@@ -265,7 +301,9 @@ def main(args: ClientArgs) -> None:
         rollout_frames = []
         success = False
 
-        for _t in range(max_steps):
+        episode_failed = None
+        try:
+          for _t in range(max_steps):
             replay_images.append(obs["observation.images.left_image"])
 
             state = prepare_state(np.asarray(obs["observation.state"]), args.pred_rot_type)
@@ -333,6 +371,19 @@ def main(args: ClientArgs) -> None:
             if done:
                 break
 
+        except RuntimeError as exc:
+            # Chiefly "Point cloud is empty after workspace filtering and downsampling": a
+            # degenerate randomly-generated scene, not a policy failure. Counting it as one
+            # would bias the success rate down, so the episode is dropped from the denominator
+            # and recorded. Killed three otherwise-complete 150-trial runs before this guard.
+            episode_failed = str(exc)
+            logging.warning(f"[{episode_idx}] skipped: {episode_failed}")
+
+        if episode_failed is not None:
+            skipped_episodes.append({"trial": int(episode_idx), "error": episode_failed})
+            dump_results()
+            continue
+
         total_episodes += 1
         total_successes += int(success)
         per_trial.append({"trial": int(episode_idx), "success": bool(success), "task": str(obs.get("task", ""))})
@@ -342,6 +393,8 @@ def main(args: ClientArgs) -> None:
             bucket = kept_rollouts.setdefault("success" if success else "failure", [])
             if len(bucket) < 2:
                 bucket.append((int(episode_idx), rollout_frames))
+
+        dump_results()
         suffix = "success" if success else "failure"
         if video_out_dir is not None:
             imageio.mimwrite(
@@ -358,26 +411,14 @@ def main(args: ClientArgs) -> None:
 
     logging.info(f"Total success rate: {total_successes / max(total_episodes, 1):.4f}")
 
-    # Dump the paired record next to the run's other results, keyed by seed so two runs at
-    # different seeds can be pooled without double-counting scenes.
+    # The record is rewritten after every episode (dump_results); this is the final one.
+    # Keyed by seed so two runs at different seeds pool without double-counting scenes.
     if args.save_dir:
-        out = Path(args.save_dir) / f"per_trial_seed{args.seed}_n{total_episodes}.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "w") as f:
-            json.dump(
-                {
-                    "seed": int(args.seed),
-                    "env_name": args.env_name,
-                    "num_trials": int(total_episodes),
-                    "successes": int(total_successes),
-                    "success_rate": total_successes / max(total_episodes, 1),
-                    "oracle_anchor": bool(args.oracle_anchor),
-                    "trials": per_trial,
-                },
-                f,
-                indent=2,
-            )
+        out = dump_results(final=True)
         logging.info(f"wrote per-trial outcomes to {out}")
+        if skipped_episodes:
+            logging.warning(f"{len(skipped_episodes)} episode(s) skipped as unusable scenes; "
+                            f"denominator is {total_episodes}, not {args.num_trials}")
 
         if args.viz_rollouts and kept_rollouts:
             try:
