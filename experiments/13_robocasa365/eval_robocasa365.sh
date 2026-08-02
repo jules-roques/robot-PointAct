@@ -168,6 +168,7 @@ uv run --project "$ROBOCASA_ENV" --no-sync \
     --args.replan_steps 8 \
     --args.use_depth \
     --args.save_dir ${ckpt_dir}/results/checkpoint-${ckpt_step} \
+    ${VIZ_ROLLOUTS:+--args.viz_rollouts --args.point_sampling_for_viz ${POINT_SAMPLING}} \
     ${ORACLE_ANCHOR} \
     ${options}
 

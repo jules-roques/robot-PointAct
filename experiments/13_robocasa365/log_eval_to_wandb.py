@@ -1,24 +1,24 @@
-"""Replay a run's eval results into a single W&B run, as a success-vs-checkpoint curve.
+"""Log a run's eval results into that run's OWN W&B run, under an `eval/` section.
 
-Why a separate script rather than logging from the eval job: the eval jobs run as an array,
-one per checkpoint, so up to four of them are alive at once -- and concurrent writers cannot
-share one W&B run. Both clusters also force WANDB_MODE=offline (mandatory on Jean Zay, whose
-compute nodes have no outbound network), and two processes cannot write one offline run and be
-merged at sync time; W&B's "shared mode" needs the online service.
+Everything for one arm lives in one W&B run: training curves, the sampling animation, and the
+eval results. Possible because each run pins its id in output_dir/wandb_run_id.txt, so
+`wandb.init(id=..., resume="allow")` reopens it rather than creating a second run that has to
+be cross-referenced. W&B derives panel sections from the key prefix, so `eval/*` lands in a
+section called "eval".
 
-So the eval jobs write files, and this owns the run. It is idempotent: rerun it whenever new
-results land and it resumes the same run id and re-logs the whole curve.
+This runs after the eval arrays finish rather than from inside them: the arrays run up to four
+tasks at once per arm, and concurrent writers cannot share a run -- least of all an offline
+one, which is mandatory on Jean Zay. The jobs write files; this owns the W&B side. Re-running
+is safe: results are re-read and re-logged from scratch.
 
-The eval run carries the same `group` as its training run, so the W&B workspace shows the
-success curve and the training loss side by side when grouped by arm. It stays a *separate*
-run, which also keeps the A100's system metrics out of the H100 training run's.
+Needs outbound network (a Jean Zay login node, not a compute node) and the training run must
+already be synced, or there is nothing to resume into.
 
     python experiments/13_robocasa365/log_eval_to_wandb.py \
-        --run-dir $SCRATCH/PointAct_exprs/robocasa365/ablation/od-eef-n4096-s0
+        $SCRATCH/PointAct_exprs/robocasa365/ablation/od-eef-n4096-s0
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -33,97 +33,95 @@ from summarize_stage_a import wilson_interval  # noqa: E402
 def load_results(run_dir: Path) -> list[dict]:
     """One pooled record per evaluated checkpoint, ordered by step.
 
-    Several seeds for the same checkpoint are pooled rather than averaged: each is a disjoint
-    scene stream, so they combine as independent trials.
+    Several seeds at the same checkpoint are pooled rather than averaged: each reruns a
+    disjoint scene stream, so they combine as independent trials.
     """
     by_step: dict[int, dict] = {}
     for ckpt_dir in sorted((run_dir / "results").glob("checkpoint-*")):
-        raw_step = ckpt_dir.name.removeprefix("checkpoint-")
-        # "final-48750" also appears; take the trailing integer so it sorts with the rest.
-        step = int(raw_step.rsplit("-", 1)[-1])
-        entry = by_step.setdefault(step, {"ckpt_step": step, "successes": 0, "trials": 0, "seeds": []})
+        # "final-48750" also occurs; take the trailing integer so it sorts with the rest.
+        step = int(ckpt_dir.name.removeprefix("checkpoint-").rsplit("-", 1)[-1])
+        entry = by_step.setdefault(
+            step, {"ckpt_step": step, "successes": 0, "trials": 0, "dir": ckpt_dir}
+        )
         for result_file in sorted(ckpt_dir.glob("per_trial_seed*_n*.json")):
             record = json.loads(result_file.read_text())
             entry["successes"] += record["successes"]
             entry["trials"] += record["num_trials"]
-            entry["seeds"].append(record["seed"])
-    return [by_step[step] for step in sorted(by_step)]
+    return [by_step[step] for step in sorted(by_step) if by_step[step]["trials"]]
 
 
-def rollout_html(run_dir: Path, step: int) -> dict[str, "wandb.Html"]:
-    """The two point-cloud rollout animations captured for this checkpoint, if any."""
+def rollout_media(ckpt_dir: Path) -> dict:
+    """The success/failure rollout animations captured for this checkpoint, if any."""
     media = {}
     for outcome in ("success", "failure"):
-        for path in sorted((run_dir / "results").glob(f"checkpoint-*{step}/rollout_{outcome}_*.html")):
-            media[f"eval/rollout_{outcome}"] = wandb.Html(path.read_text(), inject=False)
-            break  # one per outcome per checkpoint
+        matches = sorted(ckpt_dir.glob(f"rollout_{outcome}_*.html"))
+        if matches:
+            media[f"eval/rollout_{outcome}"] = wandb.Html(
+                matches[0].read_text(encoding="utf-8"), inject=False
+            )
     return media
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True, help="A training run's output_dir.")
-    parser.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "pointact-robocasa365"))
-    parser.add_argument("--entity", default=os.environ.get("WANDB_ENTITY", "diffusion4robots"))
-    args = parser.parse_args()
-
-    run_dir = args.run_dir.resolve()
+def log_run(run_dir: Path, project: str, entity: str) -> bool:
+    run_id_file = run_dir / "wandb_run_id.txt"
+    if not run_id_file.exists():
+        print(f"  skip {run_dir.name}: no wandb_run_id.txt")
+        return False
     results = load_results(run_dir)
     if not results:
-        print(f"no eval results under {run_dir}/results -- nothing to log")
-        return
+        print(f"  skip {run_dir.name}: no eval results under results/")
+        return False
 
-    training_args = json.loads((run_dir / "training_args.json").read_text())
-    config = {key: value for key, value in training_args.items() if key.startswith("exp_")}
-    config["run"] = run_dir.name
-
-    group = "/".join(
-        str(config[key]) for key in ("exp_task", "exp_sampling", "exp_npoints") if config.get(key)
-    )
-
-    # Deterministic id derived from the training run's, so reruns resume rather than fork.
-    run_id = "eval-" + hashlib.sha1(str(run_dir).encode()).hexdigest()[:12]
     run = wandb.init(
-        project=args.project,
-        entity=args.entity,
-        id=run_id,
-        resume="allow",
-        name=f"{run_dir.name}-eval",
-        group=group,
-        job_type="eval",
-        tags=[str(v) for v in config.values() if isinstance(v, (str, int))],
-        config=config,
+        project=project, entity=entity, id=run_id_file.read_text().strip(), resume="allow",
+        settings=wandb.Settings(_disable_stats=True, _disable_meta=True),
     )
-
-    # Success is plotted against the checkpoint it came from, not against wandb's own step
-    # counter -- results arrive out of order as array tasks finish.
-    wandb.define_metric("ckpt_step")
-    wandb.define_metric("eval/*", step_metric="ckpt_step")
+    # Plot against the checkpoint the number came from, not W&B's own monotonic step: array
+    # tasks finish in no particular order, and the training run's step axis already means
+    # something else.
+    wandb.define_metric("eval/ckpt_step")
+    wandb.define_metric("eval/*", step_metric="eval/ckpt_step")
 
     for entry in results:
         low, high = wilson_interval(entry["successes"], entry["trials"])
+        rate = entry["successes"] / max(entry["trials"], 1)
         payload = {
-            "ckpt_step": entry["ckpt_step"],
-            "eval/success_rate": entry["successes"] / max(entry["trials"], 1),
+            "eval/ckpt_step": entry["ckpt_step"],
+            "eval/success_rate": rate,
             "eval/successes": entry["successes"],
             "eval/trials": entry["trials"],
             "eval/wilson_lo": low,
             "eval/wilson_hi": high,
         }
-        payload.update(rollout_html(run_dir, entry["ckpt_step"]))
-        wandb.log(payload)
-        print(
-            f"  step {entry['ckpt_step']:>6}: "
-            f"{entry['successes']}/{entry['trials']} = "
-            f"{entry['successes'] / max(entry['trials'], 1):.1%} [{low:.1%}, {high:.1%}]"
-        )
+        payload.update(rollout_media(entry["dir"]))
+        run.log(payload)
+        print(f"  {run_dir.name} @{entry['ckpt_step']}: "
+              f"{entry['successes']}/{entry['trials']} = {rate:.1%} [{low:.1%}, {high:.1%}]")
 
-    # Summary columns so the runs table can be sorted by final success directly.
+    # Summary columns so the runs table sorts by final success directly.
     final = results[-1]
     run.summary["eval/final_success_rate"] = final["successes"] / max(final["trials"], 1)
     run.summary["eval/final_ckpt_step"] = final["ckpt_step"]
     run.summary["eval/final_trials"] = final["trials"]
     run.finish()
+    return True
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("run_dirs", nargs="+", type=Path)
+    parser.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "pointact-robocasa365"))
+    parser.add_argument("--entity", default=os.environ.get("WANDB_ENTITY", "diffusion4robots"))
+    args = parser.parse_args()
+
+    if os.environ.get("WANDB_MODE") == "offline":
+        sys.exit("WANDB_MODE=offline: this needs the API. Run it from a login node.")
+    # Keep wandb's scratch off $WORK, whose inode quota is the tight one on Jean Zay.
+    os.environ.setdefault("WANDB_DIR", os.path.expandvars("$SCRATCH/wandb-attach"))
+    Path(os.environ["WANDB_DIR"]).mkdir(parents=True, exist_ok=True)
+
+    done = sum(log_run(d, args.project, args.entity) for d in args.run_dirs)
+    print(f"\nlogged {done}/{len(args.run_dirs)} run(s)")
 
 
 if __name__ == "__main__":

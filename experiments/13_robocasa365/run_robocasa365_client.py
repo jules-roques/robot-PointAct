@@ -57,6 +57,16 @@ class ClientArgs:
     # the server, and must be off for the uniform and eef-density policies.
     oracle_anchor: bool = False
 
+    # Capture two rollouts as point-cloud animations: one success and one failure if both
+    # occur, otherwise two of whichever did. Shows what the policy actually saw, which a
+    # success rate cannot. Buffers only the current episode plus the two kept ones.
+    viz_rollouts: bool = False
+    # How to colour the rollout figures: must match how the checkpoint was trained, exactly as
+    # --args.point_sampling does for the server. eval_robocasa365.sh passes the derived value.
+    point_sampling_for_viz: str = "uniform"   # uniform | eef | anchor
+    viz_sigma: float = 0.08
+    viz_floor: float = 0.05
+
     save_dir: str = ""
     save_video: bool = False
     verbose: bool = False
@@ -136,6 +146,71 @@ def prepare_state(raw_state: np.ndarray, pred_rot_type: str) -> np.ndarray:
     return np.concatenate([raw_state[:3], rot, raw_state[7:]])
 
 
+def want_more_rollouts(kept: dict) -> bool:
+    """Stop buffering once two of each outcome are held.
+
+    Without this every episode's clouds accumulate: ~26MB per rollout x 150 trials would be
+    several GB for two figures.
+    """
+    return any(len(kept.get(k, [])) < 2 for k in ("success", "failure"))
+
+
+def choose_rollouts(kept: dict) -> list[tuple[str, int, list]]:
+    """One success and one failure if both occurred, else two of whichever did."""
+    successes, failures = kept.get("success", []), kept.get("failure", [])
+    if successes and failures:
+        picked = [("success", *successes[0]), ("failure", *failures[0])]
+    else:
+        available = successes or failures
+        label = "success" if successes else "failure"
+        picked = [(label, *entry) for entry in available[:2]]
+    return picked
+
+
+def render_rollouts(kept: dict, save_dir: pathlib.Path, sampling: str, sigma: float, floor: float):
+    """Write the chosen rollouts as point-cloud animations, matching the training figures.
+
+    Reuses viz_sampling_episode.build_figure so eval and training artefacts render identically
+    (same weight colour scale, same controls). Weights are recomputed here from the buffered
+    cloud and eef rather than returned by the server, which keeps the wire protocol unchanged.
+    """
+    import types
+
+    from data_prep.roi_sampling.viz_sampling_episode import (
+        CLOG_MAX, CLOG_MIN, build_figure, oversampling_factor,
+    )
+    from pointact.roi_sampling.geometry import eef_density_weights
+
+    style = types.SimpleNamespace(
+        color_by="weight", dark=True, frame_ms=120, point_size=2.0,
+        near_radius=0.15, roi_radius=0.15, roi_radius_scale=1.0,
+    )
+    written = []
+    for outcome, trial, frames in choose_rollouts(kept):
+        frames_data = []
+        for fd in frames:
+            pts, eef = fd["points"], fd["eef"]
+            weights = (eef_density_weights(pts[:, :3], eef, sigma, floor)
+                       if sampling in ("eef", "anchor") else None)
+            logw = np.log2(np.clip(oversampling_factor(weights, len(pts)), 1e-6, None))
+            frames_data.append({
+                "pts": pts[:, :3], "colors": logw.astype(np.float32), "n_sel": len(pts),
+                "anchor": eef if weights is not None else None, "frame": fd["step"],
+                "near_frac": None, "n_handle_total": 0, "n_handle_sel": 0,
+                "handle_recall": None, "n_cloud": len(pts), "n_frames": len(frames),
+                "phase": outcome,
+            })
+        if not frames_data:
+            continue
+        fig = build_figure(sampling, frames_data, trial, f"rollout {outcome}", style)
+        out = save_dir / f"rollout_{outcome}_{trial}.html"
+        # CDN plotly: inlining it would add ~3.5MB to every figure, and W&B renders these in
+        # the viewer's browser, which can fetch it.
+        fig.write_html(str(out), include_plotlyjs="cdn", auto_play=False)
+        written.append(out)
+    return written
+
+
 def main(args: ClientArgs) -> None:
     assert args.pred_rot_type in ["rot6d", "euler"]
 
@@ -178,6 +253,7 @@ def main(args: ClientArgs) -> None:
     # the discordant trials -- possible, which is markedly more powerful than comparing two
     # independent proportions at these sample sizes.
     per_trial: list[dict] = []
+    kept_rollouts: dict[str, list] = {}
     import collections
 
     for episode_idx in tqdm.tqdm(range(args.num_trials)):
@@ -186,6 +262,7 @@ def main(args: ClientArgs) -> None:
         obs, _ = env.reset()
         action_plan = collections.deque()
         replay_images = []
+        rollout_frames = []
         success = False
 
         for _t in range(max_steps):
@@ -211,7 +288,16 @@ def main(args: ClientArgs) -> None:
                     # server's existing-points branch directly, so we don't depend on the server
                     # re-deriving cameras from select_video_keys — the fused cloud is what training
                     # saw (points_3views: left+right+wrist), avoiding any view mismatch.
-                    batch["observation.points"] = [build_fused_point_cloud(obs)]
+                    fused = build_fused_point_cloud(obs)
+                    batch["observation.points"] = [fused]
+                    if args.viz_rollouts and want_more_rollouts(kept_rollouts):
+                        # The cloud as sent, with the eef so the weighting can be recomputed
+                        # offline exactly as the server did it.
+                        rollout_frames.append(
+                            {"points": fused.astype(np.float32),
+                             "eef": np.asarray(obs["observation.state"][:3], dtype=np.float32),
+                             "step": _t}
+                        )
 
                 if args.oracle_anchor:
                     anchor = ground_truth_anchor(obs)
@@ -250,6 +336,12 @@ def main(args: ClientArgs) -> None:
         total_episodes += 1
         total_successes += int(success)
         per_trial.append({"trial": int(episode_idx), "success": bool(success), "task": str(obs.get("task", ""))})
+        if args.viz_rollouts and rollout_frames:
+            # Keep the FIRST of each outcome and stop buffering that class; two of one class
+            # only if the other never occurs, decided once the trials are done.
+            bucket = kept_rollouts.setdefault("success" if success else "failure", [])
+            if len(bucket) < 2:
+                bucket.append((int(episode_idx), rollout_frames))
         suffix = "success" if success else "failure"
         if video_out_dir is not None:
             imageio.mimwrite(
@@ -286,6 +378,18 @@ def main(args: ClientArgs) -> None:
                 indent=2,
             )
         logging.info(f"wrote per-trial outcomes to {out}")
+
+        if args.viz_rollouts and kept_rollouts:
+            try:
+                paths = render_rollouts(
+                    kept_rollouts, Path(args.save_dir), args.point_sampling_for_viz,
+                    args.viz_sigma, args.viz_floor,
+                )
+                for path in paths:
+                    logging.info(f"wrote rollout animation {path} "
+                                 f"({path.stat().st_size / 1e6:.1f} MB)")
+            except Exception as exc:  # noqa: BLE001 - a figure must never lose the eval result
+                logging.warning(f"rollout rendering failed: {type(exc).__name__}: {exc}")
     logging.info(f"Total episodes: {total_episodes}")
     env.close()
 
