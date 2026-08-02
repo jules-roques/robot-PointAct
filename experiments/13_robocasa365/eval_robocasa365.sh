@@ -9,6 +9,10 @@
 #
 # Usage: eval_robocasa365.sh <env_name> <ckpt_dir> <ckpt_step> <pred_rot_type> [client_opts]
 
+# SAVE_SUFFIX appends to the results directory only, not the checkpoint path. A rollout-only
+# pass sets it to "-viz" so its handful of episodes land in checkpoint-<step>-viz and cannot be
+# pooled into the real success rate (log_eval_to_wandb skips non-numeric suffixes but still
+# picks the figures up).
 env_name=$1        # e.g. OpenDrawer
 ckpt_dir=$2
 ckpt_step=$3
@@ -167,7 +171,7 @@ uv run --project "$ROBOCASA_ENV" --no-sync \
     --args.pred_rot_type ${pred_rot_type} \
     --args.replan_steps 8 \
     --args.use_depth \
-    --args.save_dir ${ckpt_dir}/results/checkpoint-${ckpt_step} \
+    --args.save_dir ${ckpt_dir}/results/checkpoint-${ckpt_step}${SAVE_SUFFIX:-} \
     ${VIZ_ROLLOUTS:+--args.viz_rollouts --args.point_sampling_for_viz ${POINT_SAMPLING}} \
     ${ORACLE_ANCHOR} \
     ${options}
