@@ -20,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from data_prep.roi_sampling.viz_sampling_episode import build_figure, oversampling_factor
 from pointact.roi_sampling.geometry import eef_density_weights
 
+#: Ablation sampling name -> the name viz_sampling_episode knows it by.
+VIZ_METHOD = {"anchor": "oracle"}
+
 
 def render(npz_path: Path, sigma: float, floor: float, num_frames: int) -> Path:
     data = np.load(npz_path, allow_pickle=False)
@@ -53,7 +56,13 @@ def render(npz_path: Path, sigma: float, floor: float, num_frames: int) -> Path:
         color_by="weight", dark=True, frame_ms=120, point_size=2.0,
         near_radius=0.15, roi_radius=0.15, roi_radius_scale=1.0,
     )
-    fig = build_figure(sampling, frames_data, trial, f"eval rollout ({outcome})", style)
+    # The ablation calls the GT-handle arm "anchor"; viz_sampling_episode predates that name and
+    # keys its label/colour tables on "oracle". Translate here rather than aliasing in the viz
+    # module, which the training-time callback also drives and which already passes "oracle".
+    # Without this, every anchor rollout died as KeyError: 'anchor' -- and because
+    # eval_robocasa365.sh renders with `|| echo ...`, the eval still reported success.
+    fig = build_figure(VIZ_METHOD.get(sampling, sampling), frames_data, trial,
+                       f"eval rollout ({outcome})", style)
     out = npz_path.with_suffix(".html")
     # CDN plotly: inlining adds ~3.5MB per figure, and W&B renders these in a browser.
     fig.write_html(str(out), include_plotlyjs="cdn", auto_play=False)
