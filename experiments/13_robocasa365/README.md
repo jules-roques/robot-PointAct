@@ -225,6 +225,38 @@ point-cloud frame every frame. See `pointact/roi_sampling/geometry.py:eef_densit
 `data_configs/data-robocasa365-opendrawer-point-eefdensity.yaml` (`sigma=0.08`, `floor=0.05`,
 both easy to sweep — no rebuild required, unlike the ROI halo cache).
 
+#### The 1 cm voxel grid, not the budget, is what limits these samplers
+
+Measured 2026-08-03 on OpenDrawer episodes 0-4, 300 frames, by
+`voxel_probe_jeanzay.slurm` + `voxel_probe_report.py`. Medians per frame:
+
+| grid | cloud | ≤4 cm of eef | ≤8 cm | on the handle | ROI drawn @4096 | ROI saturation @4096 |
+|---|---|---|---|---|---|---|
+| 1 cm (current) | 18,214 | 9 | 146 | 71 | 141 | **97%** |
+| 5 mm | 50,695 | 19 | 388 | 216 | 252 | 65% |
+| 2 mm | 77,804 | 50 | 1,156 | 730 | 526 | 45% |
+
+At 1 cm the eef draw already selects 97% of every point within 1σ of the gripper, and 100% at
+8192 — so neither a larger point budget nor a sharper `sigma`/lower `floor` can concentrate
+further. That, not the sampler, is why the point-count axis of stage 1 is flat: 4096 → 8192
+buys about eleven ROI points.
+
+The finer grids resolve **disproportionately more in the ROI than in the scene**: at 2 mm the
+whole cloud grows 4.3× but the handle grows 10.3×. That is the wrist camera — it sits ~20 cm
+from the gripper, where its pixel pitch is ~1 mm, so the 1 cm merge was discarding real
+detail exactly where the samplers need it. The left/right cameras (256² over a ~1.5 m scene,
+~6 mm pitch) are near their render ceiling at 1 cm, which is why the *global* gain saturates.
+
+Not a knob, though — see the caveats in `voxel_probe_jeanzay.slurm`. Voxel size is set
+independently in `replay.py --voxel-size`, `processor_base.py` (eval, server-side) and
+`ptv3_backbone.py`'s `grid_size`, and PTv3 truncates coords onto `grid_size` to build its
+z-order codes and sparse indices, with `stride=(2,2,2,2)` putting the coarsest encoder level
+at 16× the voxel (1 cm → 16 cm today, 5 mm → 8 cm, 2 mm → 3.2 cm). Going finer without
+adding an encoder stage trades ROI resolution for receptive field. Storage scales with the
+cloud: OpenDrawer's `points_3views` is 60 GB at 1 cm, ~170 GB at 5 mm, ~260 GB at 2 mm.
+Re-replay is cheap (~1 h/task on the 8-way array) and training cost at a fixed `max_npoints`
+is unchanged.
+
 ## Evaluation
 
 Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) on the **same
