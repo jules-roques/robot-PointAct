@@ -3,17 +3,23 @@ import torch.nn as nn
 
 try:
     import flash_attn
-except:
-    print('No flash attn')
+except ImportError:
+    print("No flash attn")
 
-from pointact.model.ptv3.concerto.structure import Point
-from pointact.model.ptv3.concerto.module import PointModule, PointSequential
 from pointact.model.ptv3.concerto.model import (
-    GridPooling, GridUnpooling, Embedding, Block, MLP, SerializedAttention
+    MLP,
+    Block,
+    Embedding,
+    GridPooling,
+    GridUnpooling,
+    SerializedAttention,
 )
 from pointact.model.ptv3.concerto.model_ca import (
-    CABlock, PointTransformerV3CA,    
+    CABlock,
+    PointTransformerV3CA,
 )
+from pointact.model.ptv3.concerto.module import PointModule, PointSequential
+from pointact.model.ptv3.concerto.structure import Point
 from pointact.model.ptv3.concerto.utils import offset2bincount
 
 
@@ -24,7 +30,7 @@ class GridPoolingWithAction(GridPooling):
         norm_layer = kwargs.get("norm_layer", None)
         if norm_layer is not None:
             self.action_norm = PointSequential(norm_layer(out_channels))
-        
+
     def forward(self, point: Point):
         point = super().forward(point)
 
@@ -36,15 +42,10 @@ class GridPoolingWithAction(GridPooling):
 
         point.action_feat = action_feat
         return point
-    
+
+
 class GridUnpoolingWithAction(GridUnpooling):
-    def __init__(
-        self,
-        in_channels,
-        skip_channels,
-        out_channels, 
-        **kwargs
-    ):
+    def __init__(self, in_channels, skip_channels, out_channels, **kwargs):
         super().__init__(in_channels, skip_channels, out_channels, **kwargs)
 
         self.action_proj = PointSequential(nn.Linear(in_channels, out_channels))
@@ -66,8 +67,7 @@ class GridUnpoolingWithAction(GridUnpooling):
         inverse = point.pooling_inverse
         feat = point.feat
 
-        parent.action_feat = self.action_proj(point.action_feat) + \
-                             self.action_proj_skip(parent.action_feat)
+        parent.action_feat = self.action_proj(point.action_feat) + self.action_proj_skip(parent.action_feat)
 
         parent = self.proj_skip(parent)
         parent.feat = parent.feat + self.proj(point).feat[inverse]
@@ -77,15 +77,14 @@ class GridUnpoolingWithAction(GridUnpooling):
             point.feat = feat
             parent["unpooling_parent"] = point
         return parent
-    
+
+
 class SerializedAttentionWithAction(SerializedAttention):
     def forward(self, point):
         bincount = offset2bincount(point.offset)
 
         if not self.enable_flash:
-            self.patch_size = min(
-                bincount.min().tolist(), self.patch_size_max
-            )
+            self.patch_size = min(bincount.min().tolist(), self.patch_size_max)
 
         H = self.num_heads
         K = self.patch_size
@@ -105,7 +104,7 @@ class SerializedAttentionWithAction(SerializedAttention):
 
         # Add action tokens: (batch, num_actions, D)
         num_actions = point.action_feat.size(1)
-        action_qkv = self.qkv(point.action_feat) # (batch, num_actions, 3 * channels)
+        action_qkv = self.qkv(point.action_feat)  # (batch, num_actions, 3 * channels)
         repeat_size = torch.div(
             bincount + self.patch_size - 1,
             self.patch_size,
@@ -113,23 +112,17 @@ class SerializedAttentionWithAction(SerializedAttention):
         )
         action_qkv = action_qkv.repeat_interleave(
             repeat_size, dim=0
-        )    # (batch*repeat, num_actions, 3*channels)
+        )  # (batch*repeat, num_actions, 3*channels)
         # print(action_qkv.size(), action_qkv)
 
         if not self.enable_flash:
             # the previous padding only pads point when num of points larger than patch_size
             # but the patch size is set as the min npoints in batch
             qkv = torch.cat(
-                [
-                    action_qkv.reshape(-1, num_actions, 3, H, C // H),
-                    qkv.reshape(-1, K, 3, H, C // H)
-                ],
-                dim=1
+                [action_qkv.reshape(-1, num_actions, 3, H, C // H), qkv.reshape(-1, K, 3, H, C // H)], dim=1
             )
             # encode and reshape qkv: (N', num_actions+K, 3, H, C') => (3, N', H, num_actions+K, C')
-            q, k, v = (
-                qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
-            )
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
             # attn
             if self.upcast_attention:
                 q = q.float()
@@ -142,14 +135,12 @@ class SerializedAttentionWithAction(SerializedAttention):
             attn = self.softmax(attn)
             # print(attn.size(), attn.max(), torch.norm(q), torch.norm(k))
             attn = self.attn_drop(attn).to(qkv.dtype)
-            feat = (attn @ v).transpose(1, 2)   # (N', H, K, C) -> (N', K, H, C)
-            
-            action_feat = torch.split(
-                feat[:, :num_actions], repeat_size.data.cpu().numpy().tolist(), dim=0
+            feat = (attn @ v).transpose(1, 2)  # (N', H, K, C) -> (N', K, H, C)
+
+            action_feat = torch.split(feat[:, :num_actions], repeat_size.data.cpu().numpy().tolist(), dim=0)
+            action_feat = torch.stack([torch.mean(x, dim=0) for x in action_feat], 0).reshape(
+                -1, num_actions, C
             )
-            action_feat = torch.stack(
-                [torch.mean(x, dim=0) for x in action_feat], 0
-            ).reshape(-1, num_actions, C)
             # action_feat = torch.stack(
             #     [torch.max(x, dim=0)[0] for x in action_feat], 0
             # ).reshape(-1, num_actions, C)
@@ -163,10 +154,7 @@ class SerializedAttentionWithAction(SerializedAttention):
 
             # (npoints, 3*channels) -> [each item [patch_size, C]]
             qkv = torch.split(qkv, patch_size_list.data.cpu().numpy().tolist(), dim=0)
-            qkv = [
-                torch.cat([i_action_qkv, i_qkv], 0) \
-                    for i_qkv, i_action_qkv in zip(qkv, action_qkv)
-            ]
+            qkv = [torch.cat([i_action_qkv, i_qkv], 0) for i_qkv, i_action_qkv in zip(qkv, action_qkv)]
             qkv = torch.cat(qkv, 0).reshape(-1, 3, H, C // H)
 
             patch_size_list = patch_size_list + num_actions
@@ -175,24 +163,20 @@ class SerializedAttentionWithAction(SerializedAttention):
             cu_seqlens = torch.cat([torch.zeros(1).int().to(cu_seqlens.device), cu_seqlens], dim=0)
 
             feat = flash_attn.flash_attn_varlen_qkvpacked_func(
-                qkv.half(), #.reshape(-1, 3, H, C // H),
+                qkv.half(),  # .reshape(-1, 3, H, C // H),
                 cu_seqlens,
-                max_seqlen=self.patch_size+num_actions,
+                max_seqlen=self.patch_size + num_actions,
                 dropout_p=self.attn_drop if self.training else 0,
                 softmax_scale=self.scale,
             ).reshape(-1, C)
             # print(feat.size())
 
-            feat = torch.split(
-                feat, patch_size_list.data.cpu().numpy().tolist(), dim=0
-            )
+            feat = torch.split(feat, patch_size_list.data.cpu().numpy().tolist(), dim=0)
             action_feat = torch.stack([x[:num_actions] for x in feat], 0)
             feat = torch.cat([x[num_actions:] for x in feat], 0)
             feat = feat.to(qkv.dtype)
 
-            action_feat = torch.split(
-                action_feat, repeat_size.data.cpu().numpy().tolist(), dim=0
-            )
+            action_feat = torch.split(action_feat, repeat_size.data.cpu().numpy().tolist(), dim=0)
             action_feat = torch.stack([torch.mean(x, dim=0) for x in action_feat], 0)
             # action_feat = torch.stack([torch.max(x, dim=0)[0] for x in action_feat], 0)
             action_feat = action_feat.reshape(-1, num_actions, C)
@@ -213,17 +197,11 @@ class SerializedAttentionWithAction(SerializedAttention):
         point.action_feat = action_feat
         # print('SerializedAttentionWithAction', feat.size(), action_feat.size())
         return point
- 
+
+
 class BlockWithAction(Block):
-    def __init__(
-        self, channels, num_heads, **kwargs
-    ):
-        super().__init__(
-            channels, 
-            num_heads, 
-            attn_class=SerializedAttentionWithAction, 
-            **kwargs
-        )
+    def __init__(self, channels, num_heads, **kwargs):
+        super().__init__(channels, num_heads, attn_class=SerializedAttentionWithAction, **kwargs)
 
         norm_layer = kwargs["norm_layer"]
         self.action_proj = nn.Linear(channels, channels)
@@ -248,9 +226,7 @@ class BlockWithAction(Block):
 
         # action
         action_feat = point.action_feat
-        point.action_feat = action_feat + self.action_norm0(
-            self.action_proj(action_feat)
-        )
+        point.action_feat = action_feat + self.action_norm0(self.action_proj(action_feat))
         action_shortcut = point.action_feat
         if self.pre_norm:
             point.action_feat = self.action_norm1(action_feat)
@@ -283,13 +259,10 @@ class BlockWithAction(Block):
 
         return point
 
+
 class CABlockWithAction(CABlock):
-    def __init__(
-        self, channels, num_heads, apply_point_ca=True, **kwargs
-    ):
-        super().__init__(
-            channels, num_heads, apply_point_ca=apply_point_ca, **kwargs
-        )
+    def __init__(self, channels, num_heads, apply_point_ca=True, **kwargs):
+        super().__init__(channels, num_heads, apply_point_ca=apply_point_ca, **kwargs)
         self.action_norm1 = kwargs["norm_layer"](channels)
         self.action_norm2 = kwargs["norm_layer"](channels)
         self.action_mlp = MLP(
@@ -303,22 +276,20 @@ class CABlockWithAction(CABlock):
     def forward(self, point: Point):
         # point cross attention
         point = super().forward(point)
-    
+
         # action corss attention
         action_shortcut = point.action_feat
         if self.pre_norm:
             point.action_feat = self.action_norm1(point.action_feat)
-        
+
         batch_size, num_actions, _ = point.action_feat.size()
         device = point.action_feat.device
-        action_offset = torch.cumsum(
-            torch.LongTensor([num_actions] * batch_size).to(device), 0
-        )
+        action_offset = torch.cumsum(torch.LongTensor([num_actions] * batch_size).to(device), 0)
         point.action_feat = self.attn(
-            point.action_feat.reshape(batch_size * num_actions, -1), 
-            point.context, 
-            action_offset, 
-            point.context_offset
+            point.action_feat.reshape(batch_size * num_actions, -1),
+            point.context,
+            action_offset,
+            point.context_offset,
         ).reshape(batch_size, num_actions, -1)
         point.action_feat = action_shortcut + point.action_feat
         if not self.pre_norm:
@@ -404,14 +375,10 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         )
 
         # encoder
-        enc_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
-        ]
+        enc_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))]
         self.enc = PointSequential()
         for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
+            enc_drop_path_ = enc_drop_path[sum(enc_depths[:s]) : sum(enc_depths[: s + 1])]
             enc = PointSequential()
             if s > 0:
                 enc.add(
@@ -462,7 +429,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         qk_norm=qk_norm,
                         pre_norm=pre_norm,
                         enable_flash=enable_flash,
-                        apply_point_ca=apply_point_ca
+                        apply_point_ca=apply_point_ca,
                     ),
                     name=f"ca_block{i}",
                 )
@@ -471,15 +438,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
 
         # decoder
         if not self.enc_mode:
-            dec_drop_path = [
-                x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-            ]
+            dec_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))]
             self.dec = PointSequential()
             dec_channels = list(dec_channels) + [enc_channels[-1]]
             for s in reversed(range(self.num_dec_stages)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
+                dec_drop_path_ = dec_drop_path[sum(dec_depths[:s]) : sum(dec_depths[: s + 1])]
                 dec_drop_path_.reverse()
                 dec = PointSequential()
                 dec.add(
@@ -489,7 +452,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         out_channels=dec_channels[s],
                         norm_layer=ln_layer,
                         act_layer=act_layer,
-                        traceable=traceable
+                        traceable=traceable,
                     ),
                     name="up",
                 )
@@ -531,7 +494,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                             pre_norm=pre_norm,
                             qk_norm=qk_norm,
                             enable_flash=enable_flash,
-                            apply_point_ca=apply_point_ca
+                            apply_point_ca=apply_point_ca,
                         ),
                         name=f"ca_block{i}",
                     )
@@ -562,22 +525,26 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         if not self.enc_mode:
             point = self.dec(point)
         return point
-    
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # test
     import time
 
     torch.manual_seed(0)
 
-    model = PointTransformerV3CAWithAction(
-        enc_patch_size=(5, 5, 5, 5, 5),
-        dec_patch_size=(5, 5, 5, 5),
-        shuffle_orders=False,
-        enable_flash=True,
-        enc_mode=False,
-        apply_point_ca=True
-    ).eval().cuda()
+    model = (
+        PointTransformerV3CAWithAction(
+            enc_patch_size=(5, 5, 5, 5, 5),
+            dec_patch_size=(5, 5, 5, 5),
+            shuffle_orders=False,
+            enable_flash=True,
+            enc_mode=False,
+            apply_point_ca=True,
+        )
+        .eval()
+        .cuda()
+    )
 
     pc_fts = torch.rand(10, 6)
     voxel_size = 0.01
@@ -588,14 +555,14 @@ if __name__ == '__main__':
     action_feat = torch.rand(2, 3, 32)
 
     data_dict = {
-        'coord': pc_fts[:, :3],
-        'grid_size': voxel_size,
-        'offset': point_offset,
-        'batch': point_batch_idxs,
-        'feat': pc_fts,
-        'context': context,
-        'context_offset': context_offset,
-        'action_feat': action_feat,
+        "coord": pc_fts[:, :3],
+        "grid_size": voxel_size,
+        "offset": point_offset,
+        "batch": point_batch_idxs,
+        "feat": pc_fts,
+        "context": context,
+        "context_offset": context_offset,
+        "action_feat": action_feat,
     }
     for k, v in data_dict.items():
         if isinstance(v, torch.Tensor):
@@ -609,4 +576,4 @@ if __name__ == '__main__':
     print(outs.feat.size(), outs.action_feat.size())
     print(outs.feat, outs.action_feat)
 
-    print('time', duration)
+    print("time", duration)

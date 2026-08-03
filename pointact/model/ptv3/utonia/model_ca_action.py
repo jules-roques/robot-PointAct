@@ -6,17 +6,17 @@ try:
 except ImportError:
     flash_attn = None
 
-from .structure import Point
-from .module import PointModule, PointSequential
 from .model import (
+    MLP,
+    Block,
+    Embedding,
     GridPooling,
     GridUnpooling,
-    Embedding,
-    Block,
-    MLP,
     SerializedAttention,
 )
 from .model_ca import CABlock, PointTransformerV3CA
+from .module import PointModule, PointSequential
+from .structure import Point
 from .utils import offset2bincount
 
 
@@ -69,9 +69,7 @@ class GridUnpoolingWithAction(GridUnpooling):
         inverse = point.pooling_inverse
         feat = point.feat
 
-        parent.action_feat = self.action_proj(point.action_feat) + self.action_proj_skip(
-            parent.action_feat
-        )
+        parent.action_feat = self.action_proj(point.action_feat) + self.action_proj_skip(parent.action_feat)
 
         parent = self.proj_skip(parent)
         parent.feat = parent.feat + self.proj(point).feat[inverse]
@@ -110,9 +108,7 @@ class SerializedAttentionWithAction(SerializedAttention):
         point_qkv = torch.stack([q, k, v], dim=1)
 
         num_actions = point.action_feat.size(1)
-        action_qkv = self.qkv(point.action_feat).reshape(
-            -1, num_actions, 3, H, C // H
-        )
+        action_qkv = self.qkv(point.action_feat).reshape(-1, num_actions, 3, H, C // H)
         repeat_size = torch.div(
             bincount + self.patch_size - 1,
             self.patch_size,
@@ -131,9 +127,7 @@ class SerializedAttentionWithAction(SerializedAttention):
             attn = (q * self.scale) @ k.transpose(-2, -1)
             if self.enable_rpe:
                 rpe = self.rpe(self.get_rel_pos(point, order))
-                attn[:, :, num_actions:, num_actions:] = (
-                    attn[:, :, num_actions:, num_actions:] + rpe
-                )
+                attn[:, :, num_actions:, num_actions:] = attn[:, :, num_actions:, num_actions:] + rpe
             if self.upcast_softmax:
                 attn = attn.float()
             attn = self.softmax(attn)
@@ -187,9 +181,7 @@ class SerializedAttentionWithAction(SerializedAttention):
                 repeat_size.cpu().tolist(),
                 dim=0,
             )
-            action_feat = torch.stack(
-                [torch.mean(x, dim=0) for x in action_feat], dim=0
-            )
+            action_feat = torch.stack([torch.mean(x, dim=0) for x in action_feat], dim=0)
             action_feat = action_feat.reshape(-1, num_actions, C)
             action_feat = action_feat.to(point_qkv_dtype)
 
@@ -272,27 +264,36 @@ class BlockWithAction(Block):
         )
 
     def forward(self, point: Point):
+
+        # Point CPE Position Encoding
         shortcut = point.feat
         point = self.cpe(point)
         point.feat = shortcut + point.feat
+
+        # Point Layer Norm
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm1(point)
 
+        # Adapt action features to point features
         action_feat = point.action_feat
-        point.action_feat = action_feat + self.action_norm0(
-            self.action_proj(action_feat)
-        )
+        point.action_feat = action_feat + self.action_norm0(self.action_proj(action_feat))
+
         action_shortcut = point.action_feat
+
+        # Layer Norm
         if self.pre_norm:
             point.action_feat = self.action_norm1(action_feat)
 
+        # Bottleneck Window Self-Attention
         point = self.drop_path(self.ls1(self.attn(point)))
 
+        # Residual connection
         point.feat = shortcut + point.feat
         if not self.pre_norm:
             point = self.norm1(point)
 
+        # Point MLP
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm2(point)
@@ -302,6 +303,7 @@ class BlockWithAction(Block):
             point = self.norm2(point)
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
 
+        # Action MLP
         point.action_feat = action_shortcut + point.action_feat
         if not self.pre_norm:
             point.action_feat = self.action_norm1(point.action_feat)
@@ -440,14 +442,10 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
             mask_token=mask_token,
         )
 
-        enc_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
-        ]
+        enc_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))]
         self.enc = PointSequential()
         for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
+            enc_drop_path_ = enc_drop_path[sum(enc_depths[:s]) : sum(enc_depths[: s + 1])]
             enc = PointSequential()
             if s > 0:
                 enc.add(
@@ -510,15 +508,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                 self.enc.add(module=enc, name=f"enc{s}")
 
         if not self.enc_mode:
-            dec_drop_path = [
-                x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-            ]
+            dec_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))]
             self.dec = PointSequential()
             dec_channels = list(dec_channels) + [enc_channels[-1]]
             for s in reversed(range(self.num_stages - 1)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
+                dec_drop_path_ = dec_drop_path[sum(dec_depths[:s]) : sum(dec_depths[: s + 1])]
                 dec_drop_path_.reverse()
                 dec = PointSequential()
                 dec.add(

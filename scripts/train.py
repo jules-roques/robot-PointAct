@@ -2,6 +2,7 @@ import importlib
 
 import torch
 from accelerate.logging import get_logger
+from train_registry import TrainRecipe, resolve_recipe
 
 from pointact.model.backbone.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from pointact.train.pipeline_config import TrainPipelineConfig
@@ -13,13 +14,12 @@ from pointact.train.script_utils import (
 )
 from pointact.train.train_utils import (
     add_handler_to_logger,
-    configure_vlm,
     configure_processor,
+    configure_vlm,
     find_target_linear_names,
     safe_save_model_for_hf_trainer,
     smart_tokenizer_and_embedding_resize,
 )
-from train_registry import TrainRecipe, resolve_recipe
 
 logger = get_logger(__name__, log_level="INFO")
 logger = add_handler_to_logger(logger)
@@ -81,11 +81,10 @@ def load_processor(recipe: TrainRecipe, training_args: TrainPipelineConfig):
     )
 
 
-
 def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> None:
     if training_args.ptv3_init_ckpt_file is None:
         return
-    
+
     ptv3_module = getattr(model, "ptv3_model", None)
     if ptv3_module is not None:
         ptv3_module = model.ptv3_model
@@ -97,8 +96,10 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
             main_process_only=True,
         )
         return
-    
-    def _maybe_slice_input_stem(state_dict: dict[str, torch.Tensor], target_state: dict[str, torch.Tensor]) -> None:
+
+    def _maybe_slice_input_stem(
+        state_dict: dict[str, torch.Tensor], target_state: dict[str, torch.Tensor]
+    ) -> None:
         key = "embedding.stem.linear.weight"
         if key not in state_dict or key not in target_state:
             return
@@ -107,7 +108,11 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
         target = target_state[key]
         if source.shape == target.shape:
             return
-        if source.ndim == target.ndim == 2 and source.shape[0] == target.shape[0] and source.shape[1] >= target.shape[1]:
+        if (
+            source.ndim == target.ndim == 2
+            and source.shape[0] == target.shape[0]
+            and source.shape[1] >= target.shape[1]
+        ):
             state_dict[key] = source[:, : target.shape[1]]
 
     checkpoint = torch.load(training_args.ptv3_init_ckpt_file, map_location="cpu")
@@ -184,7 +189,7 @@ def train():
     smart_tokenizer_and_embedding_resize(processor, model)
     # Freeze the vlm or not
     configure_vlm(model.vlm_backbone, training_args, compute_dtype, training_args.device)
-    
+
     model = apply_lora(model, training_args, compute_dtype)
 
     create_data_module = _import_object(recipe.data_module_fn)

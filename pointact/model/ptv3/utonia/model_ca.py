@@ -7,17 +7,17 @@ try:
 except ImportError:
     flash_attn = None
 
-from .structure import Point
-from .module import PointModule, PointSequential
 from .model import (
-    PointTransformerV3,
+    MLP,
+    Block,
+    Embedding,
     GridPooling,
     GridUnpooling,
-    Embedding,
-    Block,
-    MLP,
+    PointTransformerV3,
 )
-from .utils import offset2bincount, gen_seq_masks
+from .module import PointModule, PointSequential
+from .structure import Point
+from .utils import gen_seq_masks, offset2bincount
 
 
 class CrossAttention(PointModule):
@@ -53,14 +53,10 @@ class CrossAttention(PointModule):
         self.enable_flash = enable_flash
 
         self.q_norm = (
-            nn.LayerNorm(self.head_dim, elementwise_affine=True, eps=1e-6)
-            if self.qk_norm
-            else nn.Identity()
+            nn.LayerNorm(self.head_dim, elementwise_affine=True, eps=1e-6) if self.qk_norm else nn.Identity()
         )
         self.k_norm = (
-            nn.LayerNorm(self.head_dim, elementwise_affine=True, eps=1e-6)
-            if self.qk_norm
-            else nn.Identity()
+            nn.LayerNorm(self.head_dim, elementwise_affine=True, eps=1e-6) if self.qk_norm else nn.Identity()
         )
 
     def forward(
@@ -120,15 +116,11 @@ class CrossAttention(PointModule):
                 batch_first=True,
                 padding_value=0,
             )
-            logits = (
-                torch.einsum("bphd,bwhd->bpwh", q_pad, kv_pad[:, :, 0]) * self.scale
-            )
+            logits = torch.einsum("bphd,bwhd->bpwh", q_pad, kv_pad[:, :, 0]) * self.scale
             logits.masked_fill_(word_padded_masks.unsqueeze(1).unsqueeze(-1), -1e4)
             attn_probs = torch.softmax(logits, dim=2)
             feat = torch.einsum("bpwh,bwhd->bphd", attn_probs, kv_pad[:, :, 1])
-            feat = torch.cat(
-                [ft[: npoints_in_batch[i]] for i, ft in enumerate(feat)], dim=0
-            )
+            feat = torch.cat([ft[: npoints_in_batch[i]] for i, ft in enumerate(feat)], dim=0)
             feat = feat.reshape(-1, self.channels).float()
 
         feat = self.proj(feat)
@@ -186,9 +178,7 @@ class CABlock(PointModule):
             shortcut = point.feat
             if self.pre_norm:
                 point = self.norm1(point)
-            point.feat = self.attn(
-                point.feat, point.context, point.offset, point.context_offset
-            )
+            point.feat = self.attn(point.feat, point.context, point.offset, point.context_offset)
             point.feat = shortcut + point.feat
             if not self.pre_norm:
                 point = self.norm1(point)
@@ -273,14 +263,10 @@ class PointTransformerV3CA(PointTransformerV3):
             mask_token=mask_token,
         )
 
-        enc_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
-        ]
+        enc_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))]
         self.enc = PointSequential()
         for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
+            enc_drop_path_ = enc_drop_path[sum(enc_depths[:s]) : sum(enc_depths[: s + 1])]
             enc = PointSequential()
             if s > 0:
                 enc.add(
@@ -343,15 +329,11 @@ class PointTransformerV3CA(PointTransformerV3):
                 self.enc.add(module=enc, name=f"enc{s}")
 
         if not self.enc_mode:
-            dec_drop_path = [
-                x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-            ]
+            dec_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))]
             self.dec = PointSequential()
             dec_channels = list(dec_channels) + [enc_channels[-1]]
             for s in reversed(range(self.num_stages - 1)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
+                dec_drop_path_ = dec_drop_path[sum(dec_depths[:s]) : sum(dec_depths[: s + 1])]
                 dec_drop_path_.reverse()
                 dec = PointSequential()
                 dec.add(

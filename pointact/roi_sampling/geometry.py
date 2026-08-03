@@ -41,11 +41,11 @@ def base2cam_from_extrinsic(
     Returns:
         (4, 4) base->camera transform.
     """
-    from scipy.spatial.transform import Rotation as R
+    from scipy.spatial.transform import Rotation
 
     cam2world = np.asarray(cam2world, dtype=np.float64).reshape(4, 4)
     base2world = np.eye(4, dtype=np.float64)
-    base2world[:3, :3] = R.from_quat(np.asarray(base_quat_xyzw, dtype=np.float64)).as_matrix()
+    base2world[:3, :3] = Rotation.from_quat(np.asarray(base_quat_xyzw, dtype=np.float64)).as_matrix()
     base2world[:3, 3] = np.asarray(base_pos, dtype=np.float64).reshape(3)
     world2cam = np.linalg.inv(cam2world)
     return (world2cam @ base2world).astype(np.float64)
@@ -99,11 +99,7 @@ def points_in_box(
     x0, y0, x1, y1 = box_xyxy
     u, v = uv[:, 0], uv[:, 1]
     inside = (
-        in_front
-        & (u >= x0) & (u <= x1)
-        & (v >= y0) & (v <= y1)
-        & (u >= 0) & (u < w)
-        & (v >= 0) & (v < h)
+        in_front & (u >= x0) & (u <= x1) & (v >= y0) & (v <= y1) & (u >= 0) & (u < w) & (v >= 0) & (v < h)
     )
     return inside
 
@@ -130,7 +126,9 @@ def halo_weights(
     Returns:
         (N,) float weights in [0, 1].
     """
-    d = np.linalg.norm(np.asarray(points_base, dtype=np.float64) - np.asarray(anchor, dtype=np.float64), axis=1)
+    d = np.linalg.norm(
+        np.asarray(points_base, dtype=np.float64) - np.asarray(anchor, dtype=np.float64), axis=1
+    )
     if mode == "hard":
         return (d <= radius).astype(np.float64)
     if mode == "soft":
@@ -161,7 +159,9 @@ def eef_density_weights(
     Returns:
         (N,) float weights in [floor, 1].
     """
-    d = np.linalg.norm(np.asarray(points_xyz, dtype=np.float64) - np.asarray(eef_pos, dtype=np.float64), axis=1)
+    d = np.linalg.norm(
+        np.asarray(points_xyz, dtype=np.float64) - np.asarray(eef_pos, dtype=np.float64), axis=1
+    )
     sigma = max(1e-6, float(sigma))
     gauss = np.exp(-0.5 * (d / sigma) ** 2)
     return floor + (1.0 - floor) * gauss
@@ -349,9 +349,7 @@ def build_halo_roi(
             continue
         boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
         for box in boxes:
-            in_box_any |= points_in_box(
-                points_base, cam["intrinsic"], cam["base2cam"], box, image_hw
-            )
+            in_box_any |= points_in_box(points_base, cam["intrinsic"], cam["base2cam"], box, image_hw)
 
     n_in_box = int(in_box_any.sum())
     if n_in_box < min_in_box:
@@ -372,7 +370,7 @@ if __name__ == "__main__":
     # Self-test: build points via the FORWARD mapping (cam -> base) so the reprojection
     # round-trip is well-posed, then verify pixels are recovered and the halo selects a
     # spatially compact region around a planted cluster.
-    from scipy.spatial.transform import Rotation as R
+    from scipy.spatial.transform import Rotation
 
     rng = np.random.default_rng(0)
     H = W = 256
@@ -381,10 +379,10 @@ if __name__ == "__main__":
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
     cam2world = np.eye(4)
-    cam2world[:3, :3] = R.from_euler("xyz", [20, 30, 10], degrees=True).as_matrix()
+    cam2world[:3, :3] = Rotation.from_euler("xyz", [20, 30, 10], degrees=True).as_matrix()
     cam2world[:3, 3] = np.array([1.5, 0.3, 0.7])
     base_pos = np.array([0.2, -0.1, 0.0])
-    base_quat = R.from_euler("z", 25, degrees=True).as_quat()  # xyzw
+    base_quat = Rotation.from_euler("z", 25, degrees=True).as_quat()  # xyzw
     b2c = base2cam_from_extrinsic(cam2world, base_pos, base_quat)
     cam2base = np.linalg.inv(b2c)
 
@@ -417,16 +415,18 @@ if __name__ == "__main__":
 
     pad = 4
     ouv = uv[:300]
-    box = np.array([ouv[:, 0].min() - pad, ouv[:, 1].min() - pad,
-                    ouv[:, 0].max() + pad, ouv[:, 1].max() + pad])
+    box = np.array(
+        [ouv[:, 0].min() - pad, ouv[:, 1].min() - pad, ouv[:, 0].max() + pad, ouv[:, 1].max() + pad]
+    )
     cams = [{"name": "left", "intrinsic": K, "base2cam": b2c}]
-    res = build_halo_roi(pts, cams, {"left": box[None]}, (H, W),
-                         halo_scale=2.0, min_in_box=10)
+    res = build_halo_roi(pts, cams, {"left": box[None]}, (H, W), halo_scale=2.0, min_in_box=10)
     frac_obj = res.roi_mask[:300].mean()
     frac_bg = res.roi_mask[300:].mean()
     print(f"pixel round-trip OK ({recovered} ~= {obj_uv})")
-    print(f"n_in_box={res.n_in_box} radius={res.radius:.3f} "
-          f"obj_captured={frac_obj:.2f} bg_captured={frac_bg:.2f}")
+    print(
+        f"n_in_box={res.n_in_box} radius={res.radius:.3f} "
+        f"obj_captured={frac_obj:.2f} bg_captured={frac_bg:.2f}"
+    )
     assert frac_obj > 0.9, "halo should capture most object points"
     assert frac_bg < 0.5, "halo should be selective vs background"
     print("geometry self-test OK")

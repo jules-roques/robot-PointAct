@@ -19,13 +19,12 @@ Please cite our work if the code is helpful to you.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-import torch
 import spconv.pytorch as spconv
+import torch
 from addict import Dict
 
 from .serialization import encode
-from .utils import offset2batch, batch2offset
+from .utils import batch2offset, offset2batch
 
 
 class Point(Dict):
@@ -97,17 +96,13 @@ class Point(Dict):
         #  Order2 ([n]),
         #   ...
         #  OrderN ([n])] (k, n)
-        code = [
-            encode(self.grid_coord, self.batch, depth, order=order_) for order_ in order
-        ]
+        code = [encode(self.grid_coord, self.batch, depth, order=order_) for order_ in order]
         code = torch.stack(code)
         order = torch.argsort(code)
         inverse = torch.zeros_like(order).scatter_(
             dim=1,
             index=order,
-            src=torch.arange(0, code.shape[1], device=order.device).repeat(
-                code.shape[0], 1
-            ),
+            src=torch.arange(0, code.shape[1], device=order.device).repeat(code.shape[0], 1),
         )
 
         if shuffle_orders:
@@ -144,14 +139,10 @@ class Point(Dict):
         if "sparse_shape" in self.keys():
             sparse_shape = self.sparse_shape
         else:
-            sparse_shape = torch.add(
-                torch.max(self.grid_coord, dim=0).values, pad
-            ).tolist()
+            sparse_shape = torch.add(torch.max(self.grid_coord, dim=0).values, pad).tolist()
         sparse_conv_feat = spconv.SparseConvTensor(
             features=self.feat,
-            indices=torch.cat(
-                [self.batch.unsqueeze(-1).int(), self.grid_coord.int()], dim=1
-            ).contiguous(),
+            indices=torch.cat([self.batch.unsqueeze(-1).int(), self.grid_coord.int()], dim=1).contiguous(),
             spatial_shape=sparse_shape,
             batch_size=self.batch[-1].tolist() + 1,
         )
