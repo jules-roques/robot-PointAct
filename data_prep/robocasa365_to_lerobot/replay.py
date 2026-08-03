@@ -11,7 +11,11 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation as R
 from tqdm.auto import tqdm
 
-from data_prep.robocasa365_to_lerobot.voxel_keys import pack_voxel_keys, voxel_keys_for_points
+from data_prep.robocasa365_to_lerobot.voxel_keys import (
+    pack_voxel_keys,
+    voxel_key_params,
+    voxel_keys_for_points,
+)
 from pointact.robot_envs.robocasa365_utils.environments import (
     NUM_POINT_LABELS,
     RoboCasa365Env,
@@ -259,7 +263,7 @@ def voxel_downsample(
     # array and dominated replay time (~207 ms/frame vs ~23 ms here, i.e. more than the physics
     # step itself). The packing is order-preserving, so groups, ordering and output are
     # unchanged -- asserted bit-identical in the voxel-label tests.
-    keys = pack_voxel_keys(voxel_indices)
+    keys = pack_voxel_keys(voxel_indices, *voxel_key_params(voxel_size))
     _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
     # numpy's `return_inverse` shape has changed across 2.x releases; ravel to be safe.
     inverse = np.ravel(inverse)
