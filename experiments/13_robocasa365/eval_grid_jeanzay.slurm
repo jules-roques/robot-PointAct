@@ -12,6 +12,18 @@
 # Array tasks whose checkpoint does not exist yet exit 0, so this can be submitted with
 # --dependency=afterany on the training job and resubmitted later for the stragglers.
 #
+# Walltime is 2h against a measured worst case of 1h15 (a 100-trial stage-0 checkpoint, which
+# runs a live VLM forward every step); the image-free runs finish a checkpoint in ~10 min. It
+# was 12h, which reserved 50x the job's actual need and made it invisible to backfill.
+#
+# 2h is also the qos_gpu_a100-dev ceiling, so this file can be sent to dev unmodified -- worth
+# doing, since dev has priority 80 against t3's 50:
+#
+#   sbatch --qos=qos_gpu_a100-dev --export=ALL,RUN=tom-eef-n4096-s0 <this file>
+#
+# But dev caps submitted jobs at 10 per user and array elements count individually, so at most
+# two 5-checkpoint arrays fit at once; a fuller sweep has to go to t3 or be submitted in waves.
+#
 #SBATCH --job-name=evalgrid
 #SBATCH --account=rgx@a100
 #SBATCH --partition=gpu_p5
@@ -20,7 +32,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_a100-t3
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --array=0-4
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
