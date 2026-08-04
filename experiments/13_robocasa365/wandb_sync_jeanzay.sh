@@ -28,11 +28,18 @@ FINISHED_ONLY=0
 # written. 30 comfortably exceeds the checkpoint interval of the training jobs, so an in-flight
 # run is never mistaken for a finished one; --all disables the check.
 ACTIVE_WITHIN=30
+# Retry dirs carrying a .sync-skip marker (see the loop below for what earns one).
+RETRY_FAILED=0
+# Per-run wall clock. Generous next to the ~2 min a healthy 30 MB run takes, tight enough that
+# a wedged dir cannot swallow the pass.
+SYNC_TIMEOUT="${SYNC_TIMEOUT:-10m}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --finished-only) FINISHED_ONLY=1 ;;
         --active-within) ACTIVE_WITHIN="$2"; shift ;;
         --all) ACTIVE_WITHIN="" ;;
+        --retry-failed) RETRY_FAILED=1 ;;
+        --timeout) SYNC_TIMEOUT="$2"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -64,10 +71,19 @@ fi
 shopt -s nullglob
 synced=0
 skipped=0
+failed=0
 
 for run in "$RUN_ROOT"/offline-run-*; do
     [ -d "$run" ] || continue
     marker=$(echo "$run"/run-*.wandb.synced)
+
+    # A run that can never sync would otherwise be retried on every pass forever, because
+    # "no .synced marker" is indistinguishable from "never attempted". See the note written
+    # into .sync-skip for what that cost and how it corrupted live runs' configs.
+    if [ -e "$run/.sync-skip" ] && [ "$RETRY_FAILED" = "0" ]; then
+        skipped=$((skipped + 1))
+        continue
+    fi
 
     if [ -e "$marker" ]; then
         if [ "$FINISHED_ONLY" = "1" ]; then
@@ -87,10 +103,20 @@ for run in "$RUN_ROOT"/offline-run-*; do
     fi
 
     echo "--- syncing $(basename "$run")"
-    if "$WANDB_BIN" sync "$run" 2>&1 | tail -3; then
+    # Bound each run. A dir that wedges at "setting up run" hangs indefinitely, and without a
+    # timeout one such dir stalls the whole pass -- which is how a routine sync came to run for
+    # over an hour without reaching the runs that actually had new data.
+    if timeout "$SYNC_TIMEOUT" "$WANDB_BIN" sync "$run" 2>&1 | tail -3; then
         synced=$((synced + 1))
     else
-        echo "    FAILED: $(basename "$run")" >&2
+        failed=$((failed + 1))
+        echo "    FAILED (or timed out after ${SYNC_TIMEOUT}): $(basename "$run")" >&2
+        # Do not let it burn another $SYNC_TIMEOUT on the next pass. Re-arm with --retry-failed
+        # once the cause is understood (server-side run deleted, corrupt .wandb, proxy down).
+        printf '%s\n' \
+            "wandb sync failed or timed out at $(date -Is)." \
+            "Skipped by wandb_sync_jeanzay.sh until you delete this file or pass --retry-failed." \
+            > "$run/.sync-skip"
     fi
 done
 
@@ -100,4 +126,6 @@ if [ -n "$ACTIVE_WITHIN" ]; then
 else
     mode="ALL runs (--all)"
 fi
-echo "synced=${synced} skipped=${skipped} from ${RUN_ROOT}  [${mode}]"
+echo "synced=${synced} skipped=${skipped} failed=${failed} from ${RUN_ROOT}  [${mode}]"
+[ "$failed" -gt 0 ] && echo "failed dirs are now marked .sync-skip; re-arm with --retry-failed" >&2
+exit 0
