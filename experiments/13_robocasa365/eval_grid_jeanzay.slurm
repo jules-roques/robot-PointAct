@@ -12,9 +12,16 @@
 # Array tasks whose checkpoint does not exist yet exit 0, so this can be submitted with
 # --dependency=afterany on the training job and resubmitted later for the stragglers.
 #
-# Walltime is 2h against a measured worst case of 1h15 (a 100-trial stage-0 checkpoint, which
-# runs a live VLM forward every step); the image-free runs finish a checkpoint in ~10 min. It
-# was 12h, which reserved 50x the job's actual need and made it invisible to backfill.
+# Walltime is 2h against a measured worst case of 1h15. It was 12h, which reserved 10x the
+# job's actual need and made it invisible to backfill.
+#
+# Measured per 100-trial checkpoint: OpenDrawer ~1h00-1h12, PickPlaceCounterToStove ~1h03,
+# TurnOnMicrowave ~42min. Note the policy calls the server once per replan_steps (8), NOT once
+# per env step -- an earlier version of this comment claimed otherwise and used it to argue the
+# stage-0 runs were far more expensive than the image-free ones. They are not: stage-0
+# (live VLM) OpenDrawer ran 1h00-1h04 against ~1h12 image-free, because wall-clock here is
+# dominated by episode LENGTH, and a more successful policy terminates earlier. Do not read a
+# model's inference cost off these timings without controlling for success rate.
 #
 # 2h is also the qos_gpu_a100-dev ceiling, so this file can be sent to dev unmodified -- worth
 # doing, since dev has priority 80 against t3's 50:
