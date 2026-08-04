@@ -1,0 +1,41 @@
+[project]
+name = "pointact-molmo"
+version = "0.1.0"
+description = "MolmoPoint pointing environment for PointAct: builds the ROI anchor cache."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+
+# Intentionally separate from the root `pointact` project. MolmoPoint's modelling code is
+# loaded from the model repo with trust_remote_code=True and targets transformers 4.57.x,
+# while the training stack is on transformers 5.x. The two cannot share a resolution, and
+# pinning the trainer back would be the wrong trade.
+#
+# `pointact` is a path dependency rather than a copy so the cache record layout
+# (pointact/roi_sampling/molmo_cache.py) and the reprojection geometry are literally the
+# same code the dataloader reads with -- a format drift between writer and reader would be
+# silent and would only show up as a mysteriously weak training arm.
+dependencies = [
+    "pointact",
+    "transformers==4.57.1",
+    # Pinned to the root env's exact build, not left to float. Unpinned, uv resolves the
+    # newest torch (2.13 + CUDA 13 wheels at time of writing), which is both untested
+    # against this cluster's drivers and a far larger install than $WORK's inode quota can
+    # absorb -- see docs/clusters/jean-zay.md.
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "accelerate",
+    "einops",
+    # Frames come out of the episode mp4s; av is what data_prep already uses to decode them.
+    "av",
+    "lmdb",
+    "msgpack",
+    "msgpack-numpy",
+    "tqdm",
+]
+
+[tool.uv]
+# Dependency container only -- nothing to build or install from this directory.
+package = false
+
+[tool.uv.sources]
+pointact = { path = "../..", editable = true }

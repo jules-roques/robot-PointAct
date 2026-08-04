@@ -51,6 +51,26 @@ is loaded with `trust_remote_code=True` from that directory, so nothing is fetch
 run time — but only if the download completed, which `du -sh` on the directory confirms
 faster than a failed job does.
 
+## $WORK is out of inodes, not out of space
+
+`idr_quota_project` reports the number that matters: **~96% of 500,000 inodes used, against
+7% of the 5 TiB**. A single torch install is roughly 40,000 files, so building any new uv
+environment inside the repo fails with `Disk quota exceeded (os error 122)` mid-extraction
+while `df` still shows terabytes free.
+
+Put both the cache and the environment on `$SCRATCH`:
+
+```bash
+export UV_CACHE_DIR=$SCRATCH/.cache/uv
+export UV_PROJECT_ENVIRONMENT=$SCRATCH/venvs/<name>
+uv sync --project envs/<name>
+```
+
+`envs/molmo` is built this way; its jobs reference `$SCRATCH/venvs/molmo/bin/python`
+directly rather than going through `uv run`, which would look for a `.venv` in the project
+directory. Pin heavyweight dependencies (torch) to the root env's exact version too — left
+to float, uv resolves the newest CUDA-13 build, which is both untested here and larger.
+
 ## Storage lifetime
 
 `$SCRATCH` is purged after roughly 30 days without access. Training is the expensive,
