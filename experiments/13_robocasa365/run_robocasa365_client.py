@@ -388,6 +388,20 @@ def main(args: ClientArgs) -> None:
                 f"({100 * total_successes / total_episodes:.1f}%)"
             )
 
+    # A run where nothing was evaluated is not a 0% policy, it is a broken eval -- but both
+    # write success_rate 0.0 and exit 0, and the four stage-2 arms did exactly that for a whole
+    # sweep (repo_id mismatch -> server KeyError -> every scene "skipped"). Fail loudly instead:
+    # a wrong number that looks plausible is the one outcome this campaign cannot afford.
+    if total_episodes == 0 and skipped_episodes:
+        errors = sorted({str(s["error"]) for s in skipped_episodes})
+        logging.error(
+            f"all {len(skipped_episodes)} trial(s) skipped, nothing evaluated. "
+            f"Distinct errors: {errors[:5]}"
+        )
+        if args.save_dir:
+            dump_results(final=True)
+        raise SystemExit(2)
+
     logging.info(f"Total success rate: {total_successes / max(total_episodes, 1):.4f}")
 
     # The record is rewritten after every episode (dump_results); this is the final one.

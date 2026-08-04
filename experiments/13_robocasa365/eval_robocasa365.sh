@@ -162,11 +162,19 @@ echo "Server started, PID=$SERVER_PID"
 sleep 20
 
 # --- Sim client (robocasa365 env) ---
+# repo_id must be the one the run TRAINED on: the processor's per-repo tables
+# (select_video_keys_for_vlm, select_state_keys, features, norm stats) are keyed by it, so a
+# mismatch is KeyError on the server and every trial is recorded as a skipped scene. The
+# client's own default is "OpenDrawer", which silently produced 0/100 on all four stage-2 runs.
+# env_name is itself read from the run's data config repo_id, so passing it through is exact.
+repo_id=${REPO_ID:-$env_name}
+
 uv run --project "$ROBOCASA_ENV" --no-sync \
     experiments/13_robocasa365/run_robocasa365_client.py \
     --args.seed ${seed} \
     --args.host ${host} --args.port ${port} \
     --args.env_name ${env_name} \
+    --args.repo_id ${repo_id} \
     --args.num_trials ${NUM_TRIALS:-50} \
     --args.pred_rot_type ${pred_rot_type} \
     --args.replan_steps 8 \
