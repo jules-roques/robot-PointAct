@@ -61,16 +61,26 @@ def rollout_media(ckpt_dir: Path) -> dict:
 
     Looks in the checkpoint's own directory and in a `-viz` sibling, so figures produced by a
     separate rollout-only pass are picked up without their trials polluting the pooled rate.
+
+    Aims for one success and one failure. When the viz pass happened to buffer only one
+    outcome -- which it does on the arms that rarely fail, e.g. od-uniform-n8192-s0 caught two
+    successes and no failure -- fall back to a second figure of the outcome there is, rather
+    than logging a lone panel.
     """
     search = [ckpt_dir, ckpt_dir.with_name(ckpt_dir.name + "-viz")]
-    media = {}
-    for outcome in ("success", "failure"):
-        matches = sorted(m for d in search if d.is_dir() for m in d.glob(f"rollout_{outcome}_*.html"))
-        if matches:
-            media[f"eval/rollout_{outcome}"] = wandb.Html(
-                matches[0].read_text(encoding="utf-8"), inject=False
-            )
-    return media
+    found = {
+        outcome: sorted(m for d in search if d.is_dir() for m in d.glob(f"rollout_{outcome}_*.html"))
+        for outcome in ("success", "failure")
+    }
+    picked = {f"eval/rollout_{o}": ms[0] for o, ms in found.items() if ms}
+    if len(picked) == 1:
+        (outcome, matches), = ((o, ms) for o, ms in found.items() if ms)
+        if len(matches) > 1:
+            picked[f"eval/rollout_{outcome}_2"] = matches[1]
+    return {
+        key: wandb.Html(path.read_text(encoding="utf-8"), inject=False)
+        for key, path in picked.items()
+    }
 
 
 def log_run(run_dir: Path, project: str, entity: str) -> bool:
