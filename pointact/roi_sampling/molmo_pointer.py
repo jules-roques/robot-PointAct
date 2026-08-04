@@ -43,7 +43,7 @@ class Detection:
 
 
 class MolmoPointer:
-    """Lazily-loaded MolmoPoint-8B, batched over (frame, query) requests."""
+    """MolmoPoint-8B, one pointing request per forward (see :meth:`point`)."""
 
     def __init__(
         self,
@@ -81,7 +81,16 @@ class MolmoPointer:
     def point(
         self, image_sets: list[list[np.ndarray]], prompts: list[str]
     ) -> list[list[Detection]]:
-        """Point at ``prompts[i]`` within ``image_sets[i]``.
+        """Point at ``prompts[i]`` within ``image_sets[i]``, one request per forward.
+
+        **Requests are not batched**, and that is not an oversight. The checkpoint's remote
+        code cannot run more than one conversation at a time: with two, the pointing
+        embed step indexes a per-image tensor with a per-batch-element mask and raises
+        ``IndexError: The shape of the mask [2] ... does not match the shape of the indexed
+        tensor [4]``. Measured on this checkpoint, all of batch=2 x {1, 2} images fail
+        while batch=1 works. Several *images* in one request are fine, which is what
+        matters here: the left and right views go in together, so a frame still costs one
+        forward rather than two.
 
         Args:
             image_sets: one list of RGB uint8 HxWx3 arrays per request; every image in a
@@ -95,44 +104,11 @@ class MolmoPointer:
         """
         if len(image_sets) != len(prompts):
             raise ValueError(f"{len(image_sets)} image sets vs {len(prompts)} prompts")
-        if not image_sets:
-            return []
+        return [self._point_one(ims, p) for ims, p in zip(image_sets, prompts)]
 
-        torch = self.torch
-        conversations = [self._messages(ims, p) for ims, p in zip(image_sets, prompts)]
-        inputs = self.processor.apply_chat_template(
-            conversations,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-            padding=True,
-            return_pointing_metadata=True,
-        )
-        metadata = inputs.pop("metadata")
-        prompt_len = inputs["input_ids"].size(1)
-        inputs = {k: v.to(self.device) if hasattr(v, "to") else v for k, v in inputs.items()}
-
-        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.bfloat16):
-            out = self.model.generate(
-                **inputs,
-                logits_processor=self.model.build_logit_processor_from_inputs(inputs),
-                max_new_tokens=self.max_new_tokens,
-            )
-        texts = self.processor.post_process_image_text_to_text(
-            out[:, prompt_len:], skip_special_tokens=False, clean_up_tokenization_spaces=False
-        )
-
-        results = []
-        for i, text in enumerate(texts):
-            raw = self.model.extract_image_points(
-                text,
-                _per_sample(metadata["token_pooling"], i),
-                _per_sample(metadata["subpatch_mapping"], i),
-                _per_sample(metadata["image_sizes"], i),
-            )
-            results.append(self._to_detections(raw, n_images=len(image_sets[i])))
-        return results
+    def _point_one(self, images: list[np.ndarray], prompt: str) -> list[Detection]:
+        raw = self._raw_points(images, prompt)
+        return self._to_detections(raw, n_images=len(images))
 
     def _to_detections(self, raw, n_images: int) -> list[Detection]:
         fields = self.point_field_order
@@ -155,34 +131,41 @@ class MolmoPointer:
     def verify_point_order(self, size: int = 224) -> tuple[str, ...]:
         """Settle the ``[object_id, image_num, ...]`` ambiguity against this checkpoint.
 
-        Sends two synthetic images where the queried object exists in the SECOND one only,
-        so a correct reading must report ``image_num == 1``. Returns the field order that
-        holds, and logs a warning if it is not the configured one.
+        Sends a blank image followed by one containing **two** squares. That asymmetry is
+        the point: with a single object in the second image both fields read 1 and the
+        probe cannot tell them apart (it says so rather than guessing). With two objects in
+        image 1, the image index is constant at 1 while the object index varies, so
+        whichever column is constant is ``image_num``.
+
+        Returns the field order that holds, and adopts it if it differs from the configured
+        one.
         """
         blank = np.full((size, size, 3), 245, dtype=np.uint8)
-        withdot = blank.copy()
-        c, r = size // 2, size // 8
-        withdot[c - r:c + r, c - r:c + r] = (200, 30, 30)  # one unmistakable red square
+        two = blank.copy()
+        r = size // 10
+        for cx in (size // 3, 2 * size // 3):
+            two[size // 2 - r:size // 2 + r, cx - r:cx + r] = (200, 30, 30)
 
-        raw = None
         try:
-            inputs_raw = self._raw_points([blank, withdot], "Point to the red square")
-            raw = np.asarray(inputs_raw, dtype=np.float64).reshape(-1, 4)
+            raw = np.asarray(self._raw_points([blank, two], "Point to the red squares"),
+                             dtype=np.float64).reshape(-1, 4)
         except Exception as exc:  # noqa: BLE001 - a probe must not take the caller down
             logger.warning("verify_point_order probe failed (%s); keeping %s", exc,
                            self.point_field_order)
             return self.point_field_order
 
-        if len(raw) == 0:
-            logger.warning("verify_point_order: model pointed nowhere; keeping %s",
-                           self.point_field_order)
+        col0, col1 = raw[:, 0].astype(int), raw[:, 1].astype(int)
+        if len(raw) < 2:
+            logger.warning("verify_point_order: got %d point(s), need 2 to disambiguate; "
+                           "keeping %s", len(raw), self.point_field_order)
             return self.point_field_order
 
-        # Whichever of the first two columns is 1 everywhere is the image index.
-        col0, col1 = raw[:, 0].astype(int), raw[:, 1].astype(int)
-        if (col1 == 1).all() and not (col0 == 1).all():
+        # The image index is pinned to 1 (everything visible is in the second image); the
+        # object index must vary across the two detections.
+        c0_const, c1_const = len(set(col0.tolist())) == 1, len(set(col1.tolist())) == 1
+        if c1_const and (col1 == 1).all() and not c0_const:
             order = ("object_id", "image_num", "x", "y")
-        elif (col0 == 1).all() and not (col1 == 1).all():
+        elif c0_const and (col0 == 1).all() and not c1_const:
             order = ("image_num", "object_id", "x", "y")
         else:
             logger.warning("verify_point_order inconclusive (cols %s / %s); keeping %s",
@@ -196,7 +179,12 @@ class MolmoPointer:
         return order
 
     def _raw_points(self, images: list[np.ndarray], prompt: str):
-        """One request, undecoded, for the order probe."""
+        """One conversation in, raw point tuples out.
+
+        The pointing metadata is passed to the decoder whole, exactly as the model card
+        does. It describes this single request, and slicing a "per-sample" entry out of it
+        produces `ValueError: Mapping and image sizes must have the same length`.
+        """
         torch = self.torch
         inputs = self.processor.apply_chat_template(
             [self._messages(images, prompt)], tokenize=True, add_generation_prompt=True,
@@ -216,22 +204,9 @@ class MolmoPointer:
         )[0]
         return self.model.extract_image_points(
             text,
-            _per_sample(metadata["token_pooling"], 0),
-            _per_sample(metadata["subpatch_mapping"], 0),
-            _per_sample(metadata["image_sizes"], 0),
+            metadata["token_pooling"],
+            metadata["subpatch_mapping"],
+            metadata["image_sizes"],
         )
 
 
-def _per_sample(meta, i: int):
-    """Slice one sample's entry out of batched pointing metadata.
-
-    The metadata is per-request; whether it arrives as a list or a batched tensor depends
-    on the field, so index only when there is something to index.
-    """
-    if meta is None:
-        return None
-    if isinstance(meta, (list, tuple)):
-        return meta[i]
-    if hasattr(meta, "shape") and getattr(meta, "ndim", 0) > 0:
-        return meta[i]
-    return meta

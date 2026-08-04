@@ -7,8 +7,13 @@
 #   sbatch --export=ALL,TASK=OpenDrawer,EPISODES="0",EXTRA="--verify-point-order" \
 #          --qos=qos_gpu_h100-dev --time=00:40:00 <this file>
 #
-# Split a full task across an array (episodes are independent):
-#   sbatch --export=ALL,TASK=PickPlaceCounterToStove,PER_TASK=64 --array=0-7 <this file>
+# Measured 0.78 s per pointing request, so a whole task fits one job well inside the 20 h
+# QoS limit: OpenDrawer ~3.4 h, TurnOnMicrowave ~2.0 h, PickPlaceCounterToStove ~6.7 h (it
+# has two queries per frame). Run the three in parallel and the wall clock is PPCS's.
+#
+# PER_TASK + --array splits a task by episode range, but every element then writes into the
+# SAME LMDB and serialises on its single write lock. Give each element its own
+# OUT_DIRNAME if you use it.
 #
 # H100 is fine here and A100 is not needed: this is pure torch inference with no MuJoCo, so
 # the "RoboCasa365 misbehaves on H100" constraint does not apply (docs/clusters/jean-zay.md).

@@ -166,8 +166,11 @@ def main() -> None:
                     help="Fewer cloud points than this in the window -> no anchor.")
     ap.add_argument("--agree-dist", type=float, default=0.10,
                     help="Metres; views closer than this are averaged.")
-    ap.add_argument("--batch", type=int, default=4,
-                    help="(frame, query) requests per forward.")
+    # 1 is not a placeholder: the checkpoint's remote code raises on any batch > 1 (see
+    # MolmoPointer.point). Kept as a flag so a fixed upstream release can be exploited
+    # without touching the builder.
+    ap.add_argument("--batch", type=int, default=1,
+                    help="(frame, query) requests per forward; >1 fails on this checkpoint.")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--map-size-gb", type=float, default=4.0)
     ap.add_argument("--verify-point-order", action="store_true",
@@ -238,7 +241,7 @@ def main() -> None:
                 image_sets = [[frames[v][f] for v in VIEWS] for f, _ in chunk]
                 prompts = [queries[qi] for _, qi in chunk]
                 out = pointer.point(image_sets, prompts)
-                stats["forwards"] += 1
+                stats["forwards"] += len(chunk)
                 for (f, qi), res in zip(chunk, out):
                     dets[(f, qi)] = res
 
