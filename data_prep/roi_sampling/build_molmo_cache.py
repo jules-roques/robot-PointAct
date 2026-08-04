@@ -160,9 +160,15 @@ def main() -> None:
     # Must match the policy's replan_steps: the cache has to carry the same signal eval
     # produces, and eval re-points once per replan.
     ap.add_argument("--stride", type=int, default=8)
-    ap.add_argument("--point-window", type=int, default=6,
+    # 2 (a 5x5 box) beats wider windows on these 256x256 renders: measured against the
+    # OpenDrawer GT handle over 272 strided frames, the median anchor error is 3.2 cm at
+    # window 2 against 4.4 cm at window 6. A handle is only a few pixels across, so a wide
+    # window pulls in the cabinet face behind it and biases the median off the target.
+    ap.add_argument("--point-window", type=int, default=2,
                     help="Half-width in pixels of the box a returned point is padded into.")
-    ap.add_argument("--min-in-window", type=int, default=8,
+    # 5, not 8: a 5x5 window clears 8 points in only 83% of views, which would drop 7% of
+    # frames to a uniform fallback for no accuracy gain (3.1 cm vs 3.2 cm median).
+    ap.add_argument("--min-in-window", type=int, default=5,
                     help="Fewer cloud points than this in the window -> no anchor.")
     ap.add_argument("--agree-dist", type=float, default=0.10,
                     help="Metres; views closer than this are averaged.")
