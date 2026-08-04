@@ -19,8 +19,9 @@ from pointact.data.transforms.pointcloud import (
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
 )
-from pointact.roi_sampling.geometry import eef_density_weights, halo_weights
-from pointact.roi_sampling.sampling import density_weighted_indices, roi_guided_indices, soft_guided_indices
+from pointact.roi_sampling import molmo_cache
+from pointact.roi_sampling.geometry import eef_density_weights
+from pointact.roi_sampling.sampling import density_weighted_indices
 
 msgpack_numpy.patch()
 
@@ -62,18 +63,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         max_npoints: int = 4096,
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
-        # ROI-guided sampling (optional). When roi_point_cloud_dirname is set, a
-        # per-point ROI flag LMDB (same keys/order as the point LMDB) is loaded and
-        # the uniform subsample is replaced by a guarded ROI/background split of the
-        # same total size. Missing/empty ROI falls back to uniform sampling.
-        roi_point_cloud_dirname: str | None = None,
-        roi_ratio: float = 0.7,
-        # Halo radius multiplier applied on top of the cached radius, and hard/soft
-        # selection. Both are runtime knobs: the cache stores the halo, not a baked mask.
-        roi_radius_scale: float = 1.0,
-        roi_mode: str = "hard",     # "hard" (ball) or "soft" (Gaussian falloff)
-        roi_softness: float = 1.0,  # soft mode: sigma as a multiple of radius
-        # EEF-density sampling (optional, mutually exclusive with roi_point_cloud_dirname).
+        # MolmoPoint-guided sampling (optional). When molmo_anchor_dirname is set, a
+        # per-frame anchor LMDB (same keys as the point LMDB) written by
+        # data_prep/roi_sampling/build_molmo_cache.py is loaded and the Gaussian below is
+        # centred on the frozen pointing model's detection(s). Frames with no usable
+        # detection fall back to uniform sampling.
+        molmo_sampling: bool = False,
+        molmo_anchor_dirname: str | None = None,
+        # Which of the task's pointing queries to use as Gaussian centres. The cache stores
+        # every query, so this selects the arm without a rebuild: (0,) is the manipulated
+        # object alone, (0, 1) adds the destination (e.g. the pan in PickPlaceCounterToStove).
+        molmo_anchor_ids: tuple[int, ...] = (0,),
+        molmo_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
+        molmo_sampling_floor: float = 0.05,   # minimum weight at infinite distance
+        # EEF-density sampling (optional, mutually exclusive with molmo_anchor_dirname).
         # No cache needed: the anchor is the frame's own end-effector position (state[:3],
         # already in the point-cloud/base frame before centering). Replaces the uniform
         # subsample with weight-proportional sampling under a Gaussian-with-floor density,
@@ -135,18 +138,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self._point_cloud_lmdb_txn = None
         self._point_cloud_lmdb_pid = None
 
-        self.roi_ratio = roi_ratio
-        self.roi_radius_scale = roi_radius_scale
-        self.roi_mode = roi_mode
-        self.roi_softness = roi_softness
-        self.roi_point_cloud_dir = (
-            os.path.join(self.root, roi_point_cloud_dirname)
-            if roi_point_cloud_dirname is not None
+        self.molmo_sampling = molmo_sampling
+        self.molmo_anchor_ids = tuple(int(i) for i in molmo_anchor_ids)
+        self.molmo_sampling_sigma = molmo_sampling_sigma
+        self.molmo_sampling_floor = molmo_sampling_floor
+        self.molmo_anchor_dir = (
+            os.path.join(self.root, molmo_anchor_dirname)
+            if molmo_anchor_dirname is not None
             else None
         )
-        self._roi_lmdb_env = None
-        self._roi_lmdb_txn = None
-        self._roi_lmdb_pid = None
+        if molmo_sampling and self.molmo_anchor_dir is None:
+            raise ValueError("molmo_sampling requires molmo_anchor_dirname")
+        self._molmo_lmdb_env = None
+        self._molmo_lmdb_txn = None
+        self._molmo_lmdb_pid = None
 
         self.eef_sampling = eef_sampling
         self.eef_sampling_sigma = eef_sampling_sigma
@@ -263,12 +268,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
-        # Frame-level halo (anchor, radius): unaffected by the workspace crop below.
-        roi_halo = self.load_roi_halo(ep_idx, frame_idx)
+        # Frame-level anchors: unaffected by the workspace crop below.
+        molmo_anchors = self.load_molmo_anchors(ep_idx, frame_idx) if self.molmo_sampling else None
         # Per-point ground-truth labels must be cropped alongside the cloud to stay aligned.
         point_labels = self.load_point_labels(ep_idx, frame_idx) if self.oracle_sampling else None
         point_cloud, point_labels = self.filter_point_cloud_by_workspace(point_cloud, point_labels)
-        point_cloud = self.augment_point_cloud(point_cloud, item, roi_halo, point_labels)
+        point_cloud = self.augment_point_cloud(point_cloud, item, molmo_anchors, point_labels)
         point_cloud = self.center_point_cloud(point_cloud, item)
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
@@ -327,24 +332,24 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         return self._point_cloud_lmdb_txn
 
-    def get_roi_lmdb_txn(self):
+    def get_molmo_lmdb_txn(self):
         current_pid = os.getpid()
-        if self._roi_lmdb_pid != current_pid:
-            self._roi_lmdb_env = None
-            self._roi_lmdb_txn = None
-            self._roi_lmdb_pid = current_pid
+        if self._molmo_lmdb_pid != current_pid:
+            self._molmo_lmdb_env = None
+            self._molmo_lmdb_txn = None
+            self._molmo_lmdb_pid = current_pid
 
-        if self._roi_lmdb_env is None:
-            self._roi_lmdb_env = lmdb.open(
-                self.roi_point_cloud_dir,
+        if self._molmo_lmdb_env is None:
+            self._molmo_lmdb_env = lmdb.open(
+                self.molmo_anchor_dir,
                 readonly=True,
                 lock=False,
                 readahead=False,
                 max_spare_txns=1,
             )
-            self._roi_lmdb_txn = self._roi_lmdb_env.begin(buffers=True)
+            self._molmo_lmdb_txn = self._molmo_lmdb_env.begin(buffers=True)
 
-        return self._roi_lmdb_txn
+        return self._molmo_lmdb_txn
 
     def get_oracle_lmdb_txn(self):
         current_pid = os.getpid()
@@ -376,24 +381,22 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise KeyError(f"Point labels '{point_key}' not found in {self.oracle_label_dir}")
         return msgpack.unpackb(buf).copy().astype(np.uint8)
 
-    def load_roi_halo(self, ep_idx: int, frame_idx: int):
-        """Return (anchor_xyz, radius) for this frame, or None.
+    def load_molmo_anchors(self, ep_idx: int, frame_idx: int):
+        """Return the (K, 3) MolmoPoint anchors for this frame, or None.
 
-        The cache stores the halo itself — anchor(3), radius(1), n_in_box(1) as float32 —
-        rather than a baked per-point mask, so radius scaling and hard/soft selection stay
-        runtime knobs. None (or a zero radius, meaning no reliable detection) makes the
-        caller fall back to uniform sampling.
+        The cache stores every pointing query the task defines; ``molmo_anchor_ids`` picks
+        which become Gaussian centres, so the "object only" and "object + destination" arms
+        read the same cache. None — no record, or none of the requested queries produced a
+        usable detection — makes the caller fall back to uniform sampling.
         """
-        if self.roi_point_cloud_dir is None:
+        if self.molmo_anchor_dir is None:
             return None
-        txn = self.get_roi_lmdb_txn()
+        txn = self.get_molmo_lmdb_txn()
         buf = txn.get(f"{ep_idx}-{frame_idx}".encode("ascii"))
         if buf is None:
             return None
-        rec = np.frombuffer(bytes(buf), dtype=np.float32)
-        if len(rec) < 4 or not np.isfinite(rec[:4]).all() or rec[3] <= 0:
-            return None
-        return rec[:3].astype(np.float64), float(rec[3])
+        rec = np.frombuffer(bytes(buf), dtype=molmo_cache.RECORD_DTYPE)
+        return molmo_cache.decode_anchors(rec, self.molmo_anchor_ids)
 
     def oracle_anchor(self, point_cloud: np.ndarray, point_labels: np.ndarray):
         """Centroid of the ground-truth handle points, or None if nothing usable is visible.
@@ -415,11 +418,11 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self,
         point_cloud: np.ndarray,
         item: dict,
-        roi_halo: tuple | None = None,
+        molmo_anchors: np.ndarray | None = None,
         point_labels: np.ndarray | None = None,
     ):
         # Baseline count rule is preserved exactly; only the *selection* changes when a
-        # valid halo is present.
+        # guiding anchor is present.
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = None
@@ -442,25 +445,18 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                     point_cloud[:, :3], eef_pos, self.eef_sampling_sigma, self.eef_sampling_floor
                 )
                 ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
-            elif roi_halo is not None:
-                anchor, radius = roi_halo
-                w = halo_weights(
-                    point_cloud[:, :3], anchor, radius * self.roi_radius_scale,
-                    mode=self.roi_mode, softness=self.roi_softness,
-                )
+            elif molmo_anchors is not None:
+                # Same Gaussian as the eef and oracle arms, centred on the frozen pointing
+                # model's detection(s) instead of the gripper or the ground-truth handle.
+                # With two anchors (object + destination) the weights take their max, so the
+                # budget is shared between the regions rather than doubled.
                 rng = np.random.default_rng(np.random.randint(2**31 - 1))
-                if self.roi_mode == "soft":
-                    if np.any(w >= 0.5) and not np.all(w >= 0.5):
-                        ridxs = soft_guided_indices(
-                            len(point_cloud), max_npoints, w, self.roi_ratio, rng
-                        )
-                else:
-                    mask = w > 0
-                    if mask.any() and not mask.all():
-                        ridxs = roi_guided_indices(
-                            len(point_cloud), max_npoints, mask, self.roi_ratio, rng
-                        )
-            if ridxs is None:  # no/unusable halo -> baseline uniform draw
+                w = eef_density_weights(
+                    point_cloud[:, :3], molmo_anchors,
+                    self.molmo_sampling_sigma, self.molmo_sampling_floor,
+                )
+                ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
+            if ridxs is None:  # no usable anchor -> baseline uniform draw
                 ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]
 

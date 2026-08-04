@@ -54,15 +54,19 @@ class LerobotConfig:
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
     point_cloud_dirname: str | None = None
 
-    # ROI-guided point sampling (optional). Directory (under `root`) of the per-point
-    # ROI-flag LMDB produced by data_prep/roi_sampling; None disables it (uniform).
-    roi_point_cloud_dirname: str | None = None
-    roi_ratio: float = 0.7
-    roi_radius_scale: float = 1.0
-    roi_mode: str = "hard"      # "hard" (ball) or "soft" (Gaussian falloff)
-    roi_softness: float = 1.0
+    # MolmoPoint-guided point sampling (optional). Directory (under `root`) of the per-frame
+    # anchor LMDB written by data_prep/roi_sampling/build_molmo_cache.py, where a frozen
+    # pointing model localizes the task's object(s). Same Gaussian as the eef and oracle arms
+    # below, so the three differ only in where the bump is centred. `molmo_anchor_ids` picks
+    # which of the task's pointing queries become centres: (0,) is the manipulated object
+    # alone, (0, 1) adds the destination — one cache, two arms, no rebuild.
+    molmo_sampling: bool = False
+    molmo_anchor_dirname: str | None = None
+    molmo_anchor_ids: tuple[int, ...] = (0,)
+    molmo_sampling_sigma: float = 0.08
+    molmo_sampling_floor: float = 0.05
 
-    # EEF-density point sampling (optional, mutually exclusive with the ROI fields above).
+    # EEF-density point sampling (optional, mutually exclusive with the Molmo fields above).
     # No cache needed: the anchor is the frame's own end-effector position. See
     # pointact.roi_sampling.geometry.eef_density_weights.
     eef_sampling: bool = False

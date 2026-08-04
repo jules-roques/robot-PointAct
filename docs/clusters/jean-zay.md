@@ -33,7 +33,7 @@ The constraints pull in opposite directions, so this is worth stating explicitly
   use it, so anything running the full model **fails on V100**.
 - **RoboCasa365 simulation does not run correctly on H100.** Avoid H100 for anything doing
   MuJoCo rollouts.
-- Pure-torch inference (e.g. the YOLO-World ROI detection pass) has no simulator
+- Pure-torch inference (e.g. the MolmoPoint anchor-cache pass) has no simulator
   dependency and runs happily on H100.
 
 That leaves rollout-plus-model workloads (i.e. policy evaluation) wanting A100, which is
@@ -45,8 +45,11 @@ therefore both contribute eval capacity; training stays on H100.
 Login nodes have network access; compute nodes do not. Anything that would download at
 runtime must be baked beforehand on a login node into `$SCRATCH/models/...`.
 
-Specifically for YOLO-World: `set_classes` must be baked into the saved checkpoint, so
-that no CLIP text-encoder download is attempted at inference time.
+MolmoPoint-8B lives at `$SCRATCH/models/MolmoPoint-8B`; fetch it with
+`hf download allenai/MolmoPoint-8B --local-dir ...` from a login node. Its modelling code
+is loaded with `trust_remote_code=True` from that directory, so nothing is fetched at
+run time — but only if the download completed, which `du -sh` on the directory confirms
+faster than a failed job does.
 
 ## Storage lifetime
 

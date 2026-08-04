@@ -28,8 +28,8 @@ def _sampling_method(dataset_cfg: dict) -> str:
         return "oracle"
     if dataset_cfg.get("eef_sampling"):
         return "eef"
-    if dataset_cfg.get("roi_point_cloud_dirname"):
-        return "roi"
+    if dataset_cfg.get("molmo_sampling"):
+        return "molmo"
     return "uniform"
 
 

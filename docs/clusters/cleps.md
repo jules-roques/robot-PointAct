@@ -27,8 +27,7 @@ because dev jobs there can have internet access; Jean Zay is kept for large runs
 ## Environment setup
 
 The three uv environments in `docs/envs.md` must be rebuilt here — they are not portable
-from Jean Zay. The ROI env's `ultralytics` torch build drops Volta support, which only
-matters if CLEPS has V100-class nodes.
+from Jean Zay.
 
 ## Migrating from Jean Zay
 

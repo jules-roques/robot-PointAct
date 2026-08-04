@@ -1,10 +1,18 @@
-"""Geometry for ROI-guided point sampling (RoboCASA OpenDrawer PoC).
+"""Geometry for ROI-guided point sampling on RoboCASA.
 
 The stored point clouds live in the **robot-base frame** (see
-``RoboCasa365Env.convert_points_to_robot_base_frame``). To decide which points fall
-inside a 2D detection box we reproject base-frame points into a camera image, then
-build a 3D "halo" (a ball around the detected object's epicenter) and flag points
-inside it as region-of-interest (ROI).
+``RoboCasa365Env.convert_points_to_robot_base_frame``). A 2D detector (MolmoPoint, see
+``data_prep/roi_sampling/build_molmo_cache.py``) names a pixel; to turn that into a 3D
+anchor we reproject base-frame points into the camera image and take the median of the
+points landing in a small window around it. Lifting this way rather than reading the
+depth map at that pixel means invalid-depth pixels reduce support instead of corrupting
+the anchor.
+
+The anchor then centres the Gaussian-with-floor density of :func:`eef_density_weights`,
+the same one the ``eef`` and ``oracle`` arms use — so those arms differ only in where
+the bump sits. An earlier YOLO-World + "halo" (hard/soft ball) variant lived here and
+was removed: it could not tell which drawer an instruction named, which forced a
+privileged grasp point in as a disambiguator.
 
 Reprojection is the exact inverse of the forward construction in
 ``pointact.utils.depth.depth_to_point_cloud`` composed with the base-frame
@@ -22,8 +30,6 @@ stored frame shares row indexing with the reprojected ``v`` — no extra flip ne
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import numpy as np
 
@@ -108,96 +114,46 @@ def points_in_box(
     return inside
 
 
-def halo_weights(
-    points_base: np.ndarray,
-    anchor: np.ndarray,
-    radius: float,
-    mode: str = "hard",
-    softness: float = 1.0,
-) -> np.ndarray:
-    """Per-point ROI weight from a stored (anchor, radius) halo.
-
-    Kept separate from halo construction so radius scaling and hard/soft selection are
-    *dataloader* knobs: the cache stores only the anchor and radius, so these can change
-    without rebuilding anything.
-
-    Args:
-        mode: "hard" -> 1.0 inside the ball, 0.0 outside (sharp boundary, exact counts).
-              "soft" -> Gaussian falloff exp(-d^2 / (2 sigma^2)) with sigma = softness*radius,
-              which removes the boundary artifact and down-weights the periphery smoothly.
-        softness: sigma as a multiple of radius (soft mode only).
-
-    Returns:
-        (N,) float weights in [0, 1].
-    """
-    d = np.linalg.norm(np.asarray(points_base, dtype=np.float64) - np.asarray(anchor, dtype=np.float64), axis=1)
-    if mode == "hard":
-        return (d <= radius).astype(np.float64)
-    if mode == "soft":
-        sigma = max(1e-6, softness * radius)
-        return np.exp(-0.5 * (d / sigma) ** 2)
-    raise ValueError(f"unknown halo mode {mode!r} (expected 'hard' or 'soft')")
-
-
 def eef_density_weights(
     points_xyz: np.ndarray,
-    eef_pos: np.ndarray,
+    anchors: np.ndarray,
     sigma: float,
     floor: float,
 ) -> np.ndarray:
-    """Per-point sampling weight: a Gaussian bump around the end-effector with a density floor.
+    """Per-point sampling weight: a Gaussian bump around one or more anchors, with a floor.
 
-    ``weight = floor + (1 - floor) * exp(-d^2 / (2 sigma^2))``, so every point keeps a
-    non-zero weight (background is never starved) while points within ~sigma of the eef
-    dominate the budget. Unlike :func:`halo_weights`, there is no radius/box detection step:
-    ``eef_pos`` comes straight from the frame's proprioceptive state, so this needs no cache.
+    ``weight = floor + (1 - floor) * max_k exp(-d_k^2 / (2 sigma^2))``, so every point keeps
+    a non-zero weight (background is never starved) while points within ~sigma of *any*
+    anchor dominate the budget.
+
+    The ``max`` over anchors — rather than a sum — keeps the peak weight at 1.0 no matter how
+    many anchors there are, so adding a second region of interest redistributes the budget
+    instead of inflating it. With a single anchor this reduces **exactly** to the original
+    one-centre form, which is what keeps the ``eef`` and ``oracle`` arms bit-identical to the
+    stage 0-2 runs they are compared against.
+
+    Despite the name, the anchor need not be the end-effector: the ``eef`` arm passes
+    ``state[:3]``, ``oracle`` passes the ground-truth handle centroid, and the MolmoPoint arm
+    passes one or two cached detections.
 
     Args:
-        points_xyz: (N, 3) cloud points, same frame as ``eef_pos`` (robot-base frame).
-        eef_pos: (3,) end-effector position.
+        points_xyz: (N, 3) cloud points, same frame as the anchors (robot-base frame).
+        anchors: (3,) or (K, 3) anchor position(s).
         sigma: Gaussian bandwidth (meters).
         floor: minimum weight at infinite distance, in [0, 1).
 
     Returns:
         (N,) float weights in [floor, 1].
     """
-    d = np.linalg.norm(np.asarray(points_xyz, dtype=np.float64) - np.asarray(eef_pos, dtype=np.float64), axis=1)
+    pts = np.asarray(points_xyz, dtype=np.float64)
+    a = np.atleast_2d(np.asarray(anchors, dtype=np.float64))
+    if a.shape[-1] != 3:
+        raise ValueError(f"anchors must be (3,) or (K, 3), got {a.shape}")
     sigma = max(1e-6, float(sigma))
-    gauss = np.exp(-0.5 * (d / sigma) ** 2)
+    # (K, N) distances; max over K collapses to the nearest anchor's bump.
+    d = np.linalg.norm(pts[None, :, :] - a[:, None, :], axis=2)
+    gauss = np.exp(-0.5 * (d / sigma) ** 2).max(axis=0)
     return floor + (1.0 - floor) * gauss
-
-
-@dataclass
-class HaloResult:
-    """Outcome of building a halo for one frame."""
-
-    roi_mask: np.ndarray  # (N,) bool over the input cloud
-    anchor: np.ndarray | None  # (3,) base-frame epicenter, or None
-    radius: float  # halo radius (meters), 0.0 if no detection
-    n_in_box: int  # number of points that fell inside any detection box
-
-
-#: Weak statistical tendency only — DO NOT use as a per-episode rule.
-#: Over 80 episodes the eef-at-grasp averages Y=+0.156 for "left" and Y=-0.148 for
-#: "right", but individual episodes contradict it freely (left-drawer episodes grasp at
-#: Y=-0.607, -0.459, +0.473, ...): the robot parks at a different yaw in each kitchen, so
-#: no fixed base-frame axis — and no image-space side — decodes the instruction.
-#: Selection therefore uses the demonstration's grasp point (see select_anchor_by_grasp).
-LEFT_IS_HIGHER_Y = True
-
-
-def select_box_by_side(boxes: np.ndarray, side: str | None) -> np.ndarray:
-    """Deprecated image-space selector, kept only for the geometry self-test.
-
-    Use :func:`select_anchor_by_side`, which disambiguates in 3D. Image-space x is
-    camera-dependent and empirically selects the wrong drawer on this dataset.
-    """
-    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
-    if side is None or len(boxes) <= 1:
-        return boxes
-    centers_x = 0.5 * (boxes[:, 0] + boxes[:, 2])
-    idx = int(np.argmin(centers_x)) if side == "left" else int(np.argmax(centers_x))
-    return boxes[idx : idx + 1]
 
 
 def candidate_anchors(
@@ -224,148 +180,6 @@ def candidate_anchors(
             anchor = np.median(np.asarray(points_base, dtype=np.float64)[mask], axis=0)
             out.append((anchor, mask))
     return out
-
-
-def select_anchor_by_grasp(
-    cands: list[tuple[np.ndarray, np.ndarray]],
-    grasp_point: np.ndarray | None,
-    max_dist: float = 0.45,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """Choose the detected drawer the demonstration actually grasped.
-
-    ``grasp_point`` is the end-effector position (robot-base frame, i.e. the point-cloud
-    frame) at the frame the gripper closes — the handle the demonstration reached for.
-    It is a per-episode constant, so it disambiguates every frame of that episode,
-    including the first, without making the ROI follow the arm around.
-
-    This replaces instruction-side heuristics, which do not work on this dataset: the
-    robot parks at a different yaw per kitchen, so neither a base-frame axis nor an
-    image side maps consistently onto "left"/"right" (see LEFT_IS_HIGHER_Y).
-
-    When a grasp point is available but no candidate lies within ``max_dist`` of it, the
-    detector did not find the target drawer — so this returns None and the caller falls
-    back to uniform sampling. Guessing the best-supported candidate there would
-    concentrate the budget on the *wrong* drawer, which is worse than not concentrating
-    at all; uniform keeps such frames merely baseline-equivalent.
-
-    With no grasp point at all (e.g. eval time) it returns the best-supported candidate.
-    """
-    if not cands:
-        return None
-    if grasp_point is None:
-        return max(cands, key=lambda c: int(c[1].sum()))
-    g = np.asarray(grasp_point, dtype=np.float64).reshape(3)
-    dists = np.array([float(np.linalg.norm(c[0] - g)) for c in cands])
-    best = int(np.argmin(dists))
-    if dists[best] > max_dist:
-        return None
-    return cands[best]
-
-
-def select_anchor_by_side(
-    cands: list[tuple[np.ndarray, np.ndarray]], side: str | None
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """Choose the candidate drawer named by the instruction, comparing in 3D.
-
-    "left" -> the higher-base-Y candidate, "right" -> the lower (see LEFT_IS_HIGHER_Y).
-    The comparison is relative among this frame's candidates, so it does not depend on
-    the robot's absolute base pose or on which camera saw the drawer.
-    """
-    if not cands:
-        return None
-    if side is None or len(cands) == 1:
-        # No side information: fall back to the best-supported candidate.
-        return max(cands, key=lambda c: int(c[1].sum()))
-    ys = np.array([c[0][1] for c in cands])
-    want_max = (side == "left") == LEFT_IS_HIGHER_Y
-    return cands[int(np.argmax(ys)) if want_max else int(np.argmin(ys))]
-
-
-def parse_task_side(task: str | None) -> str | None:
-    """Extract the target side from a RoboCASA OpenDrawer instruction."""
-    if not task:
-        return None
-    t = task.lower()
-    if "left" in t:
-        return "left"
-    if "right" in t:
-        return "right"
-    return None
-
-
-def halo_from_candidate(
-    points_base: np.ndarray,
-    cand: tuple[np.ndarray, np.ndarray] | None,
-    halo_scale: float = 1.0,
-    min_radius: float = 0.02,
-    max_radius: float = 0.25,
-) -> HaloResult:
-    """Size a halo around an already-selected candidate (anchor, in_box_mask)."""
-    n = len(points_base)
-    if cand is None:
-        return HaloResult(np.zeros(n, dtype=bool), None, 0.0, 0)
-    anchor, mask = cand
-    pts = np.asarray(points_base, dtype=np.float64)
-    in_box_pts = pts[mask]
-    spread = float(np.sqrt(np.mean(np.sum((in_box_pts - anchor) ** 2, axis=1))))
-    radius = float(np.clip(halo_scale * spread, min_radius, max_radius))
-    roi = np.linalg.norm(pts - anchor, axis=1) <= radius
-    return HaloResult(roi, anchor.astype(np.float32), radius, int(mask.sum()))
-
-
-def build_halo_roi(
-    points_base: np.ndarray,
-    cameras: list[dict],
-    detections: dict[str, np.ndarray],
-    image_hw: tuple[int, int],
-    halo_scale: float = 2.0,
-    min_radius: float = 0.05,
-    max_radius: float = 0.6,
-    min_in_box: int = 20,
-) -> HaloResult:
-    """Compute a per-point ROI mask from 2D detections via an epicenter + halo.
-
-    Args:
-        points_base: (N, 3) cloud points in robot-base frame.
-        cameras: list of {"name", "intrinsic" (3,3), "base2cam" (4,4)} dicts.
-        detections: {camera_name: (K, 4) boxes xyxy} for the same frame. A camera
-            with no detection may be absent or map to an empty array.
-        image_hw: (H, W) of the frames the boxes were measured on.
-        halo_scale: radius = halo_scale * robust_spread(in_box points).
-        min_radius, max_radius: clamp on the halo radius (meters).
-        min_in_box: if fewer than this many points fall in all boxes combined, the
-            detection is considered unreliable and no ROI is returned (caller falls
-            back to uniform sampling).
-
-    Returns:
-        HaloResult. ``roi_mask`` is all-False and ``anchor`` is None when detection
-        is missing/unreliable.
-    """
-    n = len(points_base)
-    in_box_any = np.zeros(n, dtype=bool)
-    for cam in cameras:
-        boxes = detections.get(cam["name"])
-        if boxes is None or len(boxes) == 0:
-            continue
-        boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
-        for box in boxes:
-            in_box_any |= points_in_box(
-                points_base, cam["intrinsic"], cam["base2cam"], box, image_hw
-            )
-
-    n_in_box = int(in_box_any.sum())
-    if n_in_box < min_in_box:
-        return HaloResult(np.zeros(n, dtype=bool), None, 0.0, n_in_box)
-
-    in_box_pts = np.asarray(points_base, dtype=np.float64)[in_box_any]
-    anchor = np.median(in_box_pts, axis=0)  # robust epicenter
-    # Robust spread: RMS distance to the anchor.
-    spread = float(np.sqrt(np.mean(np.sum((in_box_pts - anchor) ** 2, axis=1))))
-    radius = float(np.clip(halo_scale * spread, min_radius, max_radius))
-
-    dists = np.linalg.norm(np.asarray(points_base, dtype=np.float64) - anchor, axis=1)
-    roi_mask = dists <= radius
-    return HaloResult(roi_mask, anchor.astype(np.float32), radius, n_in_box)
 
 
 if __name__ == "__main__":
@@ -415,18 +229,40 @@ if __name__ == "__main__":
     recovered = uv[:300].mean(axis=0)
     assert np.allclose(recovered, obj_uv, atol=2.0), f"pixel round-trip off: {recovered} vs {obj_uv}"
 
-    pad = 4
-    ouv = uv[:300]
-    box = np.array([ouv[:, 0].min() - pad, ouv[:, 1].min() - pad,
-                    ouv[:, 0].max() + pad, ouv[:, 1].max() + pad])
-    cams = [{"name": "left", "intrinsic": K, "base2cam": b2c}]
-    res = build_halo_roi(pts, cams, {"left": box[None]}, (H, W),
-                         halo_scale=2.0, min_in_box=10)
-    frac_obj = res.roi_mask[:300].mean()
-    frac_bg = res.roi_mask[300:].mean()
     print(f"pixel round-trip OK ({recovered} ~= {obj_uv})")
-    print(f"n_in_box={res.n_in_box} radius={res.radius:.3f} "
-          f"obj_captured={frac_obj:.2f} bg_captured={frac_bg:.2f}")
-    assert frac_obj > 0.9, "halo should capture most object points"
-    assert frac_bg < 0.5, "halo should be selective vs background"
+
+    # The MolmoPoint lift: a single pixel is padded into a window, and the anchor is the
+    # median of the cloud points projecting into it. Point at the object's pixel and check
+    # we recover its true 3D centroid.
+    win = 8
+    cams = [{"name": "left", "intrinsic": K, "base2cam": b2c}]
+    window = np.array([obj_uv[0] - win, obj_uv[1] - win, obj_uv[0] + win, obj_uv[1] + win])
+    cands = candidate_anchors(pts, cams, {"left": window[None]}, (H, W), min_in_box=10)
+    assert len(cands) == 1, f"expected one candidate from one window, got {len(cands)}"
+    anchor, mask = cands[0]
+    truth = obj_base.mean(axis=0)
+    err = float(np.linalg.norm(anchor - truth))
+    print(f"lift: n_in_window={int(mask.sum())} anchor_err={err*100:.1f} cm")
+    assert err < 0.05, f"lifted anchor too far from the planted cluster: {err:.3f} m"
+
+    # Single-anchor weights must stay bit-identical to the original one-centre form, or the
+    # eef/oracle arms stop being comparable with the stage 0-2 runs.
+    sigma, floor = 0.08, 0.05
+    d = np.linalg.norm(pts - truth, axis=1)
+    reference = floor + (1.0 - floor) * np.exp(-0.5 * (d / sigma) ** 2)
+    w1 = eef_density_weights(pts, truth, sigma, floor)
+    assert np.array_equal(w1, reference), "single-anchor weights drifted from the 1-centre form"
+    assert np.array_equal(w1, eef_density_weights(pts, truth[None, :], sigma, floor)), \
+        "(3,) and (1, 3) anchors must agree"
+
+    # Two anchors: max, so the peak stays 1.0 and each anchor keeps its own bump.
+    second = truth + np.array([0.4, 0.0, 0.0])
+    w2 = eef_density_weights(pts, np.stack([truth, second]), sigma, floor)
+    assert (w2 >= w1 - 1e-12).all(), "adding an anchor must not lower any weight"
+    assert w2.max() <= 1.0 + 1e-12, "max-combination must keep the peak at 1.0"
+    near_second = np.linalg.norm(pts - second, axis=1) < sigma
+    if near_second.any():
+        assert (w2[near_second] > w1[near_second] + 1e-6).any(), \
+            "points near the second anchor should gain weight"
+    print(f"weights: 1-anchor max={w1.max():.3f}  2-anchor max={w2.max():.3f}")
     print("geometry self-test OK")

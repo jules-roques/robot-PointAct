@@ -8,7 +8,7 @@ merge them.
 |---|---|---|---|
 | Training / root | `.venv` | Training and evaluating PointAct. torch 2.7 (cu126). | The main environment; `pointact` is installed into it. |
 | Simulator | `envs/robocasa365/.venv` | RoboCasa365 / MuJoCo rollouts. Python 3.11. | MuJoCo and the RoboCasa stack pin versions that conflict with the training env. |
-| ROI preprocessing | `.venv-roi` | YOLO-World detection for ROI-guided sampling. | `ultralytics` pulls a CUDA-13 torch build that **drops Volta/sm_70 support**, so it cannot run on V100. Installing it into the root env would break V100 training. |
+| Pointing | `envs/molmo/.venv` | MolmoPoint-8B detection for ROI-guided sampling (`data_prep/roi_sampling/build_molmo_cache.py`). | MolmoPoint ships custom modelling code that requires `transformers==4.57.1`; the training env is on 5.x, and pinning it back would break the trainer. |
 
 ## Running things
 

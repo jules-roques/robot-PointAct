@@ -1,26 +1,25 @@
 """Animate one episode's sampled point cloud, one HTML per sampling strategy.
 
-Where ``viz_roi.py`` shows isolated frames side by side, this shows the *evolution*: a
-play/pause + slider animation over the frames of a single episode, so you can watch where
-the fixed 4096-point budget goes as the arm approaches, grasps and pulls the drawer.
+A play/pause + slider animation over the frames of a single episode, so you can watch where
+the fixed 4096-point budget goes as the arm approaches, grasps and manipulates its target.
 
 Strategies (each writes its own self-contained HTML, matching the dataloader exactly):
 
   uniform  ``np.random.choice`` over the whole cloud — the baseline.
   eef      ``density_weighted_indices`` on ``eef_density_weights``: a Gaussian bump around
            the frame's own end-effector (``observation.state[:3]``) with a density floor.
-  roi      ``roi_guided_indices``/``soft_guided_indices`` on a halo centred on the *handle*,
-           tracked proprioceptively (the oracle ROI of ``build_roi_cache_proprio.py``): the
-           eef while the gripper is closed, held at the grasp/release pose outside that run.
-           Computed on the fly here, so no ROI LMDB cache is required.
+  molmo    The same Gaussian-with-floor draw as ``eef``, centred on the anchor(s) a frozen
+           MolmoPoint model put on the task's object(s), read from the cache built by
+           ``build_molmo_cache.py``. With two queries selected (object + destination) the
+           weights take their max, so the budget is shared between the two regions.
   oracle   The variant actually trained (``data-robocasa365-opendrawer-point-oracle.yaml``):
            the anchor is the centroid of the points MuJoCo *labels* as the handle (label 4,
            falling back to the door panel, label 3, when the handle is occluded), and the draw
            is the same Gaussian-with-floor density as ``eef`` — only the centre differs.
            Needs the sibling ``points_3views_labels`` LMDB.
 
-The anchor each strategy is centred on is drawn as a marker, and for ``roi`` the halo
-sphere is outlined, so "where the budget went" is visible rather than inferred.
+Every anchor a strategy is centred on is drawn as a marker, so "where the budget went" is
+visible rather than inferred.
 
 Unlike training, the point count is deterministic (``min(len(cloud), max_npoints)``, no
 0.8-1.0 jitter) so frames and strategies are comparable frame-for-frame.
@@ -44,33 +43,28 @@ import numpy as np
 import plotly.graph_objects as go
 import pyarrow.parquet as pq
 
-from data_prep.roi_sampling.build_roi_cache_proprio import handle_trajectory
-from pointact.roi_sampling.geometry import eef_density_weights, halo_weights
-from pointact.roi_sampling.sampling import (
-    density_weighted_indices,
-    roi_guided_indices,
-    soft_guided_indices,
-)
+from pointact.roi_sampling import molmo_cache
+from pointact.roi_sampling.geometry import eef_density_weights
+from pointact.roi_sampling.sampling import density_weighted_indices
 
 msgpack_numpy.patch()
 
-METHODS = ("uniform", "eef", "roi", "oracle")
+METHODS = ("uniform", "eef", "molmo", "oracle")
 
-#: What ``--method all`` builds: the three arms actually under comparison. ``roi`` (the
-#: proprioceptive halo) stays selectable by name but is not part of the default set — the
-#: oracle-GT arm supersedes it as the "knows where the handle is" upper bound.
+#: What ``--method all`` builds. ``molmo`` is excluded because it needs a cache that only
+#: exists once build_molmo_cache.py has run for the dataset; ask for it by name.
 DEFAULT_METHODS = ("uniform", "eef", "oracle")
 
 METHOD_LABEL = {
     "uniform": "Uniform (baseline)",
     "eef": "EEF-density (Gaussian + floor around the end-effector)",
-    "roi": "ROI halo (proprioceptively tracked handle)",
+    "molmo": "MolmoPoint (Gaussian on the frozen pointer's detection)",
     "oracle": "Oracle GT (Gaussian on the MuJoCo-labelled handle)",
 }
 
 ANCHOR_LABEL = {"uniform": "end-effector (reference only)", "eef": "end-effector (anchor)",
-                "roi": "handle (ROI anchor)", "oracle": "GT handle centroid (anchor)"}
-ANCHOR_COLOR = {"uniform": "#9aa0a6", "eef": "#ff2d95", "roi": "#ff2d95", "oracle": "#ff2d95"}
+                "molmo": "MolmoPoint detection (anchor)", "oracle": "GT handle centroid (anchor)"}
+ANCHOR_COLOR = {"uniform": "#9aa0a6", "eef": "#ff2d95", "molmo": "#ff2d95", "oracle": "#ff2d95"}
 
 #: MuJoCo segmentation levels written by replay.py --labels-only (see the oracle data config).
 LABEL_NAMES = {0: "background", 1: "robot", 2: "target fixture", 3: "door panel", 4: "handle"}
@@ -161,9 +155,8 @@ def compute_weights(method: str, cloud: np.ndarray, anchor: np.ndarray | None, a
         return eef_density_weights(cloud[:, :3], anchor, args.eef_sigma, args.eef_floor)
     if method == "oracle":
         return eef_density_weights(cloud[:, :3], anchor, args.oracle_sigma, args.oracle_floor)
-    if method == "roi":
-        return halo_weights(cloud[:, :3], anchor, args.roi_radius * args.roi_radius_scale,
-                            mode=args.roi_mode, softness=args.roi_softness)
+    if method == "molmo":
+        return eef_density_weights(cloud[:, :3], anchor, args.molmo_sigma, args.molmo_floor)
     return None
 
 
@@ -178,16 +171,8 @@ def select_indices(
     """The dataloader's own selection, for one frame (see data_3d.augment_point_cloud)."""
     m = len(cloud)
     if weights is not None:
-        if method in ("eef", "oracle"):
+        if method in ("eef", "oracle", "molmo"):
             return density_weighted_indices(m, n_target, weights, rng)
-        if method == "roi":
-            if args.roi_mode == "soft":
-                if np.any(weights >= 0.5) and not np.all(weights >= 0.5):
-                    return soft_guided_indices(m, n_target, weights, args.roi_ratio, rng)
-            else:
-                mask = weights > 0
-                if mask.any() and not mask.all():
-                    return roi_guided_indices(m, n_target, mask, args.roi_ratio, rng)
     return rng.choice(m, n_target, replace=False)
 
 
@@ -206,18 +191,6 @@ def oversampling_factor(weights: np.ndarray | None, n_points: int) -> np.ndarray
     if not np.isfinite(s) or s <= 0:
         return np.ones(n_points, dtype=np.float64)
     return n_points * w / s
-
-
-def sphere_wireframe(center: np.ndarray, radius: float, n_ring: int = 48) -> tuple[np.ndarray, ...]:
-    """Three orthogonal great circles, as one line trace with NaN breaks."""
-    t = np.linspace(0, 2 * np.pi, n_ring)
-    nan = np.array([np.nan])
-    cos, sin = np.cos(t) * radius, np.sin(t) * radius
-    zero = np.zeros_like(cos)
-    xs = np.concatenate([cos, nan, cos, nan, zero])
-    ys = np.concatenate([sin, nan, zero, nan, cos])
-    zs = np.concatenate([zero, nan, sin, nan, sin])
-    return xs + center[0], ys + center[1], zs + center[2]
 
 
 def build_figure(method: str, frames_data: list[dict], ep: int, task: str, args) -> go.Figure:
@@ -247,26 +220,17 @@ def build_figure(method: str, frames_data: list[dict], ep: int, task: str, args)
             x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode="markers", marker=marker,
             name=f"sampled points ({fd['n_sel']})", hoverinfo="skip",
         )]
+        # (K, 3): the molmo arm can carry two anchors (object + destination); the others
+        # carry one. A NaN row keeps the trace present so the animation frames stay aligned.
         a = fd["anchor"]
+        a = np.full((1, 3), np.nan) if a is None else np.atleast_2d(a)
         out.append(go.Scatter3d(
-            x=np.array([np.nan]) if a is None else np.array([a[0]]),
-            y=np.array([np.nan]) if a is None else np.array([a[1]]),
-            z=np.array([np.nan]) if a is None else np.array([a[2]]),
+            x=a[:, 0], y=a[:, 1], z=a[:, 2],
             mode="markers",
             marker=dict(size=6, color=ANCHOR_COLOR[method], symbol="diamond",
                         line=dict(width=1, color="#ffffff")),
             name=ANCHOR_LABEL[method], hoverinfo="skip",
         ))
-        if method == "roi":
-            if a is None:
-                sx = sy = sz = np.array([np.nan])
-            else:
-                sx, sy, sz = sphere_wireframe(a, args.roi_radius * args.roi_radius_scale)
-            out.append(go.Scatter3d(
-                x=sx, y=sy, z=sz, mode="lines",
-                line=dict(width=2, color="rgba(255,45,149,0.55)"),
-                name="halo radius", hoverinfo="skip",
-            ))
         return out
 
     frames = [
@@ -360,12 +324,13 @@ def main() -> None:
     # eef-density knobs (defaults match the data config)
     ap.add_argument("--eef-sigma", type=float, default=0.08)
     ap.add_argument("--eef-floor", type=float, default=0.05)
-    # ROI knobs (defaults match build_roi_cache_proprio + the data config)
-    ap.add_argument("--roi-radius", type=float, default=0.15)
-    ap.add_argument("--roi-radius-scale", type=float, default=1.0)
-    ap.add_argument("--roi-ratio", type=float, default=0.7)
-    ap.add_argument("--roi-mode", default="hard", choices=("hard", "soft"))
-    ap.add_argument("--roi-softness", type=float, default=1.0)
+    # MolmoPoint knobs (defaults match the stage-3 data configs)
+    ap.add_argument("--molmo-anchor-dirname", default="points_3views_molmo")
+    ap.add_argument("--molmo-anchor-ids", nargs="*", type=int, default=[0],
+                    help="Which pointing queries become Gaussian centres: 0 = the manipulated "
+                         "object, 1 = the destination. '0 1' is the two-region arm.")
+    ap.add_argument("--molmo-sigma", type=float, default=0.08)
+    ap.add_argument("--molmo-floor", type=float, default=0.05)
     # Oracle-GT knobs (defaults match data-robocasa365-opendrawer-point-oracle.yaml)
     ap.add_argument("--labels-dirname", default="points_3views_labels")
     ap.add_argument("--oracle-anchor-labels", nargs="*", type=int, default=[4])
@@ -397,10 +362,6 @@ def main() -> None:
     task = tasks.get(ep, "")
 
     states, actions = read_episode_arrays(d, ep, chunks)
-    handle = handle_trajectory(states, actions)
-    if handle is None:
-        print(f"warning: no closed-gripper run in ep {ep}; the ROI anchor is unavailable "
-              f"(that strategy falls back to uniform, exactly as the dataloader would)")
     closed = actions[:, 7] > 0.5 if actions.ndim == 2 and actions.shape[1] > 7 else None
 
     stride = args.stride if args.stride > 0 else max(1, n_frames // max(1, args.num_frames))
@@ -443,6 +404,30 @@ def main() -> None:
             print(f"note: labels cover {len(labels)}/{len(clouds)} sampled frames "
                   f"(the export may still be running)")
 
+        # MolmoPoint anchors, read with the same key the dataloader uses. Frames the pointer
+        # missed are simply absent, and the method falls back to a uniform draw for them —
+        # exactly what data_3d.augment_point_cloud does.
+        molmo_anchors = {}
+        if "molmo" in methods:
+            mdir = d / args.molmo_anchor_dirname
+            if not mdir.exists():
+                raise SystemExit(
+                    f"method 'molmo' needs {mdir}, built by "
+                    f"data_prep/roi_sampling/build_molmo_cache.py")
+            menv = lmdb.open(str(mdir), readonly=True, lock=False, readahead=False)
+            with menv.begin(buffers=True) as mtxn:
+                for f in clouds:
+                    buf = mtxn.get(f"{ep}-{f}".encode("ascii"))
+                    if buf is None:
+                        continue
+                    rec = np.frombuffer(bytes(buf), dtype=molmo_cache.RECORD_DTYPE)
+                    a = molmo_cache.decode_anchors(rec, tuple(args.molmo_anchor_ids))
+                    if a is not None:
+                        molmo_anchors[f] = a
+            menv.close()
+            print(f"molmo anchors: {len(molmo_anchors)}/{len(clouds)} sampled frames "
+                  f"(queries {args.molmo_anchor_ids})")
+
         for method in methods:
             rng = np.random.default_rng(args.seed)
             disp_rng = np.random.default_rng(args.seed + 1)
@@ -455,8 +440,8 @@ def main() -> None:
                 anchor = None
                 if method == "eef" and f < len(states):
                     anchor = states[f, :3].astype(np.float64)
-                elif method == "roi" and handle is not None and f < len(handle):
-                    anchor = handle[f]
+                elif method == "molmo":
+                    anchor = molmo_anchors.get(f)
                 elif method == "oracle":
                     anchor = gt_anchor
                 elif method == "uniform":  # reference marker only, never used for sampling
