@@ -5,8 +5,16 @@
 # curves only appear once they are synced from a LOGIN node. Run this there, as often as you
 # want progress to show up:
 #
-#   bash experiments/13_robocasa365/wandb_sync_jeanzay.sh          # in-progress runs too
+#   bash experiments/13_robocasa365/wandb_sync_jeanzay.sh          # new + still-training runs
+#   bash experiments/13_robocasa365/wandb_sync_jeanzay.sh --all    # force-repush everything
 #   bash experiments/13_robocasa365/wandb_sync_jeanzay.sh --finished-only
+#
+# By default this pushes only what can have changed: runs never synced, and runs whose .wandb
+# was written in the last $ACTIVE_WITHIN minutes (i.e. still training). A finished run that is
+# already synced has nothing new to send, so re-pushing it is pure cost -- and that cost grows
+# with the campaign, because every pass would re-upload every run ever recorded, including the
+# ~150 MB rollout figures. Use --all only when a previous pass is known to have been corrupted
+# or interrupted mid-run.
 #
 # Note the directory layout: wandb creates its runs under $WANDB_DIR/wandb/offline-run-*, i.e.
 # one level deeper than WANDB_DIR itself, so the obvious `wandb sync $SCRATCH/wandb/offline-run-*`
@@ -16,14 +24,15 @@ set -uo pipefail
 
 RUN_ROOT="${WANDB_DIR:-$SCRATCH/wandb}/wandb"
 FINISHED_ONLY=0
-# Re-push only runs whose .wandb changed in the last N minutes, i.e. still being written.
-# Without this a periodic watcher re-uploads every finished run on every pass for the rest of
-# the campaign; a run that is done and already synced has nothing new to send.
-ACTIVE_WITHIN=""
+# Re-push a synced run only if its .wandb changed in the last N minutes, i.e. it is still being
+# written. 30 comfortably exceeds the checkpoint interval of the training jobs, so an in-flight
+# run is never mistaken for a finished one; --all disables the check.
+ACTIVE_WITHIN=30
 while [ $# -gt 0 ]; do
     case "$1" in
         --finished-only) FINISHED_ONLY=1 ;;
         --active-within) ACTIVE_WITHIN="$2"; shift ;;
+        --all) ACTIVE_WITHIN="" ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -86,4 +95,9 @@ for run in "$RUN_ROOT"/offline-run-*; do
 done
 
 echo
-echo "synced=${synced} skipped=${skipped} from ${RUN_ROOT}"
+if [ -n "$ACTIVE_WITHIN" ]; then
+    mode="new runs + those written in the last ${ACTIVE_WITHIN} min"
+else
+    mode="ALL runs (--all)"
+fi
+echo "synced=${synced} skipped=${skipped} from ${RUN_ROOT}  [${mode}]"
