@@ -53,6 +53,11 @@ class TrainPipelineConfig(TrainingArguments):
     ctx_embed_size: int = field(default=256)
     time_embed_size: int = field(default=256)
     ptv3_patch_size: int = field(default=1024)
+    # The grid PTv3 truncates coordinates onto, and it must equal the voxel size the point
+    # cache was built with -- serialization order and the sparse-conv stem both key off it.
+    # Set it and the data's voxel size together, or the model reads a cloud whose resolution
+    # it cannot address. stride=(2,2,2,2) puts the coarsest encoder level at 16x this value.
+    ptv3_voxel_size: float = field(default=0.01)
     ptv3_enc_mode: bool = field(default=True)
     ptv3_enc_channels: List[int] = field(default_factory=lambda: [64, 128, 256, 384, 512])
     ptv3_enc_depths: List[int] = field(default_factory=lambda: [2, 2, 2, 6, 2])

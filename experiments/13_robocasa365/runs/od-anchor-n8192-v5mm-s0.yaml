@@ -1,0 +1,29 @@
+# OpenDrawer / anchor / 8192 points / 5 mm voxel -- stage 4.
+# Oracle/anchor sampling: same density, centred on the ground-truth handle from MuJoCo
+# segmentation. Privileged info -- an upper bound, not a deployable policy.
+#
+# This is the arm the voxel probe predicts should move most: at 1 cm the handle carries a
+# median of 71 points per frame, at 5 mm it carries 216, so the oracle draw finally has
+# something to concentrate on.
+extends: _base_v5mm.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: anchor
+  npoints: 8192
+  voxel: 0.005
+  context: text_cache
+  seed: 0
+  stage: "Stage 4: Voxel size"
+
+data:
+  lerobot_datasets:
+    - oracle_sampling: true
+      oracle_label_dirname: points_3views_labels
+      # Label 4 = the handle alone; fall back to the drawer panel (3) when the handle is
+      # occluded by the gripper or facing away. Sigma/floor match the eef arm exactly, so the
+      # two differ only in where the density bump is centred.
+      oracle_anchor_labels: [4]
+      oracle_anchor_fallback_labels: [3]
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05

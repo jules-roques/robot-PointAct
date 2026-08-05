@@ -1,0 +1,13 @@
+# OpenDrawer / uniform / 8192 points / 5 mm voxel -- stage 4.
+# The control: a finer grid with no sampling bias, which isolates how much of any gain is the
+# extra resolution alone rather than the resolution the ROI samplers can now reach.
+extends: _base_v5mm.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: uniform
+  npoints: 8192
+  voxel: 0.005
+  context: text_cache
+  seed: 0
+  stage: "Stage 4: Voxel size"

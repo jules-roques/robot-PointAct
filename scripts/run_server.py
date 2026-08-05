@@ -63,6 +63,11 @@ class ServerArgs:
     point_sampling_sigma: float = 0.08
     point_sampling_floor: float = 0.05
 
+    # Grid the live cloud is voxelized onto. Left unset it follows the checkpoint's own
+    # ptv3_voxel_size, so a policy trained at 5 mm cannot be silently evaluated at 1 cm just
+    # because the launcher did not know to pass it. Set it only to deliberately mismatch.
+    voxel_size: float | None = None
+
     # diffusion
     num_denoise_steps: int = 10
 
@@ -110,9 +115,15 @@ class Policy:
         self.processor.point_sampling = args.point_sampling
         self.processor.point_sampling_sigma = args.point_sampling_sigma
         self.processor.point_sampling_floor = args.point_sampling_floor
+        voxel_size = (
+            args.voxel_size if args.voxel_size is not None
+            else model_config.get("ptv3_voxel_size", 0.01)
+        )
+        self.processor.voxel_size = voxel_size
         print(
             f"[server] point_sampling={args.point_sampling} "
-            f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor}"
+            f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor} "
+            f"voxel_size={voxel_size}"
         )
 
         if model_config.get("context_source", "vlm") != "vlm":

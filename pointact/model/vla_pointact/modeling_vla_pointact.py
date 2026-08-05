@@ -425,7 +425,7 @@ class VLAEncDec3DClassificationModel(VLAEncDec3DBaseModel):
         self.ptv3_model = PointTransformerUnet(
             input_size=self.config.ptv3_input_channels, 
             ctx_embed_size=self.config.ctx_embed_size, 
-            voxel_size=0.01,
+            voxel_size=self.config.ptv3_voxel_size,
             patch_size=self.config.ptv3_patch_size,
             enc_channels=self.config.ptv3_enc_channels,
             enc_depths=self.config.ptv3_enc_depths,
@@ -560,7 +560,7 @@ class VLAEncDec3DRegressionModel(VLAEncDec3DBaseModel):
         self.ptv3_model = PointTransformerUnet(
             input_size=self.config.ptv3_input_channels, 
             ctx_embed_size=self.config.ctx_embed_size, 
-            voxel_size=0.01,
+            voxel_size=self.config.ptv3_voxel_size,
             patch_size=self.config.ptv3_patch_size,
             enc_channels=self.config.ptv3_enc_channels,
             enc_depths=self.config.ptv3_enc_depths,
@@ -672,7 +672,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         self.ptv3_model = PointTransformerUnetWithAction(
             input_size=self.config.ptv3_input_channels, 
             ctx_embed_size=self.config.ctx_embed_size, 
-            voxel_size=0.01,
+            voxel_size=self.config.ptv3_voxel_size,
             patch_size=self.config.ptv3_patch_size,
             enc_channels=self.config.ptv3_enc_channels,
             enc_depths=self.config.ptv3_enc_depths,
@@ -856,7 +856,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         self.ptv3_model = PointTransformerUnetWithAction(
             input_size=self.config.ptv3_input_channels, 
             ctx_embed_size=self.config.ctx_embed_size, 
-            voxel_size=0.01,
+            voxel_size=self.config.ptv3_voxel_size,
             patch_size=self.config.ptv3_patch_size,
             enc_channels=self.config.ptv3_enc_channels,
             enc_depths=self.config.ptv3_enc_depths,

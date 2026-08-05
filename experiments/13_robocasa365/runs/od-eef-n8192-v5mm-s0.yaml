@@ -1,0 +1,20 @@
+# OpenDrawer / eef / 8192 points / 5 mm voxel -- stage 4.
+# EEF-density sampling: weight-proportional draw under a Gaussian-with-floor density centred
+# on the frame's own end-effector position. Sigma and floor match the 1 cm arm exactly, so the
+# only difference from od-eef-n8192-s0 is the grid the cloud was built on.
+extends: _base_v5mm.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: eef
+  npoints: 8192
+  voxel: 0.005
+  context: text_cache
+  seed: 0
+  stage: "Stage 4: Voxel size"
+
+data:
+  lerobot_datasets:
+    - eef_sampling: true
+      eef_sampling_sigma: 0.08
+      eef_sampling_floor: 0.05

@@ -1,0 +1,28 @@
+# Shared settings for the 5 mm voxel arm -- stage 4.
+#
+# Stage 1 found the point-count axis flat, and the voxel probe explained why: at a 1 cm grid
+# the eef draw already takes 97% of everything within one sigma of the gripper, so a bigger
+# budget has nothing left to draw. 5 mm roughly triples the cloud (18k -> 43k points/frame
+# measured on OpenDrawer) and gains disproportionately inside the ROI, which is the only place
+# the extra budget can pay.
+#
+# Voxel size is a joint data+model+eval change, not a knob, and all three move together here:
+#   data  -- a separately replayed cache, converted into its own dataset ROOT below;
+#   model -- train.ptv3_voxel_size, the grid PTv3 truncates coordinates onto;
+#   eval  -- run_server reads ptv3_voxel_size off the checkpoint, so it cannot desync.
+#
+# Known confound, to report rather than hide: stride=(2,2,2,2) puts the coarsest encoder level
+# at 16x the voxel, so halving the grid halves the receptive field from 16 cm to 8 cm. A flat
+# or negative result is therefore "5 mm did not help *at this depth*", not "finer is worse".
+extends: _base.yaml
+
+train:
+  ptv3_voxel_size: 0.005
+
+data:
+  lerobot_datasets:
+    # Its own root, not its own dirname: convert.py rmtree's its output directory, and repo_id
+    # is what the eval client and the max_npoints table are keyed by, so the task name stays.
+    - root: robot_data/robocasa365/lerobot_point_lmdb_v5mm
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb_v5mm/OpenDrawer/robot_state_action_stats/rot6d.json
+      max_npoints: 8192

@@ -36,7 +36,12 @@ META_TO_EXP_FIELD = {
     "context": "exp_context",
     "seed": "exp_seed",
     "stage": "exp_stage",
+    "voxel": "exp_voxel",
 }
+
+#: Voxel grid every run before the 5 mm arm was built on. Runs at this size leave it out of
+#: their name, so the existing names stay stable.
+DEFAULT_VOXEL = 0.01
 
 #: Short tokens used to build run names, e.g. OpenDrawer/eef/4096 -> od-eef-n4096-s0.
 TASK_ABBREV = {
@@ -122,21 +127,34 @@ def run_name_from_meta(meta: dict[str, Any]) -> str:
     if meta.get("context") and meta["context"] != "text_cache":
         # text_cache is the default for this grid, so only the exception is worth the chars.
         parts.append(str(meta["context"]))
+    if meta.get("voxel") and float(meta["voxel"]) != DEFAULT_VOXEL:
+        # Same rule as context, and load-bearing rather than cosmetic: output_dir is derived
+        # from this name, so without it a 5 mm run would resume into the 1 cm run's directory.
+        parts.append(f"v{round(float(meta['voxel']) * 1000)}mm")
     parts.append(f"s{meta.get('seed', 0)}")
     return "-".join(parts)
 
 
 def group_from_meta(meta: dict[str, Any]) -> str:
-    """W&B group: the arm identity, shared by its seeds and by its eval runs."""
-    return "/".join(
+    """W&B group: the arm identity, shared by its seeds and by its eval runs.
+
+    Voxel size joins the identity only when it is not the default, so the groups the existing
+    runs already sit in do not move.
+    """
+    parts = [
         str(meta.get(key)) for key in ("task", "sampling", "npoints") if meta.get(key) is not None
-    )
+    ]
+    if meta.get("voxel") and float(meta["voxel"]) != DEFAULT_VOXEL:
+        parts.append(f"v{round(float(meta['voxel']) * 1000)}mm")
+    return "/".join(parts)
 
 
 def tags_from_meta(meta: dict[str, Any]) -> list[str]:
     tags = [str(meta[key]) for key in ("task", "sampling", "context", "stage") if meta.get(key)]
     if meta.get("npoints"):
         tags.append(f"n{meta['npoints']}")
+    if meta.get("voxel"):
+        tags.append(f"v{round(float(meta['voxel']) * 1000)}mm")
     return tags
 
 

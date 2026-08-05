@@ -282,6 +282,11 @@ class RobotPointProcessorBase(RobotProcessorBase):
     point_sampling_sigma: float = 0.08
     point_sampling_floor: float = 0.05
 
+    # The grid the live sim cloud is downsampled onto. It must match both the voxel size the
+    # training cache was built with and the model's ptv3_voxel_size: evaluating a 5 mm policy
+    # on a 1 cm cloud is a train/test mismatch that reads as "finer voxels did not help".
+    voxel_size: float = 0.01
+
     def _sampling_anchor(self, mini_batch: dict) -> np.ndarray | None:
         """Centre of the sampling density for this frame, in the point-cloud (base) frame."""
         # mini_batch is already per-sample here (the caller does {k: v[i] ...}), so these are
@@ -360,7 +365,7 @@ class RobotPointProcessorBase(RobotProcessorBase):
         workspace: dict,
         *,
         remove_arm: bool = False,
-        voxel_size: float = 0.01,
+        voxel_size: float | None = None,
     ) -> np.ndarray:
         has_existing_point_cloud = "observation.points" in mini_batch
         if has_existing_point_cloud:
@@ -368,6 +373,8 @@ class RobotPointProcessorBase(RobotProcessorBase):
         else:
             point_cloud = self._build_point_cloud_from_cameras(mini_batch, repo_id, workspace)
 
+        if voxel_size is None:
+            voxel_size = self.voxel_size
         point_cloud = self._voxel_downsample_point_cloud(point_cloud, voxel_size=voxel_size)
         if remove_arm and (not has_existing_point_cloud or "observation.robot_joints_bbox" in mini_batch):
             point_cloud = self._remove_robot_arm_points(point_cloud, mini_batch)

@@ -46,6 +46,7 @@ def _point_config_kwargs(training_args: TrainPipelineConfig) -> dict[str, Any]:
         "time_embed_size": training_args.time_embed_size,
         "use_robot_state": training_args.use_robot_state,
         "ptv3_patch_size": training_args.ptv3_patch_size,
+        "ptv3_voxel_size": training_args.ptv3_voxel_size,
         "ptv3_enc_mode": training_args.ptv3_enc_mode,
         "ptv3_enc_channels": training_args.ptv3_enc_channels,
         "ptv3_enc_depths": training_args.ptv3_enc_depths,

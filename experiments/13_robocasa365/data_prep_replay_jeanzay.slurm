@@ -3,6 +3,16 @@
 #
 #   sbatch --export=ALL,TASK=TurnOnMicrowave experiments/13_robocasa365/data_prep_replay_jeanzay.slurm
 #
+# The voxel grid is baked in HERE, at fusion time, and cannot be changed afterwards -- a
+# finer cloud means re-rendering. VOXEL_SIZE and CACHE_DIR are exported together so a
+# second grid lands beside the first instead of on top of it:
+#
+#   sbatch --export=ALL,TASK=OpenDrawer,VOXEL_SIZE=0.005,CACHE_DIR=<...>/replay_cache_v5mm,\
+#          EXTRA=--point-labels experiments/13_robocasa365/data_prep_replay_jeanzay.slurm
+#
+# replay.py's own resume check compares voxel_size against the cache meta and refuses a
+# mismatch, so pointing a finer run at the 1 cm cache fails loudly rather than mixing grids.
+#
 # V100, deliberately: this stage does MuJoCo/EGL rendering and no model inference, so it needs
 # no Ampere features -- and RoboCasa365 sim misbehaves on H100 anyway. V100 is also the Jean Zay
 # tier with the shortest queue.
@@ -21,15 +31,15 @@
 #SBATCH --hint=nomultithread
 #SBATCH --time=20:00:00
 #SBATCH --array=0-7
-#SBATCH --output=%x_%A_%a.out
-#SBATCH --error=%x_%A_%a.out
+#SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
+#SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%A_%a.out
 
 set -euo pipefail
 
 module purge
 module load ffmpeg/6.1.1
 
-WORKTREE="$WORK/code/robot-PointAct/.claude/worktrees/pointcount-ablation"
+WORKTREE="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 cd "$WORKTREE"
 export PYTHONPATH="$WORKTREE:${PYTHONPATH:-}"
 
@@ -47,8 +57,11 @@ export UV_OFFLINE=1
 source experiments/13_robocasa365/task_paths.sh
 TASK="${TASK:?set TASK=<task name> via --export}"
 INPUT_DIR="${INPUT_DIR:-$(task_input_dir "$TASK")}"
+CACHE_DIR="${CACHE_DIR:-$INPUT_DIR/replay_cache}"
+VOXEL_SIZE="${VOXEL_SIZE:-0.01}"
 
 echo "host=$(hostname) task=$TASK input_dir=$INPUT_DIR"
+echo "  cache_dir=$CACHE_DIR voxel_size=$VOXEL_SIZE extra=${EXTRA:-none}"
 nvidia-smi -L
 
 if [ ! -d "$INPUT_DIR/lerobot" ]; then
@@ -58,19 +71,25 @@ fi
 
 # Stride the episodes across the array rather than splitting into contiguous blocks: episode
 # length varies a lot within a task, and striding keeps each shard's total work comparable.
+# EPISODES can be exported to override the shard split -- used for smoke tests, where one
+# episode against a fresh cache dir is what tells you the grid and the labels are right
+# before eight V100s spend a day on the rest.
 NUM_SHARDS=${SLURM_ARRAY_TASK_COUNT:-1}
 SHARD=${SLURM_ARRAY_TASK_ID:-0}
-EPISODES=$(python - <<EOF
+if [ -z "${EPISODES:-}" ]; then
+    EPISODES=$(python - <<EOF
 import json
 total = json.load(open("$INPUT_DIR/lerobot/meta/info.json"))["total_episodes"]
 print(" ".join(str(i) for i in range($SHARD, total, $NUM_SHARDS)))
 EOF
 )
+fi
 echo "shard $SHARD/$NUM_SHARDS: $(echo $EPISODES | wc -w) episodes"
 
 uv run --project "$ROBOCASA_ENV" --no-sync \
     python data_prep/robocasa365_to_lerobot/replay.py \
         --input-dir "$INPUT_DIR/lerobot" \
-        --cache-dir "$INPUT_DIR/replay_cache" \
+        --cache-dir "$CACHE_DIR" \
+        --voxel-size "$VOXEL_SIZE" \
         --episodes $EPISODES \
-        --resume
+        --resume ${EXTRA:-}

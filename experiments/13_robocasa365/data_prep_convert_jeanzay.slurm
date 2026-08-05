@@ -4,6 +4,15 @@
 #
 #   sbatch --export=ALL,TASK=TurnOnMicrowave experiments/13_robocasa365/data_prep_convert_jeanzay.slurm
 #
+# convert.py rmtree's its --output-dir, so a second voxel grid must convert into its own
+# dataset root rather than alongside the first. Keep repo_id equal to the task name and vary
+# the ROOT, not the directory name: repo_id is the key the eval client and the max_npoints
+# table are indexed by, and renaming it there breaks the lookup.
+#
+#   sbatch --export=ALL,TASK=OpenDrawer,CACHE_DIR=<...>/replay_cache_v5mm,\
+#          OUTPUT_DIR=$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb_v5mm/OpenDrawer,\
+#          POINT_LABELS=1 experiments/13_robocasa365/data_prep_convert_jeanzay.slurm
+#
 #SBATCH --job-name=convert
 #SBATCH --account=rgx@cpu
 #SBATCH --partition=cpu_p1
@@ -18,7 +27,7 @@ set -euo pipefail
 module purge
 module load ffmpeg/6.1.1
 
-WORKTREE="$WORK/code/robot-PointAct/.claude/worktrees/pointcount-ablation"
+WORKTREE="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 cd "$WORKTREE"
 export PYTHONPATH="$WORKTREE:${PYTHONPATH:-}"
 
@@ -33,16 +42,19 @@ source experiments/13_robocasa365/task_paths.sh
 TASK="${TASK:?set TASK=<task name> via --export}"
 INPUT_DIR="${INPUT_DIR:-$(task_input_dir "$TASK")}"
 OUTPUT_DIR="${OUTPUT_DIR:-$(task_output_dir "$TASK")}"
+CACHE_DIR="${CACHE_DIR:-$INPUT_DIR/replay_cache}"
 
 echo "host=$(hostname) task=$TASK"
 echo "  in : $INPUT_DIR"
+echo "  cache: $CACHE_DIR"
 echo "  out: $OUTPUT_DIR"
 
 uv run --project "$WORK/code/robot-PointAct" --no-sync \
     python data_prep/robocasa365_to_lerobot/convert.py \
-        --cache-dir "$INPUT_DIR/replay_cache" \
+        --cache-dir "$CACHE_DIR" \
         --output-dir "$OUTPUT_DIR" \
         --repo-id "$TASK" \
+        ${POINT_LABELS:+--point-labels} \
         --image-writer-threads 12
 
 # Stage 3/3. Both flags are mandatory here, not stylistic:

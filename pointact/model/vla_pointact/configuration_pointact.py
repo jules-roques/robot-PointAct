@@ -30,6 +30,7 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         flow_matching_loss="x-loss",    # v-loss, x-loss 
         time_embed_size=512,
         ptv3_patch_size=1024,
+        ptv3_voxel_size=0.01,
         ptv3_enc_mode=True,
         ptv3_enc_channels=(32, 64, 128, 256, 512),
         ptv3_enc_depths=(2, 2, 2, 6, 2),
@@ -78,6 +79,9 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
 
         self.ctx_embed_size = ctx_embed_size
         self.ptv3_patch_size = ptv3_patch_size
+        # Saved with the checkpoint, so an eval loads the grid its policy was trained on
+        # rather than the default.
+        self.ptv3_voxel_size = ptv3_voxel_size
         self.ptv3_enc_mode = ptv3_enc_mode
         self.ptv3_enc_channels = ptv3_enc_channels
         self.ptv3_enc_depths = ptv3_enc_depths
