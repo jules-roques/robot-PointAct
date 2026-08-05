@@ -33,6 +33,17 @@ from pointact.roi_sampling.geometry import base2cam_from_extrinsic
 
 LEFT_CAM = "robot0_agentview_left"
 RIGHT_CAM = "robot0_agentview_right"
+WRIST_CAM = "robot0_eye_in_hand"
+
+
+def pose_matrix(pos, quat_xyzw) -> np.ndarray:
+    """4x4 from a position and an xyzw quaternion."""
+    from scipy.spatial.transform import Rotation as R
+
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R.from_quat(np.asarray(quat_xyzw, dtype=np.float64).reshape(4)).as_matrix()
+    T[:3, 3] = np.asarray(pos, dtype=np.float64).reshape(3)
+    return T
 
 
 def infer_env_name(source_dir: Path) -> str:
@@ -53,10 +64,21 @@ def calib_for_episode(env: RoboCasa365Env, ep_dir: str) -> dict:
     base_pos = np.asarray(obs["state.base_position"], dtype=np.float64).reshape(3)
     base_quat = np.asarray(obs["state.base_rotation"], dtype=np.float64).reshape(4)  # xyzw
     out = {"base_pos": base_pos, "base_quat": base_quat}
-    for tag, cam in (("left", LEFT_CAM), ("right", RIGHT_CAM)):
+    for tag, cam in (("left", LEFT_CAM), ("right", RIGHT_CAM), ("wrist", WRIST_CAM)):
         intrinsic, extrinsic = env._get_camera_matrices(cam)  # extrinsic = cam2world
         out[f"{tag}_K"] = np.asarray(intrinsic, dtype=np.float64)
         out[f"{tag}_base2cam"] = base2cam_from_extrinsic(extrinsic, base_pos, base_quat)
+
+    # The wrist camera rides on the end-effector, so its base->cam is NOT constant: it moves
+    # with the arm. What IS constant is its pose relative to the eef, and the eef pose in the
+    # base frame is in the recorded proprio (observation.state[0:7]). So store eef2cam once
+    # and reconstruct base2cam per frame as  eef2cam @ inv(T_base_eef(t))  -- no simulator
+    # replay needed to point in the wrist view.
+    eef_pos = np.asarray(obs["state.end_effector_position_relative"], dtype=np.float64)
+    eef_quat = np.asarray(obs["state.end_effector_rotation_relative"], dtype=np.float64)
+    T_base_eef = pose_matrix(eef_pos, eef_quat)
+    out["eef_pose"] = T_base_eef
+    out["wrist_eef2cam"] = out["wrist_base2cam"] @ T_base_eef
     return out
 
 
@@ -117,6 +139,17 @@ def main() -> None:
                   f"(dev above threshold). A global calibration may be inaccurate; "
                   f"per-episode calibration would be required.")
 
+    # The wrist camera's constant is eef2cam, not base2cam. Probe episodes reset to similar
+    # arm poses, so a small spread here is weak evidence -- the real check is the reprojection
+    # test in validate_wrist_calib.py, which uses frames with genuinely different arm poses.
+    e2c = stack("wrist_eef2cam")
+    e2c_dev = float(np.max(np.std(e2c, axis=0)))
+    print(f"[wrist] eef2cam max-std={e2c_dev:.6g} (across probe episodes; "
+          f"validate against moving frames before trusting it)")
+    if e2c_dev > 1e-3:
+        print("  WARNING: wrist eef2cam is not constant -- the camera may not be rigidly "
+              "mounted to the eef frame this state reports.")
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         args.out,
@@ -126,9 +159,13 @@ def main() -> None:
         right_base2cam=np.median(stack("right_base2cam"), axis=0),
         image_hw=np.array([args.image_resolution, args.image_resolution], dtype=np.int64),
         env_name=env_name,
+        wrist_K=np.median(stack("wrist_K"), axis=0),
+        wrist_eef2cam=np.median(e2c, axis=0),
         probe_base_pos=stack("base_pos"),
         probe_left_base2cam=stack("left_base2cam"),
         probe_right_base2cam=stack("right_base2cam"),
+        probe_wrist_eef2cam=e2c,
+        probe_eef_pose=stack("eef_pose"),
     )
     print(f"saved global calibration -> {args.out}")
 

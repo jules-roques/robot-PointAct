@@ -27,6 +27,9 @@ dependencies = [
     "einops",
     # Frames come out of the episode mp4s; av is what data_prep already uses to decode them.
     "av",
+    # The wrist camera moves with the arm, so its extrinsics come from the recorded
+    # proprio, which lives in the episode parquet.
+    "pyarrow",
     "lmdb",
     "msgpack",
     "msgpack-numpy",
