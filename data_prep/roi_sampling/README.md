@@ -63,7 +63,9 @@ python -m data_prep.roi_sampling.viz_molmo_gate --tasks OpenDrawer PickPlaceCoun
 ```
 Left- and right-camera videos with the predicted point drawn on each frame, plus the
 interactive point-cloud animation from `viz_sampling_episode.py --method molmo`. Logged to
-a W&B run tagged `Stage 3.0: Visu MolmoPoint`. Look for: does the point land on the named
+a W&B run tagged `Stage 3: MolmoPoint anchor`, the same stage tag the trained arms carry, so
+one filter returns the gate and the runs it gated; `gate` tells them apart. Look for: does
+the point land on the named
 object, does it pick the **correct** drawer on left/right episodes, does the lifted anchor
 sit on the object in 3D, and does it jitter between replans?
 

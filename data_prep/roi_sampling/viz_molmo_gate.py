@@ -7,7 +7,9 @@ Builds, per task, from **training** data and at the policy's replan cadence:
   * the interactive point-cloud animation of the resulting sampling, with the Gaussian
     centre(s) marked (``viz_sampling_episode.py --method molmo``).
 
-and logs them to one W&B run tagged ``Stage 3.0: Visu MolmoPoint``.
+and logs them to one W&B run tagged ``Stage 3: MolmoPoint anchor`` -- the same stage tag the
+trained arms carry, so one filter returns the gate together with the runs it gated. The
+``gate`` tag and ``job_type="viz"`` are what distinguish it from them.
 
 This is a gate, not a report: nothing downstream should be trained until a human has looked
 at it. What to look for —
@@ -207,7 +209,10 @@ def main() -> None:
         run = wandb.init(
             project=args.wandb_project, entity=args.wandb_entity,
             name="stage3.0-visu-molmopoint", job_type="viz",
-            tags=["Stage 3.0: Visu MolmoPoint", "molmo", "gate"],
+            # Same stage tag as the trained arms in experiments/13_robocasa365/runs/*molmo*,
+            # so one W&B filter returns the gate and the runs it gated. "gate" and
+            # job_type="viz" are what still tell them apart.
+            tags=["Stage 3: MolmoPoint anchor", "molmo", "gate"],
             config={"stride": args.stride, "cache_dirname": args.cache_dirname,
                     "tasks": args.tasks},
         )
