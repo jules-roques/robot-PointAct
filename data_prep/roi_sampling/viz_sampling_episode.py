@@ -279,16 +279,20 @@ def build_figure(method: str, frames_data: list[dict], ep: int, task: str, args)
 
 
 def frame_title(method: str, ep: int, task: str, fd: dict, args) -> str:
-    near = f"{fd['near_frac']:.0%}" if fd["near_frac"] is not None else "n/a"
+    # Both stats need the MuJoCo labels, which only OpenDrawer has. Dropping the phrase beats
+    # printing "n/a ... of the handle" on a microwave button that has no handle at all.
+    if fd["near_frac"] is not None:
+        near = f"{fd['near_frac']:.0%} within {args.near_radius:g} m of the handle · "
+    else:
+        near = ""
     if fd["n_handle_total"]:
-        handle = (f" · GT handle points kept {fd['n_handle_sel']}/{fd['n_handle_total']}"
-                  f" ({fd['handle_recall']:.0%})")
+        handle = (f"GT handle points kept {fd['n_handle_sel']}/{fd['n_handle_total']}"
+                  f" ({fd['handle_recall']:.0%}) · ")
     else:
         handle = ""
     return (f"<b>{METHOD_LABEL[method]}</b><br>"
             f"<sup>ep {ep} · frame {fd['frame']}/{fd['n_frames'] - 1} · “{task}” · "
-            f"{fd['n_sel']} of {fd['n_cloud']} pts · "
-            f"{near} within {args.near_radius:g} m of the handle{handle} · "
+            f"{fd['n_sel']} of {fd['n_cloud']} pts · {near}{handle}"
             f"phase: {fd['phase']}</sup>")
 
 
@@ -385,7 +389,8 @@ def main() -> None:
 
         # MuJoCo per-point labels: the oracle's anchor, and the ground truth every strategy is
         # scored against. Absent (or still being exported) -> the oracle method is unavailable
-        # and the handle stats fall back to the proprioceptive estimate.
+        # and the near-target stats are simply omitted. Only OpenDrawer has these labels, so
+        # on the other tasks the animation shows where the budget went without scoring it.
         labels = {}
         lab_env = open_labels_env(d, args.labels_dirname)
         if lab_env is not None:
@@ -458,8 +463,6 @@ def main() -> None:
                 # is the GT handle centroid where labels exist, so all methods are scored
                 # against the same ground truth rather than each against its own anchor.
                 ref = gt_anchor
-                if ref is None and handle is not None and f < len(handle):
-                    ref = handle[f]
                 near_frac = None
                 if ref is not None:
                     dist = np.linalg.norm(sel_pts[:, :3].astype(np.float64) - ref, axis=1)
