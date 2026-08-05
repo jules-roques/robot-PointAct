@@ -166,9 +166,12 @@ def main() -> None:
     # window pulls in the cabinet face behind it and biases the median off the target.
     ap.add_argument("--point-window", type=int, default=2,
                     help="Half-width in pixels of the box a returned point is padded into.")
-    # 5, not 8: a 5x5 window clears 8 points in only 83% of views, which would drop 7% of
-    # frames to a uniform fallback for no accuracy gain (3.1 cm vs 3.2 cm median).
-    ap.add_argument("--min-in-window", type=int, default=5,
+    # 1, i.e. effectively off. This guard came from the YOLO builder, where "few points in
+    # the box" meant an unreliable *detection*. For a single pointed pixel it means only that
+    # the cloud is sparse there, which is not evidence against the point: on TurnOnMicrowave
+    # median support at window 2 is 7, and min=5 sent 35% of frames to a uniform fallback.
+    # n_support is recorded per anchor, so low-confidence lifts stay identifiable downstream.
+    ap.add_argument("--min-in-window", type=int, default=1,
                     help="Fewer cloud points than this in the window -> no anchor.")
     ap.add_argument("--agree-dist", type=float, default=0.10,
                     help="Metres; views closer than this are averaged.")
@@ -277,12 +280,21 @@ def main() -> None:
                         if len(per_view) == 2:
                             stats["both_views"] += 1
                         xyz, agreed = fuse(per_view, args.agree_dist)
-                        if xyz is None:
-                            continue
-                        stats["query_hits"] += 1
-                        stats["agree"] += int(agreed)
+                        # Record the slot even when nothing lifted, with a NaN anchor. The
+                        # pixels are the expensive half (0.7 s of an 8B model); the lift is
+                        # 1.7 ms of geometry. Dropping the pixels on failure meant the frames
+                        # we most need to diagnose were the only ones we could not re-lift
+                        # offline -- and it silently biased every window sweep towards frames
+                        # that had already succeeded. decode_anchors skips non-finite xyz, so
+                        # the dataloader still falls back to uniform for these.
+                        if xyz is not None:
+                            stats["query_hits"] += 1
+                            stats["agree"] += int(agreed)
+                        if xyz is None and not uvs:
+                            continue  # the model pointed nowhere; nothing to record
                         anchors.append({
-                            "xyz": xyz, "query_id": qi,
+                            "xyz": xyz if xyz is not None else np.full(3, np.nan),
+                            "query_id": qi,
                             "n_support": sum(n for _, n in per_view.values()),
                             "left_uv": uvs.get("left"), "right_uv": uvs.get("right"),
                             "agree": agreed,
@@ -290,11 +302,12 @@ def main() -> None:
 
                     rec = (molmo_cache.encode_record(anchors) if anchors
                            else molmo_cache.empty_record()).tobytes()
+                    has_anchor = any(np.isfinite(a["xyz"]).all() for a in anchors)
                     end = key_frames[ki + 1] if ki + 1 < len(key_frames) else n_use
                     for ff in range(f, end):
                         wtxn.put(f"{ep}-{ff}".encode("ascii"), rec)
                         stats["frames"] += 1
-                        stats["pointed_frames"] += int(bool(anchors))
+                        stats["pointed_frames"] += int(has_anchor)
 
     points_env.close()
     out_env.sync()
