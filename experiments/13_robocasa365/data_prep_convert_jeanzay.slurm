@@ -19,8 +19,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --hint=nomultithread
 #SBATCH --time=12:00:00
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.out
+#SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%j.out
+#SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%j.out
 
 set -euo pipefail
 
@@ -49,11 +49,30 @@ echo "  in : $INPUT_DIR"
 echo "  cache: $CACHE_DIR"
 echo "  out: $OUTPUT_DIR"
 
+# convert.py packs every episode the cache holds, including ones whose replay never reached
+# the task's success condition -- 18 of OpenDrawer's 514 at both grids, and the same 18 each
+# time. The existing 1 cm dataset is the 496 successful ones, so a second grid has to be
+# restricted the same way or it trains on demonstrations that do not accomplish the task and
+# stops being comparable. EPISODES carries that list; SUCCESS_ONLY derives it from the
+# replay summary, which is what you want unless you are reproducing an older dataset.
+if [ -n "${SUCCESS_ONLY:-}" ] && [ -z "${EPISODES:-}" ]; then
+    EPISODES=$(python - <<EOF
+import json
+rows = (json.loads(l) for l in open("$CACHE_DIR/replay_summary.jsonl"))
+ok = sorted(r["episode_index"] for r in rows if r.get("success"))
+print(" ".join(str(i) for i in ok))
+EOF
+)
+    echo "success-only: $(echo $EPISODES | wc -w) episodes of $(wc -l < "$CACHE_DIR/replay_summary.jsonl")"
+fi
+
 uv run --project "$WORK/code/robot-PointAct" --no-sync \
     python data_prep/robocasa365_to_lerobot/convert.py \
         --cache-dir "$CACHE_DIR" \
         --output-dir "$OUTPUT_DIR" \
         --repo-id "$TASK" \
+        ${EPISODES:+--episodes $EPISODES} \
+        ${OVERWRITE:+--overwrite} \
         ${POINT_LABELS:+--point-labels} \
         --image-writer-threads 12
 
