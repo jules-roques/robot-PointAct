@@ -16,8 +16,12 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=96
 #SBATCH --hint=nomultithread
-#SBATCH --qos=qos_gpu_h100-t4
-#SBATCH --time=100:00:00
+# t3/20h fits every cached-context run in this grid: 50K steps at 8192 points is ~8h on 4
+# H100s, and asking for 100h on t4 only buys a worse place in the queue. The live-VLM arms
+# are the exception at ~21.4h -- they exceed the t3 cap and must override at submit time:
+#   sbatch --qos=qos_gpu_h100-t4 --time=40:00:00 ...
+#SBATCH --qos=qos_gpu_h100-t3
+#SBATCH --time=20:00:00
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 
