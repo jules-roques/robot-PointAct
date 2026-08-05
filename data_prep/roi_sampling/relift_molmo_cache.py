@@ -34,42 +34,34 @@ from tqdm.auto import tqdm
 
 from pointact.roi_sampling import molmo_cache
 from data_prep.roi_sampling.build_molmo_cache import (
-    STATIC_VIEWS, VIEWS, anchor_from_pixel, apply_wrist, fuse, load_calib, read_meta,
-    read_episode_states, wrist_cam_at,
+    VIEWS, anchor_from_pixel, fuse, load_calib, read_meta,
 )
 
 msgpack_numpy.patch()
 
 
-def relift(cloud_xyz, pixels, cam_by, image_hw, window, min_in_window, agree_dist,
-           wrist_accept=0.15, require_agentview=True):
-    """One frame's stored detections -> new anchor dicts.
-
-    ``cam_by`` must already carry this frame's wrist camera when there is one; unlike the
-    agentviews its pose is frame-specific.
-    """
+def relift(cloud_xyz, pixels, cam_by, image_hw, window, min_in_window, agree_dist):
+    """One frame's stored detections -> new anchor dicts."""
     out = []
     for det in pixels:
         per_view, uvs = {}, {}
         for view in VIEWS:
             uv = det.get(f"{view}_uv")
-            cam = cam_by.get(view)
-            if uv is None or cam is None:
+            if uv is None:
                 continue
             uvs[view] = uv
-            got = anchor_from_pixel(cloud_xyz, cam, uv, image_hw, window, min_in_window)
+            got = anchor_from_pixel(cloud_xyz, cam_by[view], uv, image_hw,
+                                    window, min_in_window)
             if got is not None:
                 per_view[view] = got
         xyz, agreed = fuse(per_view, agree_dist)
-        xyz, used_wrist = apply_wrist(xyz, per_view, wrist_accept, require_agentview)
         out.append({
             "xyz": xyz if xyz is not None else np.full(3, np.nan),
             "query_id": det["query_id"],
             "n_support": sum(n for _, n in per_view.values()),
+            "left_uv": uvs.get("left"), "right_uv": uvs.get("right"),
             "agree": agreed,
-            "_both": sum(v in per_view for v in STATIC_VIEWS) == 2,
-            "_wrist": used_wrist,
-            **{f"{v}_uv": uvs.get(v) for v in VIEWS},
+            "_both": len(per_view) == 2,
         })
     return out
 
@@ -88,9 +80,6 @@ def main() -> None:
     ap.add_argument("--point-window", type=int, default=1)
     ap.add_argument("--min-in-window", type=int, default=1)
     ap.add_argument("--agree-dist", type=float, default=0.10)
-    ap.add_argument("--wrist-accept-dist", type=float, default=0.15)
-    ap.add_argument("--no-wrist", action="store_true")
-    ap.add_argument("--allow-lone-wrist", action="store_true")
     ap.add_argument("--stride", type=int, default=8)
     ap.add_argument("--max-episodes", type=int, default=None,
                     help="Evaluate on a subset; writing always covers everything.")
@@ -98,23 +87,10 @@ def main() -> None:
     args = ap.parse_args()
 
     d = args.dataset_dir.expanduser().resolve()
-    cams, image_hw, wrist_K, wrist_eef2cam = load_calib(
-        args.calib or d / "roi_meta" / "camera_calib.npz")
-    static_by = {c["name"]: c for c in cams}
+    cams, image_hw = load_calib(args.calib or d / "roi_meta" / "camera_calib.npz")
+    cam_by = {c["name"]: c for c in cams}
     lengths, _ = read_meta(d / "meta")
     episodes = sorted(lengths)
-    info = json.loads((d / "meta" / "info.json").read_text())
-    chunks_size = int(info.get("chunks_size", 1000))
-    states_cache: dict[int, np.ndarray] = {}
-
-    def cams_at(ep: int, f: int) -> dict:
-        """Agentviews plus, when calibrated, this frame's wrist camera."""
-        if wrist_K is None or args.no_wrist:
-            return static_by
-        if ep not in states_cache:
-            states_cache[ep] = read_episode_states(d, ep, chunks_size)
-        w = wrist_cam_at(states_cache[ep], f, wrist_K, wrist_eef2cam)
-        return dict(static_by, **({"wrist": w} if w else {}))
 
     pe = lmdb.open(str(d / args.points_dirname), readonly=True, lock=False, readahead=False)
     me = lmdb.open(str(d / args.in_dirname), readonly=True, lock=False, readahead=False)
@@ -161,10 +137,9 @@ def main() -> None:
         for win in windows:
             got = both = agreed = 0
             sup, errs = [], []
-            for ep, f, cloud, px, gt in samples:
-                res = relift(cloud, px, cams_at(ep, f), image_hw, win, args.min_in_window,
-                             args.agree_dist, args.wrist_accept_dist,
-                             not args.allow_lone_wrist)
+            for _, _, cloud, px, gt in samples:
+                res = relift(cloud, px, cam_by, image_hw, win, args.min_in_window,
+                             args.agree_dist)
                 for a in res:
                     if not np.isfinite(a["xyz"]).all():
                         continue
@@ -200,10 +175,8 @@ def main() -> None:
                             np.frombuffer(bytes(mb), dtype=molmo_cache.RECORD_DTYPE))
                         if px:
                             cloud = msgpack.unpackb(bytes(pb)).astype(np.float64)[:, :3]
-                            res = relift(cloud, px, cams_at(ep, f), image_hw,
-                                         args.point_window, args.min_in_window,
-                                         args.agree_dist, args.wrist_accept_dist,
-                                         not args.allow_lone_wrist)
+                            res = relift(cloud, px, cam_by, image_hw, args.point_window,
+                                         args.min_in_window, args.agree_dist)
                             rec = molmo_cache.encode_record(res)
                     blob = rec.tobytes()
                     end = key_frames[ki + 1] if ki + 1 < len(key_frames) else lengths[ep]

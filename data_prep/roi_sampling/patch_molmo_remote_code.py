@@ -46,8 +46,15 @@ def main() -> None:
 
     src = path.read_text()
     if GOOD in src:
-        print(f"already patched: {path}")
-    elif BAD in src:
+        # Nothing to invalidate, so leave the module cache alone. Clearing it here
+        # unconditionally is a race: transformers regenerates that directory on first load,
+        # and with several cache-build jobs starting together one job would rmtree it while
+        # another was midway through importing from it, giving
+        # "ModuleNotFoundError: No module named
+        # transformers_modules.MolmoPoint_hyphen_8B.image_processing_molmo2".
+        print(f"already patched: {path} (module cache left alone)")
+        return
+    if BAD in src:
         path.write_text(src.replace(BAD, GOOD))
         print(f"patched: {path}")
     else:

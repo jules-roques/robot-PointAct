@@ -35,7 +35,6 @@ from pathlib import Path
 
 import av
 import lmdb
-import pyarrow.parquet as pq
 import msgpack
 import msgpack_numpy
 import numpy as np
@@ -46,15 +45,7 @@ from pointact.roi_sampling.geometry import candidate_anchors
 
 msgpack_numpy.patch()
 
-#: Views Molmo points in. All three go into ONE request, so a frame costs one forward
-#: whatever the view count. "wrist" is the close-up: at grasp time the target fills far more
-#: of its frame than of the agentviews, which is what a small object needs.
-VIEWS = ("left", "right", "wrist")
-
-#: The agentviews are bolted to the robot base, so one base->cam serves every frame. The
-#: wrist camera rides on the end-effector, so its base->cam is rebuilt per frame from the
-#: recorded proprio and the constant eef2cam (see dump_camera_calib.py).
-STATIC_VIEWS = ("left", "right")
+VIEWS = ("left", "right")
 
 
 def opendrawer_queries(instruction: str) -> list[str]:
@@ -93,38 +84,10 @@ TASK_QUERIES = {
 }
 
 
-def load_calib(path: Path):
-    """(static cams, image_hw, wrist_K, wrist_eef2cam). wrist_* are None on old calibs."""
+def load_calib(path: Path) -> tuple[list[dict], tuple[int, int]]:
     d = np.load(path, allow_pickle=True)
-    cams = [{"name": v, "intrinsic": d[f"{v}_K"], "base2cam": d[f"{v}_base2cam"]}
-            for v in STATIC_VIEWS]
-    wk = d["wrist_K"] if "wrist_K" in d.files else None
-    we = d["wrist_eef2cam"] if "wrist_eef2cam" in d.files else None
-    return cams, tuple(int(x) for x in d["image_hw"]), wk, we
-
-
-def read_episode_states(dataset_dir: Path, ep: int, chunks_size: int) -> np.ndarray:
-    """(T, 16) proprio; [0:3] eef position and [3:7] eef xyzw quaternion, in the base frame."""
-    f = (dataset_dir / "data" / f"chunk-{ep // chunks_size:03d}"
-         / f"episode_{ep:06d}.parquet")
-    return np.stack(pq.read_table(str(f)).column("observation.state").to_pylist()).astype(np.float64)
-
-
-def wrist_cam_at(states: np.ndarray, t: int, wrist_K, eef2cam) -> dict | None:
-    """The wrist camera's base->cam at frame ``t``, from proprio alone.
-
-    ``base2cam(t) = eef2cam @ inv(T_base_eef(t))``. Validated end to end by projecting the
-    MuJoCo handle centroid into the wrist video: out of frame while the arm is home, then
-    on the handle with depth falling 0.56 -> 0.17 m as the gripper closes on it.
-    """
-    from scipy.spatial.transform import Rotation as R
-
-    if wrist_K is None or eef2cam is None or t >= len(states):
-        return None
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = R.from_quat(states[t, 3:7]).as_matrix()
-    T[:3, 3] = states[t, :3]
-    return {"name": "wrist", "intrinsic": wrist_K, "base2cam": eef2cam @ np.linalg.inv(T)}
+    cams = [{"name": v, "intrinsic": d[f"{v}_K"], "base2cam": d[f"{v}_base2cam"]} for v in VIEWS]
+    return cams, tuple(int(x) for x in d["image_hw"])
 
 
 def read_meta(meta_dir: Path) -> tuple[dict[int, int], dict[int, str]]:
@@ -166,13 +129,13 @@ def anchor_from_pixel(cloud_xyz, cam, uv, image_hw, window: int, min_in_window: 
 
 
 def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
-    """Combine the agentview anchors for one query.
+    """Combine the two views' anchors for one query.
 
     Agreeing views are averaged; disagreeing ones fall back to the better-supported view,
     since a disagreement means at least one of them lifted through an occluder and the
     midpoint of a right answer and a wrong one is simply a third wrong answer.
     """
-    got = [(v, a, n) for v, (a, n) in per_view.items() if v in STATIC_VIEWS]
+    got = [(v, a, n) for v, (a, n) in per_view.items()]
     if not got:
         return None, False
     if len(got) == 1:
@@ -181,26 +144,6 @@ def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
     if float(np.linalg.norm(a0 - a1)) <= agree_dist:
         return (a0 + a1) / 2.0, True
     return (a0 if n0 >= n1 else a1), False
-
-
-def apply_wrist(agentview, per_view, accept_dist: float, require_agentview: bool):
-    """Refine the agentview anchor with the wrist one. Returns (xyz, used_wrist).
-
-    The wrist camera is close to the target and therefore the most precise view when it can
-    see it -- but for much of an episode it CANNOT. At the start the arm is parked and the
-    target is out of frame entirely, and the model will still answer with something. So the
-    wrist is treated as a refinement that must be corroborated: it is adopted only when it
-    lands within ``accept_dist`` of what the agentviews already agreed on, and a wrist
-    anchor with no agentview to check it against is discarded by default.
-    """
-    w = per_view.get("wrist")
-    if w is None:
-        return agentview, False
-    if agentview is None:
-        return (None if require_agentview else w[0]), (not require_agentview)
-    if float(np.linalg.norm(w[0] - agentview)) <= accept_dist:
-        return w[0], True
-    return agentview, False
 
 
 def main() -> None:
@@ -231,15 +174,7 @@ def main() -> None:
     ap.add_argument("--min-in-window", type=int, default=1,
                     help="Fewer cloud points than this in the window -> no anchor.")
     ap.add_argument("--agree-dist", type=float, default=0.10,
-                    help="Metres; agentviews closer than this are averaged.")
-    ap.add_argument("--wrist-accept-dist", type=float, default=0.15,
-                    help="Metres; the wrist anchor is adopted only within this of the "
-                         "agentview one. Guards the episode start, where the target is out "
-                         "of the wrist's frame but the model answers anyway.")
-    ap.add_argument("--no-wrist", action="store_true",
-                    help="Point on the agentviews only (old two-view behaviour).")
-    ap.add_argument("--allow-lone-wrist", action="store_true",
-                    help="Accept a wrist anchor with no agentview to corroborate it.")
+                    help="Metres; views closer than this are averaged.")
     # 1 is not a placeholder: the checkpoint's remote code raises on any batch > 1 (see
     # MolmoPointer.point). Kept as a flag so a fixed upstream release can be exploited
     # without touching the builder.
@@ -261,13 +196,8 @@ def main() -> None:
     calib_path = args.calib or dataset_dir / "roi_meta" / "camera_calib.npz"
     if not calib_path.exists():
         raise SystemExit(f"no calibration at {calib_path} -- run dump_camera_calib.py first")
-    cams, image_hw, wrist_K, wrist_eef2cam = load_calib(calib_path)
+    cams, image_hw = load_calib(calib_path)
     cam_by_name = {c["name"]: c for c in cams}
-    use_wrist = (not args.no_wrist) and wrist_K is not None
-    if not args.no_wrist and wrist_K is None:
-        raise SystemExit(f"{calib_path} has no wrist calibration -- re-run "
-                         f"dump_camera_calib.py, or pass --no-wrist")
-    views = VIEWS if use_wrist else STATIC_VIEWS
 
     lengths, tasks = read_meta(dataset_dir / "meta")
     info = json.loads((dataset_dir / "meta" / "info.json").read_text())
@@ -295,9 +225,8 @@ def main() -> None:
     out_env = lmdb.open(str(out_dir), map_size=int(args.map_size_gb * (1024 ** 3)))
 
     stats = {"task": task, "episodes": len(episodes), "frames": 0, "pointed_frames": 0,
-             "queries": 0, "query_hits": 0, "view_hits": {v: 0 for v in views},
-             "agree": 0, "both_views": 0, "forwards": 0,
-             "wrist_lifted": 0, "wrist_adopted": 0, "wrist_rejected": 0}
+             "queries": 0, "query_hits": 0, "view_hits": {"left": 0, "right": 0},
+             "agree": 0, "both_views": 0, "forwards": 0}
     t0 = time.time()
 
     def video_path(view: str, ep: int) -> Path:
@@ -307,9 +236,8 @@ def main() -> None:
     with points_env.begin(buffers=True) as ptxn:
         for ep in tqdm(episodes, desc="episodes", unit="ep"):
             n = lengths[ep]
-            frames = {v: decode_video(video_path(v, ep)) for v in views}
-            n_use = min(n, *(len(frames[v]) for v in views))
-            states = read_episode_states(dataset_dir, ep, chunks_size) if use_wrist else None
+            frames = {v: decode_video(video_path(v, ep)) for v in VIEWS}
+            n_use = min(n, *(len(frames[v]) for v in VIEWS))
             queries = queries_for(tasks.get(ep, ""))
             key_frames = list(range(0, n_use, args.stride))
 
@@ -319,7 +247,7 @@ def main() -> None:
             dets: dict[tuple[int, int], list] = {}
             for s in range(0, len(reqs), args.batch):
                 chunk = reqs[s:s + args.batch]
-                image_sets = [[frames[v][f] for v in views] for f, _ in chunk]
+                image_sets = [[frames[v][f] for v in VIEWS] for f, _ in chunk]
                 prompts = [queries[qi] for _, qi in chunk]
                 out = pointer.point(image_sets, prompts)
                 stats["forwards"] += len(chunk)
@@ -332,38 +260,26 @@ def main() -> None:
                     buf = ptxn.get(f"{ep}-{f}".encode("ascii"))
                     cloud_xyz = (msgpack.unpackb(bytes(buf))[:, :3].astype(np.float64)
                                  if buf is not None else None)
-                    # The wrist camera's pose is frame-specific; the agentviews' are not.
-                    wcam = wrist_cam_at(states, f, wrist_K, wrist_eef2cam) if use_wrist else None
-                    cams_now = dict(cam_by_name, **({"wrist": wcam} if wcam else {}))
-
                     anchors = []
                     for qi in range(len(queries)):
                         per_view, uvs = {}, {}
                         for d in dets.get((f, qi), []):
-                            view = views[d.image_num] if d.image_num < len(views) else None
-                            if view is None or view in uvs:
+                            view = VIEWS[d.image_num] if d.image_num < len(VIEWS) else None
+                            if view is None or view in per_view:
                                 continue  # first point per view; extras are other instances
                             uvs[view] = (d.x, d.y)
                             stats["view_hits"][view] += 1
-                            cam = cams_now.get(view)
-                            if cloud_xyz is None or cam is None:
+                            if cloud_xyz is None:
                                 continue
-                            got = anchor_from_pixel(cloud_xyz, cam, (d.x, d.y),
+                            got = anchor_from_pixel(cloud_xyz, cam_by_name[view], (d.x, d.y),
                                                     image_hw, args.point_window,
                                                     args.min_in_window)
                             if got is not None:
                                 per_view[view] = got
                         stats["queries"] += 1
-                        if sum(v in per_view for v in STATIC_VIEWS) == 2:
+                        if len(per_view) == 2:
                             stats["both_views"] += 1
                         xyz, agreed = fuse(per_view, args.agree_dist)
-                        if "wrist" in per_view:
-                            stats["wrist_lifted"] += 1
-                        xyz, used_wrist = apply_wrist(
-                            xyz, per_view, args.wrist_accept_dist,
-                            require_agentview=not args.allow_lone_wrist)
-                        if "wrist" in per_view:
-                            stats["wrist_adopted" if used_wrist else "wrist_rejected"] += 1
                         # Record the slot even when nothing lifted, with a NaN anchor. The
                         # pixels are the expensive half (0.7 s of an 8B model); the lift is
                         # 1.7 ms of geometry. Dropping the pixels on failure meant the frames
@@ -380,8 +296,8 @@ def main() -> None:
                             "xyz": xyz if xyz is not None else np.full(3, np.nan),
                             "query_id": qi,
                             "n_support": sum(n for _, n in per_view.values()),
+                            "left_uv": uvs.get("left"), "right_uv": uvs.get("right"),
                             "agree": agreed,
-                            **{f"{v}_uv": uvs.get(v) for v in VIEWS},
                         })
 
                     rec = (molmo_cache.encode_record(anchors) if anchors
@@ -402,8 +318,6 @@ def main() -> None:
     stats["query_hit_rate"] = round(stats["query_hits"] / max(1, stats["queries"]), 4)
     stats["agree_rate"] = round(stats["agree"] / max(1, stats["both_views"]), 4)
     stats["frame_cover"] = round(stats["pointed_frames"] / max(1, stats["frames"]), 4)
-    stats["wrist_adopt_rate"] = round(
-        stats["wrist_adopted"] / max(1, stats["wrist_lifted"]), 4)
     print(json.dumps(stats, indent=2, default=str))
 
     meta_out = dataset_dir / "roi_meta"
