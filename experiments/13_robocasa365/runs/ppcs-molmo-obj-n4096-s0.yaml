@@ -1,0 +1,30 @@
+# PickPlaceCounterToStove / MolmoPoint anchor, object only / 4096 points -- stage 3.
+# Sampling density centred on the apple alone. Pairs with ppcs-molmo-objpan, which spends
+# the same budget across the apple and the pan: the two differ ONLY in molmo_anchor_ids, so
+# they isolate whether naming the destination as well as the object is worth the split.
+#
+# Strongest detection of the three tasks on the stage-3.0 gate. 87.0% of queries got an
+# anchor; misses fall back to a uniform draw.
+extends: _base.yaml
+
+meta:
+  task: PickPlaceCounterToStove
+  sampling: molmo-obj
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 3: MolmoPoint anchor"
+
+data:
+  lerobot_datasets:
+    - repo_id: PickPlaceCounterToStove
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo
+      # Query 0 = the object ("Point to the apple."). Query 1 (the pan) is cached but
+      # deliberately not read here.
+      molmo_anchor_ids: [0]
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05

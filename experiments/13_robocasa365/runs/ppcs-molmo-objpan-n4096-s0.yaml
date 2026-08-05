@@ -1,0 +1,34 @@
+# PickPlaceCounterToStove / MolmoPoint anchor, object + pan / 4096 points -- stage 3.
+# The budget is spread over two anchors: the apple and the pan it goes into. This matters
+# because the task is a transport: half the episode is spent near the pan, not the apple.
+#
+# The pair does NOT isolate one variable, and it is worth knowing which two move together.
+# Measured over the first 60 episodes at the cache's stride, reading query 0 alone finds an
+# anchor on 78.6% of frames, while reading both finds one on 99.8% (mean 1.79 anchors per
+# frame). So this arm differs from ppcs-molmo-obj in two ways at once: where the budget goes,
+# AND how often any anchor exists at all -- when the apple is missed, the pan is usually
+# still found, which all but removes the uniform-fallback frames. A gain here is therefore
+# "naming the destination too", not "anchoring on the pan specifically".
+extends: _base.yaml
+
+meta:
+  task: PickPlaceCounterToStove
+  sampling: molmo-objpan
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 3: MolmoPoint anchor"
+
+data:
+  lerobot_datasets:
+    - repo_id: PickPlaceCounterToStove
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo
+      # Query 0 = "Point to the apple.", query 1 = "Point to the pan." Reading both is the
+      # whole difference from the obj-only arm; no cache rebuild is involved.
+      molmo_anchor_ids: [0, 1]
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05

@@ -1,0 +1,45 @@
+# TurnOnMicrowave / MolmoPoint anchor / 4096 points -- stage 3.
+#
+# READ THIS BEFORE INTERPRETING THE RESULT. This arm is the detector-limited case, and it
+# was launched knowing that. Reviewing the stage-3.0 gate viz on 2026-08-06, the start
+# button is small and sits among several near-identical buttons, and MolmoPoint frequently
+# points at a different one or at nothing at all. 16.4% of queries got no anchor and fall
+# back to a uniform draw; of those that did, only 38.5% had both agentviews agreeing within
+# 10 cm.
+#
+# It is trained anyway, deliberately: the ToM uniform and eef arms are being trained
+# regardless, and dropping only the anchor arm on the one task where the detector struggles
+# would filter the task set to where the method works. With sigma 0.08, a 0.05 floor and a
+# uniform fallback on misses, the expected result is at or slightly below uniform -- which
+# is the graceful-degradation claim, not a null.
+#
+# Two candidate explanations for a weak result here, so read it against tom-uniform and
+# tom-eef at the same step count: bad anchors, and over-exposure -- 50K steps is ~88.5
+# epochs on this task against ~51 on the other two (measured frame counts, not the docs).
+#
+# The query is deliberately UNCHANGED from the one the cache was built with. Rewriting only
+# the task that failed, after seeing that it failed, is post-hoc selection; if the query is
+# ever revisited, one stated rule gets applied to all three tasks and all three caches are
+# rebuilt (~11 GPU-h).
+extends: _base.yaml
+
+meta:
+  task: TurnOnMicrowave
+  sampling: molmo
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 3: MolmoPoint anchor"
+
+data:
+  lerobot_datasets:
+    - repo_id: TurnOnMicrowave
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/TurnOnMicrowave/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo
+      # One query: "Point to the start button on the microwave."
+      molmo_anchor_ids: [0]
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05

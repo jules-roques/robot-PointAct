@@ -1,0 +1,29 @@
+# OpenDrawer / MolmoPoint anchor / 4096 points -- stage 3.
+# Same Gaussian-with-floor density as the eef and oracle arms, centred on a frozen
+# MolmoPoint-8B detection read from the anchor cache. The deployable counterpart to
+# od-anchor (which centres on the MuJoCo ground truth and is privileged).
+#
+# Frames the pointer missed fall back to a uniform draw, so this arm is bounded between
+# uniform and a Gaussian on whatever the detector found. Gate: 94.8% of queries got an
+# anchor on this task.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: molmo
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 3: MolmoPoint anchor"
+
+data:
+  lerobot_datasets:
+    - max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo
+      # One query on this task: "Point to the handle of the left/right drawer."
+      molmo_anchor_ids: [0]
+      # Sigma/floor match the eef and oracle arms exactly, so the arms differ only in where
+      # the density bump is centred.
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05
