@@ -166,17 +166,30 @@ def leg_doc(ref, max_chars):
         print('  SKIP  no doc id configured (set doc_id in .claude/skills/diary/config.json,')
         print('        or pass --doc <url>). Preferred path is the Drive MCP connector.')
         return
+    # Hit the REST endpoint through an AuthorizedSession rather than the google-api-python
+    # -client. That client is built on httplib2, which ignores http_proxy/https_proxy here
+    # and simply times out on Jean Zay; AuthorizedSession subclasses requests.Session, which
+    # honours the IDRIS proxy -- the same reason gspread works.
     try:
         from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
+        from google.auth.transport.requests import AuthorizedSession
         creds = Credentials.from_service_account_file(
             resolve_key(), scopes=['https://www.googleapis.com/auth/documents.readonly'])
-        doc = build('docs', 'v1', credentials=creds).documents().get(documentId=did).execute()
+        r = AuthorizedSession(creds).get(
+            f'https://docs.googleapis.com/v1/documents/{did}', timeout=60)
     except Exception as e:
-        warn('doc', e)
-        print('        -> fall back to the Drive MCP connector, or share the doc with the')
-        print('           service account and enable the Docs API on the GCP project.')
+        return warn('doc', e)
+
+    if r.status_code != 200:
+        detail = r.json().get('error', {}).get('message', r.text[:200]) if r.text else ''
+        print(f'  WARN  doc unreachable: HTTP {r.status_code} -- {detail}')
+        if r.status_code == 403:
+            print('        -> enable the Docs API on the GCP project, and share the doc')
+            print(f'           with the service account as Viewer.')
+        elif r.status_code == 404:
+            print('        -> wrong id, or the doc is not shared with the service account.')
         return
+    doc = r.json()
 
     out = []
     for el in doc.get('body', {}).get('content', []):
