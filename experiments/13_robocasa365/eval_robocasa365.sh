@@ -133,6 +133,24 @@ except Exception:
         elif grep -qiE '^\s*eef_sampling:\s*true' "$DATA_CFG"; then
             POINT_SAMPLING=eef
         else
+            # "uniform" must be a positive finding, not the leftover case. Listing only the
+            # arms we know how to reproduce at eval time made this an open-world assumption:
+            # `molmo_sampling: true` matched neither branch above and fell through to uniform,
+            # so all four stage-3 arms were trained on MolmoPoint-centred clouds and then
+            # evaluated on uniform ones -- exactly the mismatch the block below calls fatal,
+            # arrived at silently. Any *_sampling knob we do not have an eval-time producer
+            # for is now an error, so the next arm added to the dataloader cannot repeat it.
+            UNKNOWN=$(grep -oiE '^\s*[a-z0-9_]+_sampling:\s*true' "$DATA_CFG" \
+                      | grep -oiE '[a-z0-9_]+_sampling' \
+                      | grep -viE '^(oracle|eef)_sampling$' | sort -u | tr '\n' ' ')
+            if [ -n "$UNKNOWN" ]; then
+                echo "ERROR: ${DATA_CFG} enables a sampling arm this script cannot reproduce" >&2
+                echo "  at eval time: ${UNKNOWN}" >&2
+                echo "  Evaluating it as 'uniform' is a train/test mismatch that reads as a" >&2
+                echo "  plausible but wrong success rate. Add an anchor producer for it, or" >&2
+                echo "  pass POINT_SAMPLING=... explicitly if you really mean to mismatch." >&2
+                exit 1
+            fi
             POINT_SAMPLING=uniform
         fi
         echo "derived point_sampling=${POINT_SAMPLING} from ${DATA_CFG}"
