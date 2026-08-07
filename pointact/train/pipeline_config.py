@@ -153,6 +153,7 @@ class TrainPipelineConfig(TrainingArguments):
     exp_context: str | None = field(default=None)  # vlm, text_cache
     exp_seed: int | None = field(default=None)
     exp_stage: str | None = field(default=None)  # A (npoints sweep), B (task transfer)
+    exp_voxel: float | None = field(default=None)  # metres; None means the 1 cm default
 
     def __post_init__(self):
         super().__post_init__()

@@ -1,6 +1,7 @@
 import hashlib
 import os
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import yaml
@@ -74,6 +75,20 @@ def _parse_run_yaml(
     granted while everything scientific stays in the (version-controlled) yaml.
     """
     meta, data, train = resolve_run_config(path)
+
+    # set_defaults happily accepts a key no dataclass field claims. HfArgumentParser then
+    # returns the leftover namespace as an *extra* output, and the only symptom is
+    # "too many values to unpack" from the line below -- five minutes into a 4-GPU job, with
+    # nothing naming the key at fault. Adding a meta -> exp_* mapping without the matching
+    # field is exactly how that happens, so check it here where the names are still in hand.
+    known = {f.name for f in fields(TrainPipelineConfig) if f.init}
+    unknown = sorted(set(train) - known)
+    if unknown:
+        raise ValueError(
+            f"{path}: no TrainPipelineConfig field for {unknown}. A run yaml's train block "
+            "and META_TO_EXP_FIELD targets must both name real fields."
+        )
+
     parser.set_defaults(**train)
     (training_args,) = parser.parse_args_into_dataclasses(args=list(overrides or []))
     training_args.run_config_path = path
