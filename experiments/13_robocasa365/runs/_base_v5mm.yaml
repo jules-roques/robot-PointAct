@@ -1,4 +1,4 @@
-# Shared settings for the 5 mm voxel arm -- stage 4.
+# Shared settings for the 5 mm voxel arm -- stage 1 bis.
 #
 # Stage 1 found the point-count axis flat, and the voxel probe explained why: at a 1 cm grid
 # the eef draw already takes 97% of everything within one sigma of the gripper, so a bigger

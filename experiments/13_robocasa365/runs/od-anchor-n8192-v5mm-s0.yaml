@@ -1,4 +1,4 @@
-# OpenDrawer / anchor / 8192 points / 5 mm voxel -- stage 4.
+# OpenDrawer / anchor / 8192 points / 5 mm voxel -- stage 1 bis.
 # Oracle/anchor sampling: same density, centred on the ground-truth handle from MuJoCo
 # segmentation. Privileged info -- an upper bound, not a deployable policy.
 #
@@ -14,7 +14,7 @@ meta:
   voxel: 0.005
   context: text_cache
   seed: 0
-  stage: "Stage 4: Voxel size"
+  stage: "Stage 1 bis: voxel size side-study"
 
 data:
   lerobot_datasets:
