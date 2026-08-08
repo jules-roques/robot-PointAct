@@ -54,4 +54,34 @@ if ! ls "$DEST"/*.safetensors >/dev/null 2>&1; then
     exit 1
 fi
 
+# The base LLM tokenizer, which is NOT part of this repo. `config.yaml` names it as
+# `llm.tokenizer.identifier: Qwen/Qwen3-4B-Instruct-2507`, and the processor resolves it
+# through AutoTokenizer *by hub id* -- so despite the checkpoint shipping its own
+# tokenizer.json, loading it on a compute node dies with "We couldn't connect to
+# huggingface.co". Cached here by id (no --local-dir, so it lands in the hub cache layout)
+# and found offline afterwards. Observed as a failed gate job before this was added.
+TOKENIZER_ID="${TOKENIZER_ID:-$(grep -A1 '^    tokenizer:' "$DEST/config.yaml" \
+                               | grep 'identifier:' | awk '{print $2}')}"
+if [ -z "$TOKENIZER_ID" ]; then
+    echo "ERROR: could not read llm.tokenizer.identifier from $DEST/config.yaml" >&2
+    exit 1
+fi
+echo "--- caching base tokenizer $TOKENIZER_ID ---"
+"$HF" download "$TOKENIZER_ID" \
+    tokenizer.json tokenizer_config.json vocab.json merges.txt \
+    special_tokens_map.json added_tokens.json config.json generation_config.json \
+    || echo "WARNING: some tokenizer files are absent from $TOKENIZER_ID; the ones that
+matter are whichever AutoTokenizer resolves, verified by the offline check below."
+
+# Prove it loads with the network closed, which is the only check that matches what a
+# compute node will do.
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    "${MOLMO_MOTION_VENV:-$SCRATCH/venvs/molmo_motion}/bin/python" - "$DEST" <<'PY'
+import sys
+from molmo_motion import MolmoMotionProcessor
+p = MolmoMotionProcessor.from_pretrained(sys.argv[1])
+print(f"offline processor load OK: num_points={p.config.num_points} "
+      f"history_size={p.config.history_size}")
+PY
+
 echo "OK"

@@ -39,6 +39,14 @@ which is most of what makes the forecast useful here.
 
 Compute nodes have no internet, so this must complete before any job starts.
 
+The job also caches the **base LLM tokenizer**, which is a separate hub repo
+(`Qwen/Qwen3-4B-Instruct-2507`, named by `config.yaml` as `llm.tokenizer.identifier`). The
+checkpoint ships its own `tokenizer.json`, but the processor resolves the tokenizer *by hub
+id* through `AutoTokenizer`, so without that cache a compute node dies at
+`MolmoMotionProcessor.from_pretrained` with "We couldn't connect to huggingface.co" — the
+weights being present locally is not enough. The download job ends by loading the processor
+with `HF_HUB_OFFLINE=1` to prove it.
+
 ## Run
 
 ```bash

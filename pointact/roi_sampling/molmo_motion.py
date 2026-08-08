@@ -27,6 +27,11 @@ Three properties of the checkpoint drive the design here, all confirmed against
   perfectly plausible 3D point somewhere in the room. It has to be detected explicitly, and
   it is not hypothetical: the token budget is ``160 * future_horizon`` (4,800 at F=30) while
   ``max_sequence_length`` is 2,560, so a long horizon at P=8 can be truncated mid-block.
+* **The base tokenizer is a separate hub repo.** ``config.yaml`` names it as
+  ``llm.tokenizer.identifier: Qwen/Qwen3-4B-Instruct-2507`` and the processor resolves it
+  through ``AutoTokenizer`` *by id*, so the checkpoint shipping its own ``tokenizer.json``
+  does not make it loadable offline. It must be in the hub cache before any compute-node job
+  starts (``download_molmo_motion.slurm`` does this and proves it with an offline load).
 * **History frames carry no timestamps.** The processor builds them as
   ``np.arange(H) * 1.0``, so the model has no way to be told our 20 fps differs from the
   15 fps it was trained at. The self-consistent reading is that output step ``f`` lands one
@@ -153,12 +158,14 @@ class MolmoMotionForecaster:
             future_horizon=h,
         )
         inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        # The processor already emits `future_horizon` in its dict, so passing it again as a
+        # keyword is a TypeError. Set it rather than trusting it through: `predict_trajectory`
+        # uses this value for the token budget *and* to truncate the parsed tensor, while the
+        # processor only writes it into the prompt string, and the two disagreeing would show
+        # up as a quietly short trajectory rather than an error.
+        inputs["future_horizon"] = h
         with torch.inference_mode(), torch.autocast(self.device, dtype=torch.bfloat16):
-            # future_horizon must be passed here as well as to the processor: the processor
-            # only writes it into the prompt string, while this call uses it for the token
-            # budget *and* to truncate the parsed tensor. Omitting it silently falls back to
-            # the signature default of 32, not to the value the prompt asked for.
-            out = self.model.predict_trajectory(**inputs, future_horizon=h)
+            out = self.model.predict_trajectory(**inputs)
 
         traj = np.asarray(out.future_3d.float().cpu().numpy(), dtype=np.float64)  # (P, F, 3)
         if traj.size == 0 or not np.any(traj):
