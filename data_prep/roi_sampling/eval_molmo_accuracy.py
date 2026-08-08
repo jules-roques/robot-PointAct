@@ -224,6 +224,11 @@ def main() -> None:
     px_err = {v: [] for v in VIEWS}
     px_gt_visible = {v: 0 for v in VIEWS}
     px_pointed = {v: 0 for v in VIEWS}
+    # Same pixel errors, split by whether that call's lift produced an anchor. This is what
+    # separates "the lift failed because the geometry was missing" (pixel is on target, no
+    # cloud support) from "the lift failed because the model pointed at the background"
+    # (pixel is far from GT, and any depth-based lift would return a confident wrong anchor).
+    px_err_by_lift = {v: {"anchored": [], "no_lift": []} for v in VIEWS}
     jitter_anchor: list[float] = []
     jitter_gt: list[float] = []
     no_gt = 0
@@ -305,7 +310,10 @@ def main() -> None:
                             continue
                         px_pointed[view] += 1
                         if visible:
-                            px_err[view].append(float(np.linalg.norm(np.asarray(uv) - proj[0])))
+                            e = float(np.linalg.norm(np.asarray(uv) - proj[0]))
+                            px_err[view].append(e)
+                            lifted = np.isfinite(det["xyz"]).all()
+                            px_err_by_lift[view]["anchored" if lifted else "no_lift"].append(e)
 
     me.close(); pe.close()
     if le:
@@ -362,6 +370,12 @@ def main() -> None:
                            unit="px", scale=1.0, thresholds=PX_THRESHOLDS),
                 "gt_visible_frames": px_gt_visible[v], "pointed_frames": px_pointed[v]}
             for v in VIEWS
+        }
+        report["error_2d_px_by_lift"] = {
+            v: {outcome: describe(np.asarray(vals) if vals else np.array([]),
+                                  unit="px", scale=1.0, thresholds=PX_THRESHOLDS)
+                for outcome, vals in by.items()}
+            for v, by in px_err_by_lift.items()
         }
 
     if jitter_anchor:
