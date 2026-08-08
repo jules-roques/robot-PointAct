@@ -47,12 +47,8 @@ from pathlib import Path
 
 import numpy as np
 
-from data_prep.robocasa365_to_lerobot.replay import (
-    convert_env_action_to_dataset_action,
-    load_source_actions,
-    reorder_source_action_to_env,
-)
-from pointact.robot_envs.robocasa365_utils.environments import RoboCasa365Env
+# The simulator imports live inside the functions that need them: --merge and the summary
+# are pure numpy, and they run in the root env, which has no MuJoCo.
 
 #: task -> {output name: how to find the geoms whose mean xpos is that position}.
 #:
@@ -182,6 +178,11 @@ def dump_episode(env, source_dir: Path, episode_index: int, sets: dict, fixture_
         record()
         return {name: np.stack(v, axis=0) for name, v in rows.items()}
 
+    from data_prep.robocasa365_to_lerobot.replay import (
+        convert_env_action_to_dataset_action, load_source_actions,
+        reorder_source_action_to_env,
+    )
+
     actions = load_source_actions(source_dir, episode_index)["actions_lerobot"]
     action_envs = np.stack([reorder_source_action_to_env(a) for a in actions], axis=0)
     if max_frames is not None:
@@ -304,6 +305,8 @@ def main() -> None:
         episodes = episodes[: args.max_episodes]
     print(f"task={args.task} episodes={len(episodes)} "
           f"[{episodes[0] if episodes else '-'}..{episodes[-1] if episodes else '-'}]")
+
+    from pointact.robot_envs.robocasa365_utils.environments import RoboCasa365Env
 
     env = RoboCasa365Env(
         env_name=infer_env_name(source_dir),

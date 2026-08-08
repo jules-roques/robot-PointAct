@@ -34,7 +34,8 @@ DATA_ROOT="${DATA_ROOT:-$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_l
 DATASET="$DATA_ROOT/$TASK"
 OUT="${OUT:-$DATASET/roi_meta/molmo_accuracy.json}"
 
-ARGS=(--dataset-dir "$DATASET" --out "$OUT")
+ARGS=(--dataset-dir "$DATASET" --out "$OUT"
+      --dump-rows "$DATASET/roi_meta/molmo_accuracy_rows.npz")
 case "$TASK" in
     OpenDrawer)
         ARGS+=(--gt labels)

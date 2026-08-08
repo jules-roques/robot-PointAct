@@ -53,6 +53,8 @@ import msgpack_numpy
 import numpy as np
 from tqdm.auto import tqdm
 
+from data_prep.robocasa365_to_lerobot.episode_index_map import MAP_NAME
+from data_prep.robocasa365_to_lerobot.episode_index_map import load_map as load_episode_map
 from data_prep.roi_sampling.build_molmo_cache import (
     VIEWS, load_calib, read_episode_states, read_meta, wrist_cam_at,
 )
@@ -103,8 +105,14 @@ def describe(errs: np.ndarray, unit: str = "cm", scale: float = 100.0,
     return out
 
 
-def load_gt_geom(path: Path, target: str, distractors: list[str]):
+def load_gt_geom(path: Path, target: str, distractors: list[str],
+                 converted_to_source: dict[int, int] | None = None):
     """``lookup(name, ep, frame) -> xyz | None`` over a target-position dump.
+
+    ``ep`` is a **converted** episode index, because that is what the anchor cache is keyed
+    by. The dump is indexed by *source* episode, and on OpenDrawer the two differ -- 18 failed
+    replays were dropped and the rest renumbered. ``converted_to_source`` bridges them; pass
+    None only when a verified map says the two are the identity.
 
     An episode dumped with ``--reset-only`` has a single row, because its target does not
     move; that row answers for every frame of the episode. Anything else is indexed per
@@ -127,7 +135,10 @@ def load_gt_geom(path: Path, target: str, distractors: list[str]):
         static[ep] = int((eps == ep).sum()) == 1
 
     def lookup(name: str, ep: int, frame: int):
-        got = tables[name].get((ep, 0 if static.get(ep) else frame))
+        src = ep if converted_to_source is None else converted_to_source.get(ep)
+        if src is None:
+            return None
+        got = tables[name].get((src, 0 if static.get(src) else frame))
         return None if got is None else np.asarray(got, dtype=np.float64)
 
     return lookup, [target, *distractors]
@@ -152,6 +163,10 @@ def main() -> None:
     ap.add_argument("--calib", type=Path, default=None)
     ap.add_argument("--no-pixels", action="store_true", help="Skip the 2D reprojection leg.")
     ap.add_argument("--out", type=Path, default=None, help="Write the full report as JSON.")
+    ap.add_argument("--dump-rows", type=Path, default=None,
+                    help="Write per-anchor rows (episode, frame, error, phase, agreement) as "
+                         "npz. The summary hides the shape of the distribution, and on these "
+                         "tasks the shape is the finding.")
     args = ap.parse_args()
 
     d = args.dataset_dir.expanduser().resolve()
@@ -167,9 +182,18 @@ def main() -> None:
     if args.gt == "geom":
         if not args.target:
             raise SystemExit("--gt geom needs --target")
+        # A target-position dump is indexed by source episode. Refusing to guess: without a
+        # verified map, a task whose conversion dropped episodes would join every row to the
+        # wrong episode and still produce plausible-looking numbers.
+        emap = load_episode_map(d)
+        if emap is None:
+            raise SystemExit(
+                f"--gt geom needs {d / 'meta' / MAP_NAME} to join source-indexed ground truth "
+                f"to converted episodes; build it with "
+                f"`python -m data_prep.robocasa365_to_lerobot.episode_index_map`")
         gt_lookup, _names = load_gt_geom(
             args.gt_npz or d / "roi_meta" / "target_positions.npz",
-            args.target, distractors)
+            args.target, distractors, converted_to_source=emap)
 
     cams, image_hw, wrist_K, wrist_eef2cam = load_calib(
         args.calib or d / "roi_meta" / "camera_calib.npz")
@@ -382,6 +406,16 @@ def main() -> None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2))
         print(f"\nwrote {args.out}")
+
+    if args.dump_rows and rows:
+        args.dump_rows.parent.mkdir(parents=True, exist_ok=True)
+        cols = {k: np.array([r[k] for r in rows])
+                for k in ("ep", "frame", "err", "agree", "n_support", "phase")}
+        for name in distractors:
+            key = f"d_{name}"
+            cols[key] = np.array([r.get(key, np.nan) for r in rows])
+        np.savez(args.dump_rows, **cols)
+        print(f"wrote {args.dump_rows} ({len(rows)} rows)")
 
 
 if __name__ == "__main__":
