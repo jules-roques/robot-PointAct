@@ -167,6 +167,11 @@ class MolmoMotionForecaster:
         with torch.inference_mode(), torch.autocast(self.device, dtype=torch.bfloat16):
             out = self.model.predict_trajectory(**inputs)
 
+        #: Raw ``<tracks>`` text of the most recent call. Kept for profiling and for
+        #: debugging a parse failure, which is otherwise indistinguishable from a
+        #: prediction of zeros.
+        self.last_future_text = getattr(out, "future_text", "")
+
         traj = np.asarray(out.future_3d.float().cpu().numpy(), dtype=np.float64)  # (P, F, 3)
         if traj.size == 0 or not np.any(traj):
             logger.warning("MolmoMotion emitted no parseable tracks (text=%.120r)",
