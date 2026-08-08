@@ -70,13 +70,22 @@ def load_episode_map(dataset_dir: Path) -> dict[int, int]:
     return emap
 
 
-def depth_anchor_from_pixel(points_hw3: np.ndarray, uv, window: int) -> tuple[np.ndarray, int]:
+def depth_anchor_from_pixel(points_hw3: np.ndarray, uv, window: int,
+                            cam_origin: np.ndarray | None = None,
+                            surface_tol: float = 0.03) -> tuple[np.ndarray, int]:
     """Lift one pixel from the organised per-pixel cloud. Returns (xyz | None, n_valid).
 
-    The window exists only to survive invalid depth, not to gather support: at wrist range it
-    spans about 3 mm, so every pixel in it is on the same surface and the median is the
-    surface. Invalid pixels are dropped rather than allowed to drag the median, which is the
-    property the original cloud lift was really buying -- and it is kept here.
+    The window exists to survive invalid depth, not to gather support. Invalid pixels are
+    dropped rather than allowed to drag the median, which is the property the original cloud
+    lift was really buying -- and it is kept here.
+
+    ``cam_origin`` selects an alternative estimator: keep only the pixels within
+    ``surface_tol`` of the nearest one, then median those. It was written to test the theory
+    that the window straddles a thin target (a drawer handle) and its median lands on the room
+    behind it. **The theory was wrong and the estimator is worse** -- on an OpenDrawer smoke it
+    turned 1.7 cm calls into 48.7 cm, and it did not rescue the calls where the plain median
+    was already 99 cm off (both estimators agree there, so those are pointing failures, not
+    lifting ones). Kept only so the next person does not re-derive it; default is None.
     """
     h, w = points_hw3.shape[:2]
     x, y = int(round(float(uv[0]))), int(round(float(uv[1])))
@@ -88,7 +97,31 @@ def depth_anchor_from_pixel(points_hw3: np.ndarray, uv, window: int) -> tuple[np
     valid = np.isfinite(patch).all(axis=1) & (np.abs(patch).sum(axis=1) > 0)
     if not valid.any():
         return None, 0
-    return np.median(patch[valid], axis=0), int(valid.sum())
+    pts = patch[valid]
+    if cam_origin is None:
+        return np.median(pts, axis=0), int(len(pts))
+    rng = np.linalg.norm(pts - np.asarray(cam_origin).reshape(1, 3), axis=1)
+    near = rng <= rng.min() + surface_tol
+    return np.median(pts[near], axis=0), int(near.sum())
+
+
+def camera_origins(env, obs) -> dict[str, np.ndarray]:
+    """Each view's camera centre in the robot-base frame, at the current sim state.
+
+    The wrist camera rides on the arm, so this has to be read per frame rather than from the
+    stored calibration. Reuses the same extrinsic convention as ``dump_camera_calib``.
+    """
+    from pointact.roi_sampling.geometry import base2cam_from_extrinsic
+    from data_prep.roi_sampling.dump_camera_calib import LEFT_CAM, RIGHT_CAM, WRIST_CAM
+
+    base_pos = np.asarray(obs["state.base_position"], dtype=np.float64).reshape(3)
+    base_quat = np.asarray(obs["state.base_rotation"], dtype=np.float64).reshape(4)
+    out = {}
+    for tag, cam in (("left", LEFT_CAM), ("right", RIGHT_CAM), ("wrist", WRIST_CAM)):
+        _intrinsic, extrinsic = env._get_camera_matrices(cam)
+        b2c = base2cam_from_extrinsic(extrinsic, base_pos, base_quat)
+        out[tag] = (np.linalg.inv(b2c))[:3, 3]
+    return out
 
 
 def in_workspace(xyz: np.ndarray, workspace: dict) -> bool:
@@ -166,7 +199,8 @@ def load_pixels_npz(path: Path) -> dict[int, dict]:
 
 def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: int,
                  workspace: dict, agree_dist: float, wrist_accept: float,
-                 require_agentview: bool, max_frames: int | None) -> dict:
+                 require_agentview: bool, max_frames: int | None,
+                 surface_tol: float = 0.03) -> dict:
     """Replay one episode and re-lift every stored key frame from per-pixel depth."""
     from pointact.roi_sampling.molmo_anchors import VIEWS, apply_wrist, fuse
     from data_prep.robocasa365_to_lerobot.replay import (
@@ -189,23 +223,32 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
 
     def lift_now(f: int) -> None:
         clouds = {v: obs.get(f"observation.points.{v}") for v in VIEWS}
+        origins = camera_origins(env, obs)
         anchors = []
         for det in frames[f]:
-            per_view: dict[str, tuple[np.ndarray, int]] = {}
-            for v in VIEWS:
-                uv, cloud = det.get(f"{v}_uv"), clouds.get(v)
-                if uv is None or cloud is None:
-                    continue
-                xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, window)
-                if xyz is not None and in_workspace(xyz, workspace):
-                    per_view[v] = (xyz, n)
-            xyz, agreed = fuse(per_view, agree_dist)
-            xyz, _used = apply_wrist(xyz, per_view, wrist_accept, require_agentview)
+            # Both estimators come out of the same replay: the GPU cost is the render, so
+            # answering "median or nearest surface?" needs one pass, not two runs.
+            fused: dict[str, tuple] = {}
+            for est, origin_of in (("median", lambda _v: None), ("near", origins.get)):
+                per_view: dict[str, tuple[np.ndarray, int]] = {}
+                for v in VIEWS:
+                    uv, cloud = det.get(f"{v}_uv"), clouds.get(v)
+                    if uv is None or cloud is None:
+                        continue
+                    xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, window,
+                                                     origin_of(v), surface_tol)
+                    if xyz is not None and in_workspace(xyz, workspace):
+                        per_view[v] = (xyz, n)
+                xyz, agreed = fuse(per_view, agree_dist)
+                xyz, _used = apply_wrist(xyz, per_view, wrist_accept, require_agentview)
+                fused[est] = (xyz if xyz is not None else np.full(3, np.nan),
+                              sum(n for _, n in per_view.values()), agreed)
             anchors.append({
-                "xyz": xyz if xyz is not None else np.full(3, np.nan),
+                "xyz": fused["median"][0],
+                "xyz_near": fused["near"][0],
                 "query_id": int(det["query_id"]),
-                "n_support": sum(n for _, n in per_view.values()),
-                "agree": agreed,
+                "n_support": fused["median"][1],
+                "agree": fused["median"][2],
                 **{f"{v}_uv": det.get(f"{v}_uv") for v in VIEWS},
             })
         out[f] = anchors
@@ -229,7 +272,7 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
 
     cols: dict[str, list] = {k: [] for k in
                              ("ep", "frame", "query_id", "n_support", "agree")}
-    xyz, uvs = [], {v: [] for v in VIEWS}
+    xyz, xyz_near, uvs = [], [], {v: [] for v in VIEWS}
     for ep, frames in sorted(per_episode.items()):
         for f, anchors in sorted(frames.items()):
             for a in anchors:
@@ -239,12 +282,14 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
                 cols["n_support"].append(a["n_support"])
                 cols["agree"].append(bool(a["agree"]))
                 xyz.append(np.asarray(a["xyz"], dtype=np.float64))
+                xyz_near.append(np.asarray(a["xyz_near"], dtype=np.float64))
                 for v in VIEWS:
                     uv = a.get(f"{v}_uv")
                     uvs[v].append(np.asarray(uv, dtype=np.float64)
                                   if uv is not None else np.full(2, np.nan))
     out = {k: np.asarray(v) for k, v in cols.items()}
     out["xyz"] = (np.stack(xyz, axis=0) if xyz else np.zeros((0, 3)))
+    out["xyz_near"] = (np.stack(xyz_near, axis=0) if xyz_near else np.zeros((0, 3)))
     for v in VIEWS:
         out[f"{v}_uv"] = (np.stack(uvs[v], axis=0) if uvs[v] else np.zeros((0, 2)))
     return out
@@ -274,7 +319,7 @@ def merge_shards(shards: list[Path], out: Path) -> None:
 
 
 def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int,
-                map_size_gb: float) -> None:
+                map_size_gb: float, field: str = "xyz") -> None:
     """Turn the merged rows into a cache in the builder's own on-disk format.
 
     Held across the replan window exactly as the builder does, so the dataloader needs no
@@ -297,7 +342,7 @@ def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int
 
     by_key: dict[tuple[int, int], list[dict]] = {}
     for i in range(len(d["ep"])):
-        rec = {"xyz": d["xyz"][i], "query_id": int(d["query_id"][i]),
+        rec = {"xyz": d[field][i], "query_id": int(d["query_id"][i]),
                "n_support": int(d["n_support"][i]), "agree": bool(d["agree"][i])}
         for v in VIEWS:
             uv = d[f"{v}_uv"][i]
@@ -339,6 +384,13 @@ def main() -> None:
     ap.add_argument("--write-cache", type=Path, default=None,
                     help="Turn a merged npz into an LMDB cache and exit.")
     ap.add_argument("--out-dirname", default="points_3views_molmo_depth")
+    ap.add_argument("--cache-field", default="xyz", choices=("xyz", "xyz_near"),
+                    help="Which estimator to write into the cache. Default 'xyz' is the "
+                         "window median, the one that was measured; 'xyz_near' is the "
+                         "nearest-surface variant, which measured WORSE -- see the note on "
+                         "depth_anchor_from_pixel before reaching for it.")
+    ap.add_argument("--surface-tol", type=float, default=0.03,
+                    help="Keep window pixels within this many metres of the nearest one.")
     ap.add_argument("--point-window", type=int, default=2,
                     help="Half-width in pixels; matches the cache build.")
     ap.add_argument("--agree-dist", type=float, default=0.10)
@@ -376,7 +428,7 @@ def main() -> None:
 
     if args.write_cache:
         write_cache(args.write_cache, args.dataset_dir, args.out_dirname, args.stride,
-                    args.map_size_gb)
+                    args.map_size_gb, args.cache_field)
         return
 
     if args.source_dir is None:
@@ -423,7 +475,7 @@ def main() -> None:
             got = lift_episode(env, args.source_dir, emap[ep], pixels[ep],
                                args.point_window, DEFAULT_WORKSPACE, args.agree_dist,
                                args.wrist_accept_dist, not args.allow_lone_wrist,
-                               args.max_frames)
+                               args.max_frames, args.surface_tol)
             if got:
                 per_episode[ep] = got
             done = i + 1
