@@ -105,6 +105,14 @@ table filters straight to one stage.
 | 0 | `Stage 0: Two camera views` | `od-{uniform,eef,anchor}-n4096-vlm-s0` | does image conditioning help, at matched budget? |
 | 1 | `Stage 1: Num points & Train steps` | the nine `od-*-n{2048,4096,8192}-s0` | how many points, and how long to train? |
 | 2 | `Stage 2: Task transfer` | `ppcs-*`, `tom-*` | does the sampling result hold on other tasks? |
+| 3 | `Stage 3: MolmoPoint anchor` | `{od,tom}-molmo-*`, `ppcs-molmo-{obj,objpan}-*` | how much of the uniform→oracle gap does a frozen pointing model recover, with no privileged information? |
+
+**Stage 3 evals are not interchangeable with the other arms'.** The anchor has to be produced
+live by a MolmoPoint server running beside the policy, so a stage-3 eval needs roughly twice
+the walltime — submit `eval_grid_jeanzay.slurm` with `--time=05:00:00`. `eval_robocasa365.sh`
+starts the pointer itself; see `data_prep/roi_sampling/README.md`. The first round of these
+numbers was thrown away because eval had no molmo branch and silently sampled uniformly, so
+check `molmo_stats.frame_cover` in the per-trial json before reading any stage-3 rate.
 
 **Stage 0** is the with-VLM control, and the only reason it is a full retrain rather than a
 comparison against the old 20-epoch runs: those stopped at 19,500 steps under a cosine schedule
