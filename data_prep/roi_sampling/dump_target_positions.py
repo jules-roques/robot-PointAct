@@ -73,8 +73,12 @@ TARGET_GEOMS = {
     "OpenDrawer": {
         "fixture_attr": "drawer",
         "sets": {
-            "handle": {"body_contains": "handle"},
-            "drawer_panel": {"body_contains": "drawer"},
+            "handle": {"body_contains": ["handle"]},
+            # A drawer's front panel is a "door" body in RoboCASA's naming, whatever the
+            # fixture is called, and the handle hangs off a body whose name contains "door"
+            # too -- hence the exclusion. This is the same handle-before-door precedence
+            # environments._build_geom_label_lut uses to assign labels 4 and 3.
+            "drawer_panel": {"body_contains": ["drawer", "door"], "body_excludes": ["handle"]},
         },
     },
 }
@@ -85,8 +89,8 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
 
     ``geom`` is looked up through the fixture's ``naming_prefix`` (that is how RoboCASA's own
     success check finds the button); ``body_contains`` walks every geom and keeps those whose
-    body belongs to the fixture and contains the substring -- empty substring means the whole
-    fixture.
+    body belongs to the fixture and contains any of the substrings, minus any matching
+    ``body_excludes``. An empty ``body_contains`` entry means the whole fixture.
     """
     model = env.env.sim.model
     if "geom" in spec:
@@ -97,11 +101,18 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
             return []
 
     want = spec["body_contains"]
+    if isinstance(want, str):
+        want = [want]
+    drop = spec.get("body_excludes", [])
     fixture_name = fixture.name
     out = []
     for gid in range(int(model.ngeom)):
         body = model.body_id2name(int(model.geom_bodyid[gid])) or ""
-        if fixture_name in body and want in body:
+        if fixture_name not in body:
+            continue
+        if any(x in body for x in drop):
+            continue
+        if any(w in body for w in want):
             out.append(gid)
     return out
 
