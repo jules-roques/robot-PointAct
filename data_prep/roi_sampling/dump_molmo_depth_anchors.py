@@ -41,14 +41,13 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
-import re
 import time
 from pathlib import Path
 
 import numpy as np
 
 from data_prep.robocasa365_to_lerobot.episode_index_map import MAP_NAME, load_map
+from data_prep.roi_sampling.dump_target_positions import infer_env_name
 
 # Kept in step with the cache builder; a mismatch here is a silent frame-offset bug.
 STRIDE = 8
@@ -108,28 +107,20 @@ def in_workspace(xyz: np.ndarray, workspace: dict) -> bool:
     )
 
 
-def infer_env_name(source_dir: Path) -> str:
-    meta = source_dir / "meta" / "info.json"
-    if meta.exists():
-        name = json.loads(meta.read_text()).get("env_name")
-        if name:
-            return name
-    m = re.search(r"([A-Za-z]+)$", source_dir.parent.name)
-    if m:
-        return m.group(1)
-    raise RuntimeError(f"cannot infer env name from {source_dir}")
+def export_cache_pixels(dataset_dir: Path, dirname: str, stride: int, out: Path) -> None:
+    """Dump the cache's key-frame pixels to an npz, for the replay job to read.
 
-
-def read_cache_pixels(dataset_dir: Path, dirname: str, stride: int) -> dict[int, dict]:
-    """{converted episode: {frame: [anchor dicts]}} for the key frames only.
-
-    Reads pixels, not anchors: the pixels are the expensive half (0.7 s of an 8B model) and
-    the only half this script reuses.
+    A separate step because the environments are split: the simulator env has no ``lmdb``
+    and the root env has no MuJoCo, so nothing can read the cache and drive a replay in one
+    process. Exporting the pixels -- the expensive half, 0.7 s of an 8B model each -- also
+    makes the replay job's input an explicit file rather than a live database.
     """
     import lmdb
     from pointact.roi_sampling import molmo_cache
+    from pointact.roi_sampling.molmo_anchors import VIEWS
 
-    out: dict[int, dict] = {}
+    eps, frames, qids = [], [], []
+    uvs = {v: [] for v in VIEWS}
     env = lmdb.open(str(dataset_dir / dirname), readonly=True, lock=False, subdir=True)
     with env.begin(buffers=True) as txn:
         for k, v in txn.cursor():
@@ -137,11 +128,39 @@ def read_cache_pixels(dataset_dir: Path, dirname: str, stride: int) -> dict[int,
             f = int(f_s)
             if f % stride:
                 continue
-            dets = molmo_cache.decode_pixels(
-                np.frombuffer(bytes(v), dtype=molmo_cache.RECORD_DTYPE))
-            if dets:
-                out.setdefault(int(ep_s), {})[f] = dets
+            for det in molmo_cache.decode_pixels(
+                    np.frombuffer(bytes(v), dtype=molmo_cache.RECORD_DTYPE)):
+                eps.append(int(ep_s))
+                frames.append(f)
+                qids.append(int(det["query_id"]))
+                for view in VIEWS:
+                    uv = det.get(f"{view}_uv")
+                    uvs[view].append(np.asarray(uv, dtype=np.float64)
+                                     if uv is not None else np.full(2, np.nan))
     env.close()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cols = {"ep": np.asarray(eps), "frame": np.asarray(frames),
+            "query_id": np.asarray(qids)}
+    for view in VIEWS:
+        cols[f"{view}_uv"] = (np.stack(uvs[view], axis=0) if uvs[view]
+                              else np.zeros((0, 2)))
+    np.savez(out, **cols)
+    print(f"wrote {out}: {len(eps)} pointing calls over "
+          f"{len(set(eps))} episodes at stride {stride}")
+
+
+def load_pixels_npz(path: Path) -> dict[int, dict]:
+    """{converted episode: {frame: [detection dicts]}}, the shape the replay wants."""
+    from pointact.roi_sampling.molmo_anchors import VIEWS
+
+    d = np.load(path)
+    out: dict[int, dict] = {}
+    for i in range(len(d["ep"])):
+        det = {"query_id": int(d["query_id"][i])}
+        for view in VIEWS:
+            uv = d[f"{view}_uv"][i]
+            det[f"{view}_uv"] = None if not np.isfinite(uv).all() else uv
+        out.setdefault(int(d["ep"][i]), {}).setdefault(int(d["frame"][i]), []).append(det)
     return out
 
 
@@ -310,6 +329,10 @@ def main() -> None:
     ap.add_argument("--source-dir", type=Path, default=None,
                     help="Source dataset with extras/episode_XXXXXX; required unless --merge.")
     ap.add_argument("--molmo-dirname", default="points_3views_molmo")
+    ap.add_argument("--export-pixels", type=Path, default=None,
+                    help="Root env: dump the cache's key-frame pixels here and exit.")
+    ap.add_argument("--pixels-npz", type=Path, default=None,
+                    help="Simulator env: the pixels to re-lift, from --export-pixels.")
     ap.add_argument("--out", type=Path, default=None, help="Shard/merged npz path.")
     ap.add_argument("--merge", nargs="*", type=Path, default=None,
                     help="Merge these shards into --out and exit (no simulator needed).")
@@ -325,8 +348,10 @@ def main() -> None:
     ap.add_argument("--stride", type=int, default=STRIDE)
     ap.add_argument("--image-resolution", type=int, default=256,
                     help="Must match the resolution the pixels were predicted on.")
-    ap.add_argument("--split", default="train")
-    ap.add_argument("--seed", type=int, default=0)
+    # Match dump_target_positions: the episodes being replayed are the target split, and the
+    # seed only matters for a reset that is immediately overwritten by the recorded state.
+    ap.add_argument("--split", default="target")
+    ap.add_argument("--seed", type=int, default=7)
     # Shard on the *converted* episodes present in the cache, not on a source-index range:
     # the two differ wherever conversion dropped a failed replay, and a source-index split
     # would silently give some shards nothing to do and others double.
@@ -336,6 +361,11 @@ def main() -> None:
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--map-size-gb", type=float, default=4.0)
     args = ap.parse_args()
+
+    if args.export_pixels:
+        export_cache_pixels(args.dataset_dir, args.molmo_dirname, args.stride,
+                            args.export_pixels)
+        return
 
     if args.merge:
         shards = [Path(p) for pat in args.merge for p in sorted(glob.glob(str(pat)))]
@@ -351,11 +381,14 @@ def main() -> None:
 
     if args.source_dir is None:
         raise SystemExit("--source-dir is required unless --merge or --write-cache")
+    if args.pixels_npz is None:
+        raise SystemExit("--pixels-npz is required; produce it with --export-pixels in the "
+                         "root env (the simulator env has no lmdb)")
 
     from data_prep.robocasa365_to_lerobot.replay import DEFAULT_WORKSPACE
 
     emap = load_episode_map(args.dataset_dir)
-    pixels = read_cache_pixels(args.dataset_dir, args.molmo_dirname, args.stride)
+    pixels = load_pixels_npz(args.pixels_npz)
     episodes = sorted(pixels)
     if args.num_shards > 1:
         episodes = episodes[args.shard::args.num_shards]  # strided: even work per shard

@@ -51,11 +51,24 @@ mkdir -p "$OUT_DIR"
 IDX="${SLURM_ARRAY_TASK_ID:-0}"
 N_TASKS="${SLURM_ARRAY_TASK_COUNT:-1}"
 
+# The environments are split and neither one can do both halves: the simulator env has no
+# lmdb, the root env has no MuJoCo. So the pixels come out of the cache in the root env
+# first. Every array task wants the same file; the first to arrive writes it under a
+# task-private name and renames, so the others see it whole or not at all.
+PIX="$OUT_DIR/molmo_pixels_stride8.npz"
+if [ ! -f "$PIX" ]; then
+    TMP="$PIX.$IDX.tmp"
+    "$MAIN_REPO/.venv/bin/python" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
+        --dataset-dir "$DATASET" --export-pixels "$TMP"
+    mv -n "$TMP" "$PIX" && rm -f "$TMP" || true
+fi
+
 OUT_NAME="${OUT_NAME:-depth_anchors}"
-ARGS=(--task "$TASK" --source-dir "$BASE" --dataset-dir "$DATASET"
+ARGS=(--task "$TASK" --source-dir "$BASE" --dataset-dir "$DATASET" --pixels-npz "$PIX"
       --out "$OUT_DIR/${OUT_NAME}_shard${IDX}.npz"
       --shard "$IDX" --num-shards "$N_TASKS")
 [ -n "${SMOKE:-}" ] && ARGS=(--task "$TASK" --source-dir "$BASE" --dataset-dir "$DATASET"
+                             --pixels-npz "$PIX"
                              --out "$OUT_DIR/${OUT_NAME}_smoke.npz"
                              --max-episodes 2 --max-frames 40)
 [ -n "${EXTRA_ARGS:-}" ] && ARGS+=(${EXTRA_ARGS})
