@@ -57,6 +57,34 @@ The cache stores **every** pointing query the task defines, so choosing which be
 Gaussian centres is a dataloader knob (`molmo_anchor_ids`) rather than a rebuild:
 `[0]` is the manipulated object alone, `[0, 1]` adds the destination.
 
+### Evaluating a molmo-trained checkpoint
+
+The cache is keyed `{episode}-{frame}`, and an eval scene is randomised fresh — those keys do
+not exist. So the anchor is produced **live**, at the same replan cadence, by a third process:
+
+```bash
+sbatch --time=05:00:00 --export=ALL,RUN=od-molmo-n4096-s0 \
+       experiments/13_robocasa365/eval_grid_jeanzay.slurm
+```
+
+`eval_robocasa365.sh` recognises `molmo_sampling: true`, starts `scripts/run_molmo_server.py`
+in the pointing env alongside the policy server, and reads `molmo_anchor_ids` from the same
+data config the mode came from. Nothing needs to be passed by hand. Budget roughly **twice**
+the walltime of the arm it is compared against: ~0.78 s per replan, and the slurm script
+refuses to start under 200 minutes rather than time out at trial 80.
+
+Prompts, view list and fusion rules live in `pointact/roi_sampling/molmo_anchors.py`, imported
+by both the builder and the evaluator. Two copies of them is a train/eval mismatch waiting to
+happen — the first round of stage-3 numbers was voided by exactly that class of bug, from the
+other direction (eval had no molmo branch at all and silently sampled uniformly).
+
+Lifting is *more direct* at eval time and deliberately so: the simulator hands over
+`observation.points.<cam>`, an (H, W, 3) base-frame point per pixel, so the pointed pixel
+indexes straight into it. Same window, same workspace crop, same support rule as the builder
+— no calibration file and no projection round-trip. Every run logs pointer counters
+(`molmo_stats` in the per-trial json) and warns if under half of replans got an anchor, since
+an arm that quietly falls back to uniform still reports a plausible success rate.
+
 ### Gate — visualisation
 ```bash
 python -m data_prep.roi_sampling.viz_molmo_gate --tasks OpenDrawer PickPlaceCounterToStove TurnOnMicrowave

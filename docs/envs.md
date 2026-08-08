@@ -8,7 +8,15 @@ merge them.
 |---|---|---|---|
 | Training / root | `.venv` | Training and evaluating PointAct. torch 2.7 (cu126). | The main environment; `pointact` is installed into it. |
 | Simulator | `envs/robocasa365/.venv` | RoboCasa365 / MuJoCo rollouts. Python 3.11. | MuJoCo and the RoboCasa stack pin versions that conflict with the training env. |
-| Pointing | `envs/molmo/.venv` | MolmoPoint-8B detection for ROI-guided sampling (`data_prep/roi_sampling/build_molmo_cache.py`). | MolmoPoint ships custom modelling code that requires `transformers==4.57.1`; the training env is on 5.x, and pinning it back would break the trainer. |
+| Pointing | `$SCRATCH/venvs/molmo` (Jean Zay) | MolmoPoint-8B detection: the anchor cache (`data_prep/roi_sampling/build_molmo_cache.py`) and the live eval-time pointer (`scripts/run_molmo_server.py`). | MolmoPoint ships custom modelling code that requires `transformers==4.57.1`; the training env is on 5.x, and pinning it back would break the trainer. |
+
+The pointing env lives on scratch, not in the repo: `$WORK` is near its inode quota and a
+torch install is ~40k files. `MOLMO_VENV` overrides the location for both the cache build and
+the eval.
+
+Evaluating a MolmoPoint-anchored checkpoint runs **all three at once** on one GPU — simulator
+client, policy server, pointer server — talking over ZeroMQ. `eval_robocasa365.sh` starts the
+two servers itself; nothing needs to be launched by hand.
 
 ## Running things
 
