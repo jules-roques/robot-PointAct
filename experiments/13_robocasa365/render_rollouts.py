@@ -39,14 +39,22 @@ def render(npz_path: Path, sigma: float, floor: float, num_frames: int) -> Path:
     frames_data = []
     for i in indices:
         pts = data[f"points_{i}"][:, :3]
+        # The centre the server actually weighted around. On the eef arm that is the
+        # end-effector; on the anchor arms (GT handle, or a live MolmoPoint detection) it is
+        # recorded per frame, because it is not recoverable from the state. Older npz files
+        # predate anchor_* and only have the eef -- for those the eef arm still renders
+        # exactly, and an anchor arm falls back to it rather than failing.
         eef = data[f"eef_{i}"]
-        # The server weighted the cloud around this anchor; recompute rather than transmit it.
-        weights = (eef_density_weights(pts, eef, sigma, floor)
+        centre = data[f"anchor_{i}"] if f"anchor_{i}" in data.files else eef
+        weights = (eef_density_weights(pts, centre, sigma, floor)
                    if sampling in ("eef", "anchor") else None)
         logw = np.log2(np.clip(oversampling_factor(weights, len(pts)), 1e-6, None))
         frames_data.append({
             "pts": pts, "colors": logw.astype(np.float32), "n_sel": len(pts),
-            "anchor": eef if weights is not None else None, "frame": int(data[f"step_{i}"]),
+            # build_figure draws one marker, so the multi-centre (object+destination) arm
+            # shows its first centre; the weighting above still uses all of them.
+            "anchor": (np.reshape(centre, (-1, 3))[0] if weights is not None else None),
+            "frame": int(data[f"step_{i}"]),
             "near_frac": None, "n_handle_total": 0, "n_handle_sel": 0,
             "handle_recall": None, "n_cloud": len(pts), "n_frames": len(indices),
             "phase": outcome,

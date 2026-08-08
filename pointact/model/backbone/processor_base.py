@@ -297,7 +297,17 @@ class RobotPointProcessorBase(RobotProcessorBase):
             return None
         if isinstance(value, torch.Tensor):
             value = value.detach().cpu().numpy()
-        value = np.asarray(value, dtype=np.float64).reshape(-1)
+        value = np.asarray(value, dtype=np.float64)
+        # One centre arrives as (3,) -- possibly with trailing entries, as observation.state
+        # does -- and several as (K, 3). The molmo arm needs the plural form: the
+        # object+destination variant centres the density on two anchors at once, and
+        # eef_density_weights takes the max over them. Anything non-finite is dropped rather
+        # than poisoning the whole frame; only if nothing survives do we fall back to uniform.
+        if value.ndim >= 2:
+            value = value.reshape(-1, value.shape[-1])[:, :3]
+            value = value[np.isfinite(value).all(axis=1)]
+            return value if len(value) else None
+        value = value.reshape(-1)
         if len(value) < 3 or not np.isfinite(value[:3]).all():
             return None
         # The first three entries are the position, in the same (robot-base) frame as the
@@ -325,8 +335,9 @@ class RobotPointProcessorBase(RobotProcessorBase):
                     flush=True,
                 )
             return self._subsample_point_cloud(point_cloud, max_npoints)
-        if anchor.shape != (3,):
-            raise ValueError(f"sampling anchor must be a 3-vector, got shape {anchor.shape}")
+        if anchor.shape[-1] != 3 or anchor.ndim > 2:
+            raise ValueError(
+                f"sampling anchor must be (3,) or (K, 3), got shape {anchor.shape}")
 
         # Same weighting and draw as the dataloader, imported rather than reimplemented so the
         # two paths cannot drift apart.

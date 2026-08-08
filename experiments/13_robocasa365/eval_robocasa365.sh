@@ -90,12 +90,16 @@ fi
 set -euo pipefail
 
 cleanup() {
-  echo "[cleanup] stopping server..."
-  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    sleep 2
-    kill -9 "$SERVER_PID" 2>/dev/null || true
-  fi
+  echo "[cleanup] stopping servers..."
+  # Both background servers, or an aborted molmo eval leaves an 18 GB process holding the GPU
+  # for the rest of the allocation and the next array element OOMs.
+  for pid in "${SERVER_PID:-}" "${MOLMO_PID:-}"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
 }
 trap cleanup INT TERM EXIT
 
@@ -110,6 +114,10 @@ echo "port=$port"
 # rather than relying on the caller to pass a matching flag by hand.
 POINT_SAMPLING="${POINT_SAMPLING:-}"
 ORACLE_ANCHOR=""
+# Set when the checkpoint's anchor has to be produced live by MolmoPoint rather than by the
+# simulator. Overridable so `POINT_SAMPLING=anchor MOLMO=1 ...` can force the molmo path for a
+# checkpoint whose data config is unreadable.
+MOLMO="${MOLMO:-}"
 if [ -z "$POINT_SAMPLING" ]; then
     # Prefer the copy archived beside the checkpoint: every run writes data_config.yaml into
     # its own output_dir, so the mode is recoverable without depending on a repo file that may
@@ -132,6 +140,13 @@ except Exception:
             POINT_SAMPLING=anchor
         elif grep -qiE '^\s*eef_sampling:\s*true' "$DATA_CFG"; then
             POINT_SAMPLING=eef
+        elif grep -qiE '^\s*molmo_sampling:\s*true' "$DATA_CFG"; then
+            # Same density and the same server-side sampler as the oracle arm -- what differs
+            # is who fills observation.sampling_anchor. Training read a precomputed cache;
+            # those keys do not exist for a freshly randomised eval scene, so the client asks
+            # a MolmoPoint server for the centre at every replan instead.
+            POINT_SAMPLING=anchor
+            MOLMO=1
         else
             # "uniform" must be a positive finding, not the leftover case. Listing only the
             # arms we know how to reproduce at eval time made this an open-world assumption:
@@ -142,7 +157,7 @@ except Exception:
             # for is now an error, so the next arm added to the dataloader cannot repeat it.
             UNKNOWN=$(grep -oiE '^\s*[a-z0-9_]+_sampling:\s*true' "$DATA_CFG" \
                       | grep -oiE '[a-z0-9_]+_sampling' \
-                      | grep -viE '^(oracle|eef)_sampling$' | sort -u | tr '\n' ' ')
+                      | grep -viE '^(oracle|eef|molmo)_sampling$' | sort -u | tr '\n' ' ')
             if [ -n "$UNKNOWN" ]; then
                 echo "ERROR: ${DATA_CFG} enables a sampling arm this script cannot reproduce" >&2
                 echo "  at eval time: ${UNKNOWN}" >&2
@@ -165,7 +180,72 @@ except Exception:
         exit 1
     fi
 fi
-[ "$POINT_SAMPLING" = "anchor" ] && ORACLE_ANCHOR="--args.oracle_anchor"
+# The two anchor producers are mutually exclusive: the oracle reads the simulator's own
+# labels, molmo reads the camera images. Both write the same field, so exactly one may run.
+MOLMO_FLAGS=""
+if [ -n "$MOLMO" ]; then
+    # --- MolmoPoint pointer server (its own env: transformers 4.57.1, which neither the
+    # trainer nor the simulator can host). Third process, second port, same GPU: ~18 GB bf16
+    # next to the policy's ~10 GB and MuJoCo, comfortable on an 80 GB A100.
+    MOLMO_VENV="${MOLMO_VENV:-$SCRATCH/venvs/molmo}"
+    MOLMO_MODEL="${MOLMO_MODEL:-$SCRATCH/models/MolmoPoint-8B}"
+    [ -x "$MOLMO_VENV/bin/python" ] || {
+        echo "ERROR: no molmo venv at $MOLMO_VENV (set MOLMO_VENV=...)" >&2; exit 1; }
+    ls "$MOLMO_MODEL"/*.safetensors >/dev/null 2>&1 || {
+        echo "ERROR: no MolmoPoint weights at $MOLMO_MODEL -- run download_molmo.slurm" >&2
+        exit 1; }
+    # Idempotent, and cheap next to model loading: guards against a re-downloaded checkpoint
+    # reverting to the unpatched remote code, exactly as the cache build does.
+    "$MOLMO_VENV/bin/python" -m data_prep.roi_sampling.patch_molmo_remote_code \
+        --model-dir "$MOLMO_MODEL"
+
+    # The queries the checkpoint was TRAINED with are selected by molmo_anchor_ids; reading it
+    # from the same data config the mode came from is what keeps the object-only and
+    # object+destination arms from being evaluated as each other.
+    MOLMO_IDS="${MOLMO_IDS:-}"
+    if [ -z "$MOLMO_IDS" ] && [ -f "${DATA_CFG:-}" ]; then
+        # Read with the *system* python and no yaml: the venv probe above only guarantees
+        # numpy, and PyYAML is genuinely missing from some of the checkouts here. Both spellings
+        # occur -- the hand-written run configs use `[0, 1]`, yaml.safe_dump's archived copy
+        # uses a `- 0` block -- so handle both rather than whichever one was looked at last.
+        MOLMO_IDS=$(python3 -c "
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+out = []
+for i, line in enumerate(lines):
+    m = re.match(r'\s*molmo_anchor_ids:\s*(.*)', line)
+    if not m:
+        continue
+    rest = m.group(1).strip()
+    if rest:
+        out = re.findall(r'\d+', rest)
+    else:
+        for nxt in lines[i + 1:]:
+            item = re.match(r'\s*-\s*(\d+)\s*$', nxt)
+            if not item:
+                break
+            out.append(item.group(1))
+    break
+print(' '.join(out))
+" "$DATA_CFG")
+    fi
+    [ -z "$MOLMO_IDS" ] && { echo "ERROR: could not read molmo_anchor_ids from ${DATA_CFG:-<none>}; set MOLMO_IDS=\"0 1\"" >&2; exit 1; }
+    echo "molmo anchor ids: ${MOLMO_IDS}"
+
+    molmo_port=$((10000 + RANDOM % 10000))
+    while is_used "$molmo_port" || [ "$molmo_port" = "$port" ]; do
+        molmo_port=$((10000 + RANDOM % 10000))
+    done
+    "$MOLMO_VENV/bin/python" scripts/run_molmo_server.py \
+        --args.model_dir "$MOLMO_MODEL" \
+        --args.host ${host} --args.port ${molmo_port} &
+    MOLMO_PID=$!
+    echo "Molmo pointer started, PID=$MOLMO_PID port=$molmo_port"
+
+    MOLMO_FLAGS="--args.molmo_anchor --args.molmo_host ${host} --args.molmo_port ${molmo_port} --args.molmo_anchor_ids ${MOLMO_IDS}"
+elif [ "$POINT_SAMPLING" = "anchor" ]; then
+    ORACLE_ANCHOR="--args.oracle_anchor"
+fi
 
 # --- Policy server (pointact / root env) ---
 uv run --project "$POINTACT_ENV" --no-sync scripts/run_server.py \
@@ -200,6 +280,7 @@ uv run --project "$ROBOCASA_ENV" --no-sync \
     --args.save_dir ${ckpt_dir}/results/checkpoint-${ckpt_step}${SAVE_SUFFIX:-} \
     ${VIZ_ROLLOUTS:+--args.viz_rollouts --args.point_sampling_for_viz ${POINT_SAMPLING}} \
     ${ORACLE_ANCHOR} \
+    ${MOLMO_FLAGS} \
     ${options}
 
 echo "Client finished"

@@ -32,6 +32,7 @@ from pointact.robot_envs.robocasa365_utils.environments import (
     POINT_LABEL_TARGET_HANDLE,
     RoboCasa365Env,
 )
+from pointact.roi_sampling.live_anchor import LiveMolmoAnchor
 from pointact.utils.rotation import convert_rotation
 from pointact.utils.server_client import PolicyClient
 from pointact.utils.torch_utils import set_seed
@@ -57,6 +58,22 @@ class ClientArgs:
     # the server, and must be off for the uniform and eef-density policies.
     oracle_anchor: bool = False
 
+    # Produce the sampling anchor live with MolmoPoint, for policies trained with
+    # molmo_sampling. Unlike --args.oracle_anchor this uses no privileged information: the
+    # pointer sees the same camera images the policy does. It needs a second server
+    # (scripts/run_molmo_server.py) on --args.molmo_port, and like the oracle it must be
+    # paired with --args.point_sampling anchor on the policy server.
+    molmo_anchor: bool = False
+    # Which of the task's pointing queries become Gaussian centres. MUST match the training
+    # data config's molmo_anchor_ids: (0,) is the manipulated object alone, (0, 1) adds the
+    # destination. Getting this wrong is a silent train/eval mismatch, which is the exact
+    # failure that voided the first round of stage-3 numbers.
+    molmo_anchor_ids: tuple[int, ...] = (0,)
+    # Render segmentation and log the live anchor's distance to the ground-truth target. Only
+    # OpenDrawer exposes those labels. Off by default: it costs an extra render pass per step,
+    # and it is a diagnostic, not part of the arm.
+    molmo_audit_gt: bool = False
+
     # Capture two rollouts as point-cloud animations: one success and one failure if both
     # occur, otherwise two of whichever did. Shows what the policy actually saw, which a
     # success rate cannot. Buffers only the current episode plus the two kept ones.
@@ -73,6 +90,8 @@ class ClientArgs:
 
     host: str = "localhost"
     port: int = 5555
+    molmo_host: str = "localhost"
+    molmo_port: int = 5556
 
 
 def setup_logging(filename=None):
@@ -184,6 +203,10 @@ def save_rollout_npz(kept: dict, save_dir: pathlib.Path, sampling: str) -> list:
             payload[f"points_{i}"] = fd["points"].astype(np.float32)
             payload[f"eef_{i}"] = fd["eef"].astype(np.float32)
             payload[f"step_{i}"] = np.array(fd["step"])
+            # Absent on the uniform/eef arms, and on anchor frames that fell back to uniform.
+            # The renderer treats a missing key as "no anchor this frame".
+            if fd.get("anchor") is not None:
+                payload[f"anchor_{i}"] = fd["anchor"].astype(np.float32)
         out = save_dir / f"rollout_{outcome}_{trial}.npz"
         np.savez_compressed(out, **payload)
         written.append(out)
@@ -192,11 +215,24 @@ def save_rollout_npz(kept: dict, save_dir: pathlib.Path, sampling: str) -> list:
 
 def main(args: ClientArgs) -> None:
     assert args.pred_rot_type in ["rot6d", "euler"]
+    # Both fill observation.sampling_anchor, so enabling both would mean the last writer wins
+    # -- an evaluation whose sampling prior is decided by statement order.
+    assert not (args.oracle_anchor and args.molmo_anchor), \
+        "--args.oracle_anchor and --args.molmo_anchor both fill the sampling anchor; pick one"
 
     policy_client = PolicyClient(args.host, args.port)
     while not policy_client.ping():
         pass
     print(f"Server is running on host {args.host} port {args.port}")
+
+    molmo_anchor = None
+    if args.molmo_anchor:
+        molmo_client = PolicyClient(args.molmo_host, args.molmo_port)
+        while not molmo_client.ping():
+            pass
+        print(f"Molmo pointer is running on host {args.molmo_host} port {args.molmo_port}")
+        molmo_anchor = LiveMolmoAnchor(args.env_name, args.molmo_anchor_ids, molmo_client,
+                                       verbose=args.verbose)
 
     video_out_dir = None
     log_filename = None
@@ -219,7 +255,9 @@ def main(args: ClientArgs) -> None:
         image_resolution=args.image_size,
         use_depth=args.use_depth,
         use_point_cloud=args.use_depth,
-        use_segmentation=args.oracle_anchor,
+        # Segmentation is what ground_truth_anchor reads. The molmo arm does not need it to
+        # run -- only to be audited against the GT target it is trying to find.
+        use_segmentation=args.oracle_anchor or args.molmo_audit_gt,
         enable_render=True,
         terminate_on_success=True,  # so `done` marks success, as in the Libero client
     )
@@ -263,6 +301,12 @@ def main(args: ClientArgs) -> None:
                 "successes": int(total_successes),
                 "success_rate": total_successes / max(total_episodes, 1),
                 "oracle_anchor": bool(args.oracle_anchor),
+                "molmo_anchor": bool(args.molmo_anchor),
+                # The molmo arm's failure mode is quiet: a pointer that answers nothing turns
+                # every frame into a uniform draw and the run still reports a plausible
+                # success rate. Writing the counters next to the rate is what tells "did not
+                # help" apart from "did not run".
+                "molmo_stats": molmo_anchor.stats.summary() if molmo_anchor else None,
                 "skipped": skipped_episodes,
                 "trials": per_trial,
             }, f, indent=2)
@@ -300,6 +344,23 @@ def main(args: ClientArgs) -> None:
                     "task": [obs["task"]],
                     "repo_id": [args.repo_id],
                 }
+                # Needed by the molmo lift (it crops candidate pixels to the same box the
+                # server crops the cloud to) as well as by the server, so it is derived
+                # before the anchor block rather than just before the request.
+                points_workspace = env.get_points_workspace(obs)
+
+                anchor = None
+                if args.oracle_anchor:
+                    anchor = ground_truth_anchor(obs)
+                elif molmo_anchor is not None:
+                    # Once per replan, matching the stride the training cache was built at:
+                    # both the cache and this hold one anchor for the following 8 steps.
+                    anchor = molmo_anchor(obs, points_workspace)
+                    if args.molmo_audit_gt:
+                        molmo_anchor.record_gt_error(anchor, ground_truth_anchor(obs))
+                if anchor is not None:
+                    batch["observation.sampling_anchor"] = [anchor]
+
                 if args.use_depth:
                     # Send a single fused 3-view point cloud (matches training data). This uses the
                     # server's existing-points branch directly, so we don't depend on the server
@@ -309,19 +370,18 @@ def main(args: ClientArgs) -> None:
                     batch["observation.points"] = [fused]
                     if args.viz_rollouts and want_more_rollouts(kept_rollouts):
                         # The cloud as sent, with the eef so the weighting can be recomputed
-                        # offline exactly as the server did it.
+                        # offline exactly as the server did it. For the anchor arms the eef is
+                        # NOT the centre, so the anchor actually used is recorded too --
+                        # without it the renderer drew the eef bump for every arm and the
+                        # oracle/molmo figures showed a density the server never applied.
                         rollout_frames.append(
                             {"points": fused.astype(np.float32),
                              "eef": np.asarray(obs["observation.state"][:3], dtype=np.float32),
+                             "anchor": (None if anchor is None
+                                        else np.atleast_2d(np.asarray(anchor, np.float32))),
                              "step": _t}
                         )
 
-                if args.oracle_anchor:
-                    anchor = ground_truth_anchor(obs)
-                    if anchor is not None:
-                        batch["observation.sampling_anchor"] = [anchor]
-
-                points_workspace = env.get_points_workspace(obs)
                 ov_out = policy_client.get_action(
                     batch,
                     options={
@@ -403,6 +463,19 @@ def main(args: ClientArgs) -> None:
         raise SystemExit(2)
 
     logging.info(f"Total success rate: {total_successes / max(total_episodes, 1):.4f}")
+
+    if molmo_anchor is not None:
+        summary = molmo_anchor.stats.summary()
+        logging.info(f"MolmoPoint anchors: {json.dumps(summary)}")
+        # A frame with no anchor is a uniform draw against a non-uniformly-trained policy. A
+        # few are expected (the target leaves frame); a majority means the arm did not really
+        # run and the success rate above is measuring something else.
+        if summary["frame_cover"] < 0.5:
+            logging.warning(
+                f"MolmoPoint produced an anchor for only {100 * summary['frame_cover']:.1f}% "
+                f"of replans -- most frames fell back to UNIFORM sampling, which does not "
+                f"match how this checkpoint was trained. Treat the rate above as suspect."
+            )
 
     # The record is rewritten after every episode (dump_results); this is the final one.
     # Keyed by seed so two runs at different seeds pool without double-counting scenes.

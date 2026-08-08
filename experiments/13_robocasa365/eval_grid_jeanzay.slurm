@@ -94,5 +94,36 @@ EOF
 echo "host=$(hostname) run=$RUN ckpt=$CKPT_STEP env=$ENV_NAME trials=$NUM_TRIALS"
 nvidia-smi -L
 
+# The molmo arms carry a third process (MolmoPoint, ~0.78 s per replan) and take roughly twice
+# as long as the arm they are compared against -- about 2h20 on OpenDrawer, more on the
+# two-query PPCS objpan arm. The default 2h is sized for the other arms, so refuse to start
+# rather than time out at trial 80: the client's partial dump does NOT match the
+# per_trial_seed*_n*.json glob the pooling reads, so a killed run contributes nothing at all.
+if grep -qiE '^\s*molmo_sampling:\s*true' "$DATA_CONFIG"; then
+    LEFT=$(squeue -h -j "${SLURM_JOB_ID}" -o %L 2>/dev/null | tr -d ' ')
+    LEFT_MIN=$(python3 -c "
+import sys
+t = sys.argv[1] if len(sys.argv) > 1 else ''
+if not t:
+    print(-1); raise SystemExit
+d, _, rest = t.partition('-')
+if rest:
+    days, t = int(d), rest
+else:
+    days, t = 0, t
+p = [int(x) for x in t.split(':')]
+while len(p) < 3:
+    p.insert(0, 0)
+print(days * 1440 + p[0] * 60 + p[1] + (1 if p[2] else 0))
+" "$LEFT")
+    MIN_NEEDED="${MOLMO_MIN_MINUTES:-200}"
+    if [ "$LEFT_MIN" -ge 0 ] && [ "$LEFT_MIN" -lt "$MIN_NEEDED" ]; then
+        echo "ERROR: $RUN is a MolmoPoint arm and only ${LEFT_MIN} min of walltime remain." >&2
+        echo "  Resubmit with --time=05:00:00 (or set MOLMO_MIN_MINUTES to override)." >&2
+        exit 1
+    fi
+    echo "molmo arm: ${LEFT_MIN} min of walltime available"
+fi
+
 export TEXT_CONTEXT_FILE="$TEXT_CTX"
 bash experiments/13_robocasa365/eval_robocasa365.sh "$ENV_NAME" "$CKPT_DIR" "$CKPT_STEP" "rot6d" "${OPTS:-}"

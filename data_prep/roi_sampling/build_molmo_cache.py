@@ -43,54 +43,17 @@ from tqdm.auto import tqdm
 
 from pointact.roi_sampling import molmo_cache
 from pointact.roi_sampling.geometry import candidate_anchors
+# Prompts, view list and the fusion rules are shared with the live evaluator rather than
+# duplicated: pointact/roi_sampling/molmo_anchors.py explains why that has to be one source.
+from pointact.roi_sampling.molmo_anchors import (
+    STATIC_VIEWS,
+    VIEWS,
+    apply_wrist,
+    fuse,
+    queries_for,
+)
 
 msgpack_numpy.patch()
-
-#: Views Molmo points in. All three go into ONE request, so a frame costs one forward
-#: whatever the view count. "wrist" is the close-up: at grasp time the target fills far more
-#: of its frame than of the agentviews, which is what a small object needs.
-VIEWS = ("left", "right", "wrist")
-
-#: The agentviews are bolted to the robot base, so one base->cam serves every frame. The
-#: wrist camera rides on the end-effector, so its base->cam is rebuilt per frame from the
-#: recorded proprio and the constant eef2cam (see dump_camera_calib.py).
-STATIC_VIEWS = ("left", "right")
-
-
-def opendrawer_queries(instruction: str) -> list[str]:
-    """"Open the left drawer." -> point at that drawer's handle.
-
-    The side matters and is the whole reason a pointing model is used here: an
-    open-vocabulary box detector finds every drawer and cannot tell which one the
-    instruction means.
-    """
-    m = re.search(r"\b(left|right)\b", instruction, re.I)
-    side = f"{m.group(1).lower()} " if m else ""
-    return [f"Point to the handle of the {side}drawer."]
-
-
-def ppcs_queries(instruction: str) -> list[str]:
-    """"Pick the apple from the plate and place it in the pan." -> the apple, then the pan.
-
-    Query 0 is the manipulated object and query 1 the destination; `molmo_anchor_ids`
-    selects which become Gaussian centres, so both arms come from this one cache.
-    """
-    m = re.search(r"pick the (.+?) from the", instruction, re.I)
-    obj = m.group(1).strip() if m else "object"
-    return [f"Point to the {obj}.", "Point to the pan."]
-
-
-def tom_queries(instruction: str) -> list[str]:
-    return ["Point to the start button on the microwave."]
-
-
-#: task -> instruction -> pointing queries. Derived from each episode's own instruction
-#: rather than hard-coded per task, because PickPlaceCounterToStove varies the object.
-TASK_QUERIES = {
-    "OpenDrawer": opendrawer_queries,
-    "PickPlaceCounterToStove": ppcs_queries,
-    "TurnOnMicrowave": tom_queries,
-}
 
 
 def load_calib(path: Path):
@@ -165,44 +128,6 @@ def anchor_from_pixel(cloud_xyz, cam, uv, image_hw, window: int, min_in_window: 
     return anchor, int(mask.sum())
 
 
-def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
-    """Combine the agentview anchors for one query.
-
-    Agreeing views are averaged; disagreeing ones fall back to the better-supported view,
-    since a disagreement means at least one of them lifted through an occluder and the
-    midpoint of a right answer and a wrong one is simply a third wrong answer.
-    """
-    got = [(v, a, n) for v, (a, n) in per_view.items() if v in STATIC_VIEWS]
-    if not got:
-        return None, False
-    if len(got) == 1:
-        return got[0][1], False
-    (_, a0, n0), (_, a1, n1) = got
-    if float(np.linalg.norm(a0 - a1)) <= agree_dist:
-        return (a0 + a1) / 2.0, True
-    return (a0 if n0 >= n1 else a1), False
-
-
-def apply_wrist(agentview, per_view, accept_dist: float, require_agentview: bool):
-    """Refine the agentview anchor with the wrist one. Returns (xyz, used_wrist).
-
-    The wrist camera is close to the target and therefore the most precise view when it can
-    see it -- but for much of an episode it CANNOT. At the start the arm is parked and the
-    target is out of frame entirely, and the model will still answer with something. So the
-    wrist is treated as a refinement that must be corroborated: it is adopted only when it
-    lands within ``accept_dist`` of what the agentviews already agreed on, and a wrist
-    anchor with no agentview to check it against is discarded by default.
-    """
-    w = per_view.get("wrist")
-    if w is None:
-        return agentview, False
-    if agentview is None:
-        return (None if require_agentview else w[0]), (not require_agentview)
-    if float(np.linalg.norm(w[0] - agentview)) <= accept_dist:
-        return w[0], True
-    return agentview, False
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset-dir", required=True, type=Path)
@@ -253,10 +178,6 @@ def main() -> None:
 
     dataset_dir = args.dataset_dir.expanduser().resolve()
     task = dataset_dir.name
-    if task not in TASK_QUERIES:
-        raise SystemExit(f"no pointing queries defined for task {task!r}; "
-                         f"known: {sorted(TASK_QUERIES)}")
-    queries_for = TASK_QUERIES[task]
 
     calib_path = args.calib or dataset_dir / "roi_meta" / "camera_calib.npz"
     if not calib_path.exists():
@@ -281,7 +202,7 @@ def main() -> None:
         episodes = [e for e in args.episodes if e in lengths]
 
     print(f"task={task} episodes={len(episodes)} stride={args.stride} "
-          f"queries={queries_for(tasks[episodes[0]])}")
+          f"queries={queries_for(task, tasks[episodes[0]])}")
 
     from pointact.roi_sampling.molmo_pointer import MolmoPointer
     pointer = MolmoPointer(str(args.model_dir), max_new_tokens=args.max_new_tokens)
@@ -310,7 +231,7 @@ def main() -> None:
             frames = {v: decode_video(video_path(v, ep)) for v in views}
             n_use = min(n, *(len(frames[v]) for v in views))
             states = read_episode_states(dataset_dir, ep, chunks_size) if use_wrist else None
-            queries = queries_for(tasks.get(ep, ""))
+            queries = queries_for(task, tasks.get(ep, ""))
             key_frames = list(range(0, n_use, args.stride))
 
             # One request per (key frame, query); both views ride in the same request, so a

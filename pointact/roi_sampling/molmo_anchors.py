@@ -1,0 +1,123 @@
+"""What the cache builder and the live evaluator must agree on, byte for byte.
+
+The MolmoPoint arm exists in two places: ``data_prep/roi_sampling/build_molmo_cache.py``
+writes anchors for training, and ``pointact/roi_sampling/live_anchor.py`` produces them
+during a rollout. If those two disagree about *anything* -- the wording of a prompt, which
+views are searched, how two views are combined -- the policy is evaluated on a different
+signal than it was trained on, and the resulting success rate is wrong in a way that looks
+entirely plausible.
+
+That failure has already happened once on this arm, from the other direction: eval had no
+molmo branch at all and silently fell back to uniform sampling (fixed in ef99441). So the
+shared parts live here, imported by both sides, rather than being written twice and kept in
+step by hand. The same argument already applies to the record layout in ``molmo_cache.py``.
+
+Deliberately dependency-free beyond numpy: the live side runs inside ``envs/robocasa365``,
+which has no lmdb, no av and no torch.
+"""
+
+from __future__ import annotations
+
+import re
+
+import numpy as np
+
+#: Views Molmo points in. All of them ride in ONE request, so a frame costs one forward
+#: whatever the view count. "wrist" is the close-up: at grasp time the target fills far more
+#: of its frame than of the agentviews, which is what a small object needs.
+VIEWS = ("left", "right", "wrist")
+
+#: The agentviews are rigidly mounted to the robot base and see the scene throughout the
+#: episode; the wrist view only sometimes contains the target. They are fused against each
+#: other, and the wrist is applied afterwards as a corroborated refinement.
+STATIC_VIEWS = ("left", "right")
+
+
+def opendrawer_queries(instruction: str) -> list[str]:
+    """"Open the left drawer." -> point at that drawer's handle.
+
+    The side matters and is the whole reason a pointing model is used here: an
+    open-vocabulary box detector finds every drawer and cannot tell which one the
+    instruction means.
+    """
+    m = re.search(r"\b(left|right)\b", instruction, re.I)
+    side = f"{m.group(1).lower()} " if m else ""
+    return [f"Point to the handle of the {side}drawer."]
+
+
+def ppcs_queries(instruction: str) -> list[str]:
+    """"Pick the apple from the plate and place it in the pan." -> the apple, then the pan.
+
+    Query 0 is the manipulated object and query 1 the destination; ``molmo_anchor_ids``
+    selects which become Gaussian centres, so both arms come from this one definition.
+    """
+    m = re.search(r"pick the (.+?) from the", instruction, re.I)
+    obj = m.group(1).strip() if m else "object"
+    return [f"Point to the {obj}.", "Point to the pan."]
+
+
+def tom_queries(instruction: str) -> list[str]:
+    return ["Point to the start button on the microwave."]
+
+
+#: task -> instruction -> pointing queries. Derived from each episode's own instruction
+#: rather than hard-coded per task, because PickPlaceCounterToStove varies the object.
+#:
+#: These strings are part of the trained arm. Rewriting one silently makes every existing
+#: checkpoint's cache stale, so a change here means rebuilding all three caches (~11 GPU-h)
+#: and re-training -- see the note in runs/tom-molmo-n4096-s0.yaml about why the
+#: TurnOnMicrowave query was left alone even though it is the one that struggles.
+TASK_QUERIES = {
+    "OpenDrawer": opendrawer_queries,
+    "PickPlaceCounterToStove": ppcs_queries,
+    "TurnOnMicrowave": tom_queries,
+}
+
+
+def queries_for(task: str, instruction: str) -> list[str]:
+    """The pointing prompts for one episode of ``task``, given its own instruction."""
+    try:
+        fn = TASK_QUERIES[task]
+    except KeyError:
+        raise KeyError(
+            f"no pointing queries defined for task {task!r}; known: {sorted(TASK_QUERIES)}"
+        ) from None
+    return fn(instruction)
+
+
+def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
+    """Combine the agentview anchors for one query. Returns (xyz | None, agreed).
+
+    Agreeing views are averaged; disagreeing ones fall back to the better-supported view,
+    since a disagreement means at least one of them lifted through an occluder and the
+    midpoint of a right answer and a wrong one is simply a third wrong answer.
+    """
+    got = [(v, a, n) for v, (a, n) in per_view.items() if v in STATIC_VIEWS]
+    if not got:
+        return None, False
+    if len(got) == 1:
+        return got[0][1], False
+    (_, a0, n0), (_, a1, n1) = got
+    if float(np.linalg.norm(a0 - a1)) <= agree_dist:
+        return (a0 + a1) / 2.0, True
+    return (a0 if n0 >= n1 else a1), False
+
+
+def apply_wrist(agentview, per_view, accept_dist: float, require_agentview: bool):
+    """Refine the agentview anchor with the wrist one. Returns (xyz, used_wrist).
+
+    The wrist camera is close to the target and therefore the most precise view when it can
+    see it -- but for much of an episode it CANNOT. At the start the arm is parked and the
+    target is out of frame entirely, and the model will still answer with something. So the
+    wrist is treated as a refinement that must be corroborated: it is adopted only when it
+    lands within ``accept_dist`` of what the agentviews already agreed on, and a wrist
+    anchor with no agentview to check it against is discarded by default.
+    """
+    w = per_view.get("wrist")
+    if w is None:
+        return agentview, False
+    if agentview is None:
+        return (None if require_agentview else w[0]), (not require_agentview)
+    if float(np.linalg.norm(w[0] - agentview)) <= accept_dist:
+        return w[0], True
+    return agentview, False
