@@ -100,29 +100,25 @@ nvidia-smi -L
 # rather than time out at trial 80: the client's partial dump does NOT match the
 # per_trial_seed*_n*.json glob the pooling reads, so a killed run contributes nothing at all.
 if grep -qiE '^\s*molmo_sampling:\s*true' "$DATA_CONFIG"; then
-    LEFT=$(squeue -h -j "${SLURM_JOB_ID}" -o %L 2>/dev/null | tr -d ' ')
-    LEFT_MIN=$(python3 -c "
-import sys
-t = sys.argv[1] if len(sys.argv) > 1 else ''
-if not t:
-    print(-1); raise SystemExit
-d, _, rest = t.partition('-')
-if rest:
-    days, t = int(d), rest
-else:
-    days, t = 0, t
-p = [int(x) for x in t.split(':')]
-while len(p) < 3:
-    p.insert(0, 0)
-print(days * 1440 + p[0] * 60 + p[1] + (1 if p[2] else 0))
-" "$LEFT")
+    # Minutes of walltime left, from the epoch timestamp Slurm exports -- bash arithmetic, no
+    # text parsing. Fails OPEN (-1, no check), because this guard exists to catch a too-short
+    # --time and must never itself be why a correctly-submitted job dies. The first version
+    # parsed `squeue -o %L`, which prints one row per array element: it read "5:51\n5" and
+    # killed three elements of the very sweep it was protecting.
+    LEFT_MIN=-1
+    if [ -n "${SLURM_JOB_END_TIME:-}" ]; then
+        LEFT_MIN=$(( (SLURM_JOB_END_TIME - $(date +%s)) / 60 ))
+    fi
     MIN_NEEDED="${MOLMO_MIN_MINUTES:-200}"
-    if [ "$LEFT_MIN" -ge 0 ] && [ "$LEFT_MIN" -lt "$MIN_NEEDED" ]; then
+    if [ "$LEFT_MIN" -lt 0 ]; then
+        echo "molmo arm: walltime check skipped (SLURM_JOB_END_TIME unset)"
+    elif [ "$LEFT_MIN" -lt "$MIN_NEEDED" ]; then
         echo "ERROR: $RUN is a MolmoPoint arm and only ${LEFT_MIN} min of walltime remain." >&2
         echo "  Resubmit with --time=05:00:00 (or set MOLMO_MIN_MINUTES to override)." >&2
         exit 1
+    else
+        echo "molmo arm: ${LEFT_MIN} min of walltime available"
     fi
-    echo "molmo arm: ${LEFT_MIN} min of walltime available"
 fi
 
 export TEXT_CONTEXT_FILE="$TEXT_CTX"
