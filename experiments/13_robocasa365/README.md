@@ -114,6 +114,16 @@ starts the pointer itself; see `data_prep/roi_sampling/README.md`. The first rou
 numbers was thrown away because eval had no molmo branch and silently sampled uniformly, so
 check `molmo_stats.frame_cover` in the per-trial json before reading any stage-3 rate.
 
+**Stage 3 answer, at 50K (100 trials, seed 7).** OpenDrawer 71.0%, against 44.0% uniform, 69.3%
+eef and 77.3% for the GT-handle oracle: +27.0 pp on uniform (p<1e-4) and statistically
+indistinguishable from *both* eef (p=0.78) and the oracle (p=0.26). It does not transfer —
+TurnOnMicrowave lands on 59.0%, exactly its uniform baseline, and PickPlaceCounterToStove
+reaches 32.0% (object) / 26.0% (object + pan) against 4% uniform but 51% eef. The ordering is
+the detector's, not the sampler's: `eval_molmo_accuracy.py` measures the point landing within
+one sigma of the GT target 63% of the time on OpenDrawer and 33% on the microwave, whose start
+button sits among near-identical neighbours. Adding the destination as a second Gaussian centre
+does not pay for splitting the budget (26% vs 32%, p=0.35).
+
 **Stage 0** is the with-VLM control, and the only reason it is a full retrain rather than a
 comparison against the old 20-epoch runs: those stopped at 19,500 steps under a cosine schedule
 annealed to *that* horizon, so their checkpoints are not a prefix of a 50K run and cannot be
