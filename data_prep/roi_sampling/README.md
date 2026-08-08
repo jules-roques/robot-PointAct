@@ -69,6 +69,37 @@ the point land on the named
 object, does it pick the **correct** drawer on left/right episodes, does the lifted anchor
 sit on the object in 3D, and does it jitter between replans?
 
+### Scoring the detector on its own
+
+```bash
+# TurnOnMicrowave needs ground truth dumped from the simulator first (V100, ~40 min)
+sbatch --export=ALL,TASK=TurnOnMicrowave,RESET_ONLY=1 \
+       experiments/13_robocasa365/target_positions_jeanzay.slurm
+# then merge the shards, and build the episode map the join needs
+python -m data_prep.roi_sampling.dump_target_positions --task TurnOnMicrowave \
+       --out <task>/roi_meta/target_positions.npz --merge <task>/roi_meta/target_positions_shard*.npz
+python -m data_prep.robocasa365_to_lerobot.episode_index_map \
+       --source-dir <src>/lerobot --dataset-dir <task>
+
+sbatch --export=ALL,TASK=OpenDrawer experiments/13_robocasa365/molmo_accuracy_jeanzay.slurm
+```
+
+`eval_molmo_accuracy.py` measures the pointer with no policy in the loop, from the cache
+alone — no GPU, since the 8B forwards were paid once at build time. It reports the outcome
+split (anchored / pointed-but-unliftable / pointed nowhere, which `frame_cover` merges), the
+3D error distribution against the sampling sigma, per-camera pixel error from the stored
+detections against the reprojected ground truth, distractor margins, and replan jitter.
+
+Ground truth differs by task and the script picks neither for you. **OpenDrawer** uses
+`--gt labels`, the same handle centroid the GT-oracle arm centres its Gaussian on, so the
+error is the gap between this arm and the oracle arm's input. **TurnOnMicrowave** has no
+labels and cannot cheaply get them — the labeller finds a task's target by probing
+`env.drawer/.door/.cab/.obj/…` and the only match there is `.obj`, the food item *inside*
+the microwave — so it uses `--gt geom --target start_button` against
+`dump_target_positions.py`. That join goes through `source_episode_map.json`, because
+converted episode indices are not source episode indices (OpenDrawer drops 18 failed replays
+and renumbers); `--gt geom` fails rather than assuming the identity.
+
 ## Notes
 
 - An earlier version of this pipeline used YOLO-World. It was removed: an open-vocabulary
