@@ -11,6 +11,7 @@ bump is centred:
 | `eef` | the frame's own end-effector, `observation.state[:3]` | nothing |
 | `oracle` | centroid of the points MuJoCo labels as the handle | `points_3views_labels` LMDB |
 | `molmo` | where a frozen MolmoPoint-8B points, given the episode's instruction | this pipeline |
+| `molmo_motion` | where a frozen MolmoMotion-4B forecasts the **gripper** will be | this pipeline (Stage 4) |
 
 `oracle` is privileged information and exists to upper-bound what any detector could buy.
 `molmo` is the honest version of it: same Gaussian, but the centre comes from an
@@ -99,6 +100,54 @@ the microwave — so it uses `--gt geom --target start_button` against
 `dump_target_positions.py`. That join goes through `source_episode_map.json`, because
 converted episode indices are not source episode indices (OpenDrawer drops 18 failed replays
 and renumbers); `--gt geom` fails rather than assuming the identity.
+
+## Stage 4 — MolmoMotion, a forecast instead of a detection
+
+`molmo` centres the Gaussian on a *detected object*. `molmo_motion` centres it on where the
+**gripper is predicted to go**, which is a different bet with a different failure mode.
+
+`allenai/MolmoMotion-4B-H3-F30` takes three history frames from one camera, a query point as
+a pixel plus its 3D history in camera-frame-at-t₀, and the episode's instruction; it returns
+that point's future 3D track, 30 steps of absolute camera-frame metres. The query point is
+the **end-effector**, which proprio already gives us exactly — so unlike the MolmoPoint arm,
+nothing here can point at the wrong object. The worst case is a bad forecast of a correctly
+identified point.
+
+Two structural differences from Stage 3 are worth stating before any numbers exist:
+
+- **A forecast track starts at the current gripper.** A Gaussian tube along it therefore
+  contains the `eef` arm's bump and extends it forward, where a static object anchor
+  abandoned the gripper region entirely. That is the specific Stage 3 failure this is meant
+  to avoid — though "meant to" is a hypothesis until measured.
+- **It is single-camera.** MolmoPoint took left+right+wrist in one forward and each returned
+  point named its image. MolmoMotion's image list axis is time, not view, so a second view is
+  a second forward. Do not assume the three-view trick from `build_molmo_cache.py` carries
+  over.
+
+### Gate — is the forecast true?
+
+```bash
+sbatch experiments/13_robocasa365/gate_molmo_motion_jeanzay.slurm
+```
+
+This gate is stronger than Stage 3's, which is why it runs before anything else. MolmoPoint
+had to be scored against simulator labels that only two of three tasks have. Here the ground
+truth is free and exact — the gripper's future position is `observation.state[:3]` a few
+frames later — so `gate_molmo_motion.py` scores the forecast in cm on every task with no
+labelling step.
+
+It reports, per task and horizon, the forecast error, the **static baseline** ("the gripper
+does not move"), and the win rate against it. That baseline is the number to read first: if
+the gripper travels 3 cm in a second and the forecast errs by 4 cm, the model is worse than
+assuming nothing happens, however plausible the overlay video looks. Stage 3 shipped without
+such a control.
+
+It also sweeps the **history stride**, because the checkpoint was trained at 15 fps, the data
+is 20 fps, and the processor passes the model no timestamps to reconcile them (it builds them
+as `np.arange(H) * 1.0`). 1/15 s is 1.333 frames at 20 fps and so cannot be sampled exactly;
+rounding to `[t-3, t-1, t]` would feed non-uniform spacing to a model that assumes uniform.
+Integer strides keep the assumption intact and the gate measures which transfers, rather than
+this pipeline picking one and hoping.
 
 ## Notes
 

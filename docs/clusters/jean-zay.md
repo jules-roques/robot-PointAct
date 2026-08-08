@@ -53,10 +53,33 @@ faster than a failed job does.
 
 ## $WORK is out of inodes, not out of space
 
-`idr_quota_project` reports the number that matters: **~96% of 500,000 inodes used, against
-7% of the 5 TiB**. A single torch install is roughly 40,000 files, so building any new uv
-environment inside the repo fails with `Disk quota exceeded (os error 122)` mid-extraction
-while `df` still shows terabytes free.
+`idr_quota_project` reports the number that matters: **98.8% of 500,000 inodes used, against
+7% of the 5 TiB** (measured 2026-08-08; it was ~96% when this page was written). A single
+torch install is roughly 40,000 files, so building any new uv environment inside the repo
+fails with `Disk quota exceeded (os error 122)` mid-extraction while `df` still shows
+terabytes free. At that occupancy a `git worktree add` fails too, part-way through checkout.
+
+Note that `idr_quota_project` is refreshed daily, so it will keep reporting the pre-cleanup
+number for hours after a cleanup that really did work. Trust `du --inodes -d 1` for the
+before/after, and the enforcement itself for whether you have room.
+
+**Check your shell actually agrees with this page.** As of 2026-08-08 `~/.zshrc` exported
+all three caches to `$WORK`, which is how `.cache/uv` reached 237,000 inodes — 47% of the
+whole project quota — on its own:
+
+```bash
+export PIP_CACHE_DIR=$WORK/.cache/pip     # wrong, use $SCRATCH
+export UV_CACHE_DIR=$WORK/.cache/uv       # wrong, use $SCRATCH
+export HF_HOME=$WORK/.cache/huggingface   # wrong, use $SCRATCH
+```
+
+The advice below is only advice until the profile stops overriding it, and every job script
+here that sets `HF_HOME=$SCRATCH/.cache/huggingface` is working around that line rather than
+being belt-and-braces.
+
+`uv cache prune` is the cheap recovery: it removes only entries no longer referenced and
+freed ~45,000 inodes (11 GiB) here. It is not sufficient on its own — most of what remains
+is hardlinked into live venvs, where deleting the cache copy frees a link and not an inode.
 
 Put both the cache and the environment on `$SCRATCH`:
 

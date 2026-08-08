@@ -1,0 +1,43 @@
+[project]
+name = "pointact-molmo-motion"
+version = "0.1.0"
+description = "MolmoMotion trajectory-forecasting environment for PointAct: gates and builds the Stage 4 anchor signal."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+
+# Separate from `envs/molmo` even though both are Molmo checkpoints, because they are not
+# the same software: MolmoPoint loads its modelling code out of the model repo with
+# trust_remote_code=True (transformers 4.57.1 exactly), while MolmoMotion ships a real pip
+# package that carries its own model code and only asks for transformers <5. Merging them
+# would pin the looser one to the stricter one's exact transformers for no benefit.
+dependencies = [
+    "pointact",
+    # The model code. No PyPI release at time of writing, so it comes from the repo.
+    "molmo-motion @ git+https://github.com/allenai/molmo-motion.git",
+    # Pinned to the root env's exact build, as envs/molmo is: unpinned, uv resolves the
+    # newest torch + CUDA wheels, which are untested against this cluster's drivers and far
+    # larger than $WORK's inode quota can absorb (docs/clusters/jean-zay.md). molmo-motion
+    # itself only asks for torch>=2.5, so this is compatible.
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "accelerate",
+    "einops",
+    # Frames come out of the episode mp4s. `av` is what data_prep already uses; molmo-motion
+    # pulls torchcodec/decord for its own video loading, which this pipeline never calls.
+    "av",
+    "pyarrow",
+    "lmdb",
+    "msgpack",
+    "msgpack-numpy",
+    "tqdm",
+    "pillow",
+    # The gate logs its curves and overlay videos.
+    "wandb",
+]
+
+[tool.uv]
+# Dependency container only -- nothing to build or install from this directory.
+package = false
+
+[tool.uv.sources]
+pointact = { path = "../..", editable = true }

@@ -114,6 +114,49 @@ def points_in_box(
     return inside
 
 
+def base_to_camera(points_base: np.ndarray, base2cam: np.ndarray) -> np.ndarray:
+    """Robot-base frame -> camera frame.
+
+    :func:`project_base_points` does this internally on its way to pixels, but MolmoMotion
+    wants the query point's *3D* history in camera-frame-at-t0 as well as its pixel, so the
+    intermediate is needed on its own.
+
+    Args:
+        points_base: (..., 3) points in the robot-base frame.
+        base2cam: (4, 4) base->camera transform.
+
+    Returns:
+        (..., 3) points in the camera frame, same leading shape as the input.
+    """
+    p = np.asarray(points_base, dtype=np.float64)
+    shape = p.shape
+    flat = p.reshape(-1, 3)
+    homo = np.concatenate([flat, np.ones((len(flat), 1))], axis=1)
+    return ((base2cam @ homo.T).T[:, :3]).reshape(shape)
+
+
+def camera_to_base(points_cam: np.ndarray, base2cam: np.ndarray) -> np.ndarray:
+    """Camera frame -> robot-base frame; the exact inverse of :func:`base_to_camera`.
+
+    MolmoMotion returns its forecast in camera-frame-at-t0 metres, while the point clouds
+    the sampler weights live in the base frame, so every predicted trajectory comes back
+    through here before it can centre a Gaussian.
+
+    Args:
+        points_cam: (..., 3) points in the camera frame.
+        base2cam: (4, 4) base->camera transform (inverted here).
+
+    Returns:
+        (..., 3) points in the robot-base frame.
+    """
+    p = np.asarray(points_cam, dtype=np.float64)
+    shape = p.shape
+    flat = p.reshape(-1, 3)
+    homo = np.concatenate([flat, np.ones((len(flat), 1))], axis=1)
+    cam2base = np.linalg.inv(np.asarray(base2cam, dtype=np.float64))
+    return ((cam2base @ homo.T).T[:, :3]).reshape(shape)
+
+
 def eef_density_weights(
     points_xyz: np.ndarray,
     anchors: np.ndarray,
@@ -230,6 +273,17 @@ if __name__ == "__main__":
     assert np.allclose(recovered, obj_uv, atol=2.0), f"pixel round-trip off: {recovered} vs {obj_uv}"
 
     print(f"pixel round-trip OK ({recovered} ~= {obj_uv})")
+
+    # base <-> camera round-trip. MolmoMotion's forecast arrives in the camera frame and has
+    # to land in the base frame exactly, or the Gaussian centre is silently displaced.
+    back = camera_to_base(base_to_camera(pts, b2c), b2c)
+    assert np.allclose(back, pts, atol=1e-9), "base<->camera round-trip drifted"
+    # base_to_camera must agree with what project_base_points computes on its way to pixels.
+    p_cam = base_to_camera(pts, b2c)
+    assert np.allclose(p_cam[:, 2], z, atol=1e-9), "base_to_camera disagrees with the projector"
+    # Shape preservation: the forecaster passes (H, P, 3) and (F, 3) through unflattened.
+    assert base_to_camera(pts[:6].reshape(2, 3, 3), b2c).shape == (2, 3, 3), "shape not preserved"
+    print("base<->camera round-trip OK")
 
     # The MolmoPoint lift: a single pixel is padded into a window, and the anchor is the
     # median of the cloud points projecting into it. Point at the object's pixel and check
