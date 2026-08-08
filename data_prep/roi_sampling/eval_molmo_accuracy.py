@@ -271,7 +271,11 @@ def main() -> None:
                     errs.append(err)
                     row = {"ep": ep, "frame": f, "err": err,
                            "agree": bool(det["agree"]), "n_support": int(det["n_support"]),
-                           "phase": f / max(1, lengths[ep] - 1)}
+                           "phase": f / max(1, lengths[ep] - 1),
+                           # Both positions, so an analysis can ask *where* a miss went --
+                           # a summary statistic cannot distinguish "the other drawer" from
+                           # "the target's own earlier position".
+                           "anchor": det["xyz"].astype(np.float64), "gt": gt.astype(np.float64)}
                     for name in distractors:
                         g = gt_lookup(name, ep, f)
                         if g is not None:
@@ -410,7 +414,8 @@ def main() -> None:
     if args.dump_rows and rows:
         args.dump_rows.parent.mkdir(parents=True, exist_ok=True)
         cols = {k: np.array([r[k] for r in rows])
-                for k in ("ep", "frame", "err", "agree", "n_support", "phase")}
+                for k in ("ep", "frame", "err", "agree", "n_support", "phase",
+                          "anchor", "gt")}
         for name in distractors:
             key = f"d_{name}"
             cols[key] = np.array([r.get(key, np.nan) for r in rows])
