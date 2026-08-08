@@ -22,6 +22,13 @@ from pathlib import Path
 #: Run directory names look like od-eef-n4096-s0.
 RUN_RE = re.compile(r"^(?P<task>[a-z]+)-(?P<sampling>uniform|eef|anchor)-n(?P<npoints>\d+)-s(?P<seed>\d+)$")
 
+#: Run-name task prefixes -> the RoboCasa env they train on, for the table heading.
+TASK_NAMES = {
+    "od": "OpenDrawer",
+    "ppcs": "PickPlaceCounterToStove",
+    "tom": "TurnOnMicrowave",
+}
+
 
 def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score interval.
@@ -38,13 +45,22 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-def collect(exprs_dir: Path) -> dict:
-    """(sampling, npoints, ckpt_step) -> pooled successes/trials across seeds."""
+def collect(exprs_dir: Path, task: str) -> dict:
+    """(sampling, npoints, ckpt_step) -> pooled successes/trials across seeds, for one task.
+
+    The task filter is load-bearing, not a convenience. The pooling key deliberately omits the
+    task, so without it every arm of every task sharing a (sampling, npoints) lands in the same
+    cell: once stage 2 was evaluated, the n4096 row of this OpenDrawer table silently became
+    OpenDrawer + PickPlaceCounterToStove + TurnOnMicrowave pooled at n=350, reading 36.9% where
+    OpenDrawer alone is 44.0%. That was correct when the ablation directory held od-* only.
+    """
     pooled = defaultdict(lambda: {"successes": 0, "trials": 0, "seeds": set()})
 
     for run_dir in sorted(exprs_dir.iterdir()):
         match = RUN_RE.match(run_dir.name)
         if not match or not (run_dir / "results").is_dir():
+            continue
+        if match["task"] != task:
             continue
         for ckpt_dir in sorted((run_dir / "results").iterdir()):
             step = ckpt_dir.name.removeprefix("checkpoint-")
@@ -62,7 +78,7 @@ def collect(exprs_dir: Path) -> dict:
     return pooled
 
 
-def render(pooled: dict, final_step: str) -> str:
+def render(pooled: dict, final_step: str, task: str = "od") -> str:
     """Point-count x sampling table at the final checkpoint, plus the full curve below."""
     lines = []
     npoints_values = sorted({key[1] for key in pooled})
@@ -71,7 +87,8 @@ def render(pooled: dict, final_step: str) -> str:
     if not pooled:
         return "No stage-A results found yet."
 
-    lines.append(f"Stage A -- OpenDrawer, success rate at checkpoint {final_step} [Wilson 95% CI]")
+    lines.append(f"Stage A -- {TASK_NAMES.get(task, task)}, "
+                 f"success rate at checkpoint {final_step} [Wilson 95% CI]")
     lines.append("")
     header = f"{'points':>8s} | " + " | ".join(f"{s:^26s}" for s in samplings)
     lines.append(header)
@@ -116,10 +133,17 @@ def main() -> None:
         default="50000",
         help="Checkpoint the headline table is taken at (the others form the curve).",
     )
+    parser.add_argument(
+        "--task",
+        default="od",
+        choices=sorted(TASK_NAMES),
+        help="Run-name task prefix. One table per task: arms of different tasks must never "
+             "share a cell, and the pooling key alone does not separate them.",
+    )
     parser.add_argument("--out", type=Path, default=None, help="Also write the table here.")
     args = parser.parse_args()
 
-    table = render(collect(args.exprs_dir), args.final_step)
+    table = render(collect(args.exprs_dir, args.task), args.final_step, args.task)
     print(table)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
