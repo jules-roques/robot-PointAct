@@ -19,8 +19,16 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-#: Run directory names look like od-eef-n4096-s0.
-RUN_RE = re.compile(r"^(?P<task>[a-z]+)-(?P<sampling>uniform|eef|anchor)-n(?P<npoints>\d+)-s(?P<seed>\d+)$")
+#: Sampling arms, ordered least to most privileged -- which is also the order the table reads
+#: best in: uniform knows nothing, eef knows where the gripper is, molmo looks at the images,
+#: anchor is handed the answer by the simulator. Longest-first so the regex alternation below
+#: does not match "molmo" inside "molmo-objpan".
+SAMPLINGS = ("uniform", "eef", "molmo-objpan", "molmo-obj", "molmo", "anchor")
+
+#: Run directory names look like od-eef-n4096-s0 or ppcs-molmo-objpan-n4096-s0.
+RUN_RE = re.compile(
+    rf"^(?P<task>[a-z]+)-(?P<sampling>{'|'.join(SAMPLINGS)})-n(?P<npoints>\d+)-s(?P<seed>\d+)$"
+)
 
 #: Run-name task prefixes -> the RoboCasa env they train on, for the table heading.
 TASK_NAMES = {
@@ -82,7 +90,9 @@ def render(pooled: dict, final_step: str, task: str = "od") -> str:
     """Point-count x sampling table at the final checkpoint, plus the full curve below."""
     lines = []
     npoints_values = sorted({key[1] for key in pooled})
-    samplings = [s for s in ("uniform", "eef", "anchor") if any(k[0] == s for k in pooled)]
+    # Display order is SAMPLINGS' semantic one, not the longest-first order the regex needs.
+    order = ("uniform", "eef", "molmo", "molmo-obj", "molmo-objpan", "anchor")
+    samplings = [s for s in order if any(k[0] == s for k in pooled)]
 
     if not pooled:
         return "No stage-A results found yet."
