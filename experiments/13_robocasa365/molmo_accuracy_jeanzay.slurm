@@ -33,9 +33,12 @@ TASK="${TASK:?set TASK=<OpenDrawer|TurnOnMicrowave> via --export}"
 DATA_ROOT="${DATA_ROOT:-$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb}"
 DATASET="$DATA_ROOT/$TASK"
 OUT="${OUT:-$DATASET/roi_meta/molmo_accuracy.json}"
+# Derive the row dump from OUT rather than hardcoding it: with a fixed name, scoring a
+# variant cache (a re-lift, a different fusion) silently overwrites the baseline's rows
+# while leaving its JSON in place, so the two stop describing the same run.
+ROWS="${ROWS:-${OUT%.json}_rows.npz}"
 
-ARGS=(--dataset-dir "$DATASET" --out "$OUT"
-      --dump-rows "$DATASET/roi_meta/molmo_accuracy_rows.npz")
+ARGS=(--dataset-dir "$DATASET" --out "$OUT" --dump-rows "$ROWS")
 case "$TASK" in
     OpenDrawer)
         ARGS+=(--gt labels)
