@@ -16,11 +16,15 @@ Three properties of the checkpoint drive the design here, all confirmed against
 * **Everything is camera-frame-at-t0.** The 3D history goes in as camera-frame metres and
   ``future_3d`` comes back as absolute camera-frame metres, so both ends convert through
   :func:`pointact.roi_sampling.geometry.base_to_camera` / ``camera_to_base``.
-* **The query point count is not ours to choose.** ``config.num_points`` is 8 for this
-  checkpoint, the processor rejects any other shape, and the prompt string literally says
-  "Predict the future 3D point coordinates of 8 points". One gripper query is therefore
-  expressed by replicating it into all 8 slots (see :meth:`MolmoMotionForecaster.forecast_point`),
-  not by passing P=1.
+* **The query point count is adjustable, despite looking fixed.** ``config.num_points``
+  defaults to 8 and the processor hard-validates every input shape against it, which reads
+  like an architectural constraint. It is not: ``num_points`` never sizes a weight -- it only
+  validates inputs, fills the "{P} points" slot in the prompt, and shapes the parsed output
+  (the package's own ``eval/full_rollout.py`` exposes it as ``--num_points``). Since this is
+  a decode-bound model, asking for 1 point instead of 8 cuts the generated tokens and the
+  wall clock with them. Pass ``num_points=1`` to spend the budget on the one query we have.
+  Replicating a single query into 8 slots also works and is what ``reduce`` collapses, but it
+  pays ~8x for seven copies of the same answer.
 * **A parse failure returns zeros, not an error.** If the model emits no valid ``<tracks>``
   block, ``predict_trajectory`` returns ``zeros((P, F, 3))`` and skips the step that adds the
   anchor back -- so the "prediction" is the camera's optical centre, which lifts to a
@@ -68,6 +72,7 @@ class MolmoMotionForecaster:
         device: str = "cuda",
         history_size: int = HISTORY_SIZE,
         future_horizon: int = FUTURE_HORIZON,
+        num_points: int | None = None,
     ):
         import torch
         from molmo_motion import MolmoMotion, MolmoMotionProcessor
@@ -91,9 +96,22 @@ class MolmoMotionForecaster:
             raise ValueError(
                 f"checkpoint expects history_size={cfg_h}, got {self.history_size} -- "
                 f"H1 and H3 checkpoints are not interchangeable")
-        #: Fixed by the checkpoint (8 here) and hard-validated by the processor, so the query
-        #: point count is not ours to choose -- see :meth:`forecast_point`.
-        self.num_points = int(getattr(cfg, "num_points", 8))
+        # `num_points` is a *config* field, not a weight shape: it is used only to validate
+        # the input shapes, to fill the "{P} points" slot in the prompt, and to size the
+        # parsed output array (the package's own `eval/full_rollout.py` exposes it as a CLI
+        # flag). Lowering it to 1 therefore asks the model for one track instead of eight,
+        # which cuts the generated tokens -- and this is a decode-bound model, so it cuts the
+        # wall clock nearly in proportion. The checkpoint was trained at P=8, so P=1 is out of
+        # distribution for the prompt; whether accuracy survives is an empirical question the
+        # gate answers, not something to assume in either direction.
+        self.num_points = int(num_points if num_points is not None
+                              else getattr(cfg, "num_points", 8))
+        if num_points is not None:
+            # Both objects consult their own config: the processor to validate and build the
+            # prompt, the model to shape the parsed trajectory. Setting one and not the other
+            # gives a shape mismatch at parse time rather than a clean error.
+            self.processor.config.num_points = self.num_points
+            self.model.config.num_points = self.num_points
         self.max_sequence_length = int(getattr(cfg, "max_sequence_length", 2560))
 
     def forecast_point(

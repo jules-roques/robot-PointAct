@@ -54,6 +54,9 @@ def main() -> None:
     ap.add_argument("--history-stride", type=int, default=1)
     ap.add_argument("--replan-stride", type=int, default=8,
                     help="Cadence a cache would be built at, for the projection.")
+    ap.add_argument("--num-points", type=int, default=None,
+                    help="Override config.num_points (default 8). This is decode-bound, so "
+                         "asking for 1 point instead of 8 is the largest cost lever there is.")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -74,7 +77,8 @@ def main() -> None:
     eef_cam = base_to_camera(eef_base, cam["base2cam"])
 
     from pointact.roi_sampling.molmo_motion import MolmoMotionForecaster
-    fc = MolmoMotionForecaster(str(args.model_dir))
+    fc = MolmoMotionForecaster(str(args.model_dir), num_points=args.num_points)
+    print(f"num_points={fc.num_points}")
 
     # Query frames spread through the episode, so the timing is not dominated by one
     # unusually short or long generation.

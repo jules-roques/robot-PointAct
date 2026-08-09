@@ -412,6 +412,10 @@ def main() -> None:
                     help="The checkpoint's native 30 by default. Lower it if the gate "
                          "reports a high parse-failure rate: the token budget is 160x this "
                          "and the context window is 2560, so a long horizon can truncate.")
+    ap.add_argument("--num-points", type=int, default=None,
+                    help="Override config.num_points (default 8). It is a config field, not "
+                         "a weight shape; 1 asks for the single track we actually want and "
+                         "is far cheaper on this decode-bound model.")
     ap.add_argument("--reduce", choices=("median", "first"), default="median",
                     help="How to collapse the checkpoint's 8 fixed point slots, which all "
                          "carry the same replicated gripper query.")
@@ -456,7 +460,11 @@ def main() -> None:
         )
 
     from pointact.roi_sampling.molmo_motion import MolmoMotionForecaster
-    forecaster = MolmoMotionForecaster(str(args.model_dir), future_horizon=args.future_horizon)
+    forecaster = MolmoMotionForecaster(str(args.model_dir), future_horizon=args.future_horizon,
+                                       num_points=args.num_points)
+    print(f"num_points={forecaster.num_points}", flush=True)
+    if run is not None:
+        run.config["num_points"] = forecaster.num_points
 
     all_records: list[dict] = []
     media: dict[str, Path] = {}
