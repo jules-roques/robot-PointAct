@@ -323,6 +323,8 @@ def main() -> None:
     ap.add_argument("--frame-ms", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dark", action="store_true", help="Dark plotly template.")
+    ap.add_argument("--emit-json", action="store_true",
+                    help="Also write the figure as JSON beside the html. write_html bundles a ~3.5 MB copy of plotly.js per file; a page showing several figures wants one shared copy and the data on its own.")
     ap.add_argument("--near-radius", type=float, default=0.15,
                     help="Radius used for the reported 'fraction of budget near the handle' stat.")
     # eef-density knobs (defaults match the data config)
@@ -499,6 +501,11 @@ def main() -> None:
 
             fig = build_figure(method, frames_data, ep, task, args)
             out = args.out_dir / f"{args.out_prefix}_ep{ep:04d}_{method}.html"
+            if args.emit_json:
+                jpath = out.with_suffix(".json")
+                jpath.write_text(fig.to_json())
+                print(f"[{method:7s}] figure json -> {jpath} "
+                      f"({jpath.stat().st_size / 1e6:.1f} MB)")
             fig.write_html(str(out), include_plotlyjs=(True if args.plotlyjs == "inline" else "cdn"),
                            full_html=not args.fragment, auto_play=False)
             mb = out.stat().st_size / 1e6

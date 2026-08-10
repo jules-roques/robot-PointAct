@@ -238,18 +238,18 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
                 xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, window)
                 if xyz is not None and in_workspace(xyz, workspace):
                     per_view[v] = (xyz, n)
-            xyz, n_views = fuse_mean(per_view)
-            anchors.append({
-                "xyz": xyz if xyz is not None else np.full(3, np.nan),
-                "query_id": int(det["query_id"]),
-                "n_support": sum(n for _, n in per_view.values()),
-                # No longer an agreement flag: how many views contributed to the mean. One
-                # view is a single unchecked opinion, three is a consensus, and the eval
-                # splits on it exactly as it used to.
-                "agree": n_views > 1,
-                "n_views": n_views,
-                **{f"{v}_uv": det.get(f"{v}_uv") for v in VIEWS},
-            })
+            # One centre per view that lifted -- no fusion at all. The sampler maxes the
+            # density over them, so agreeing views collapse to one bump and disagreeing ones
+            # get a bump each instead of a single anchor in the gap between them.
+            uvs = {f"{v}_uv": det.get(f"{v}_uv") for v in VIEWS}
+            qid, nv = int(det["query_id"]), len(per_view)
+            if not per_view:
+                anchors.append({"xyz": np.full(3, np.nan), "query_id": qid, "n_support": 0,
+                                "agree": False, "n_views": 0, "view_id": -1, **uvs})
+            for v, (xyz, n) in per_view.items():
+                anchors.append({"xyz": xyz, "query_id": qid, "n_support": n,
+                                "agree": nv > 1, "n_views": nv,
+                                "view_id": VIEWS.index(v), **uvs})
         out[f] = anchors
 
     for f, action_env in enumerate(action_envs):
@@ -270,7 +270,8 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
     from pointact.roi_sampling.molmo_anchors import VIEWS
 
     cols: dict[str, list] = {k: [] for k in
-                             ("ep", "frame", "query_id", "n_support", "agree", "n_views")}
+                             ("ep", "frame", "query_id", "n_support", "agree", "n_views",
+                              "view_id")}
     xyz, uvs = [], {v: [] for v in VIEWS}
     for ep, frames in sorted(per_episode.items()):
         for f, anchors in sorted(frames.items()):
@@ -281,6 +282,7 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
                 cols["n_support"].append(a["n_support"])
                 cols["agree"].append(bool(a["agree"]))
                 cols["n_views"].append(int(a["n_views"]))
+                cols["view_id"].append(int(a["view_id"]))
                 xyz.append(np.asarray(a["xyz"], dtype=np.float64))
                 for v in VIEWS:
                     uv = a.get(f"{v}_uv")
@@ -300,11 +302,13 @@ def merge_shards(shards: list[Path], out: Path) -> None:
         if set(p.files) != keys:
             raise SystemExit(f"shard {s} has different columns; do not merge across runs")
     merged = {k: np.concatenate([p[k] for p in parts], axis=0) for k in keys}
-    order = np.lexsort((merged["query_id"], merged["frame"], merged["ep"]))
+    order = np.lexsort((merged["view_id"], merged["query_id"], merged["frame"], merged["ep"]))
     merged = {k: v[order] for k, v in merged.items()}
     seen = {}
-    for e, f, q in zip(merged["ep"], merged["frame"], merged["query_id"]):
-        seen[(int(e), int(f), int(q))] = seen.get((int(e), int(f), int(q)), 0) + 1
+    # A frame now holds one row per (query, view), so the view has to be part of the key --
+    # without it every multi-view frame would look like an overlapping shard.
+    for e, f, q, v in zip(merged["ep"], merged["frame"], merged["query_id"], merged["view_id"]):
+        seen[(int(e), int(f), int(q), int(v))] = seen.get((int(e), int(f), int(q), int(v)), 0) + 1
     dupes = sum(1 for c in seen.values() if c > 1)
     if dupes:
         raise SystemExit(f"{dupes} duplicate (episode, frame, query) rows -- shards overlap")
@@ -340,6 +344,8 @@ def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int
 
     by_key: dict[tuple[int, int], list[dict]] = {}
     for i in range(len(d["ep"])):
+        if int(d["view_id"][i]) < 0 and not np.isfinite(d[field][i]).all():
+            continue          # a "nothing lifted" placeholder; the frame simply has no centre
         rec = {"xyz": d[field][i], "query_id": int(d["query_id"][i]),
                "n_support": int(d["n_support"][i]), "agree": bool(d["agree"][i])}
         for v in VIEWS:

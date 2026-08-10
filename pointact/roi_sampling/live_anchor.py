@@ -194,11 +194,14 @@ class LiveMolmoAnchor:
                 self.stats.wrist_lifted += 1
                 if len(per_view) == 1:
                     self.stats.wrist_adopted += 1   # the lone-wrist call, formerly discarded
-            xyz, n_views = fuse_mean(per_view)
-            if xyz is not None:
+            # Every view that lifted becomes its own centre, exactly as the cache stores
+            # them. Fusing here and not there -- or the reverse -- evaluates the policy on a
+            # signal it was not trained on.
+            if per_view:
                 self.stats.query_hits += 1
-                self.stats.agree += int(n_views > 1)
-                anchors.append(xyz)
+                self.stats.agree += int(len(per_view) > 1)
+                for _v, (xyz, _n) in per_view.items():
+                    anchors.append(xyz)
 
         if not anchors:
             return None

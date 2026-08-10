@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import numpy as np
 
-#: Slots per record. 2 covers every task here (OpenDrawer and TurnOnMicrowave use 1,
-#: PickPlaceCounterToStove uses 2: the object and the pan it goes into).
-MAX_ANCHORS = 2
+#: Slots per record. Every *view* that lifts contributes its own centre, so the ceiling is
+#: queries x views = 2 x 3. Caches written under the old 2-slot layout stay readable:
+#: layout_for infers the slot count from the record instead of assuming this constant.
+MAX_ANCHORS = 6
 
 #: Cameras a point can be found in, in the order their uv pairs are stored. The wrist camera
 #: was added after the first caches were written, so records exist in two lengths and the
@@ -56,11 +57,14 @@ def layout_for(n_floats: int) -> tuple[tuple[str, ...], int]:
     Older caches were written with two views and are still worth reading: their left/right
     pixels cost 0.7 s of an 8B model each. Anything else is a corrupt record.
     """
-    stride, rem = divmod(n_floats - 1, MAX_ANCHORS)
-    n_views, vrem = divmod(stride - 6, 2)
-    if rem or vrem or not 0 < n_views <= len(VIEW_ORDER):
-        raise ValueError(f"unrecognised molmo record length {n_floats}")
-    return VIEW_ORDER[:n_views], stride
+    # Current slot count first, then the historical one, so a pre-per-view cache is still
+    # readable by the visualisation and the evaluator.
+    for slots in (MAX_ANCHORS, 2):
+        stride, rem = divmod(n_floats - 1, slots)
+        n_views, vrem = divmod(stride - 6, 2)
+        if not rem and not vrem and 0 < n_views <= len(VIEW_ORDER):
+            return VIEW_ORDER[:n_views], stride
+    raise ValueError(f"unrecognised molmo record length {n_floats}")
 
 
 def empty_record() -> np.ndarray:
@@ -112,7 +116,7 @@ def decode_anchors(rec: np.ndarray, query_ids: tuple[int, ...] | None = None) ->
     if n <= 0:
         return None
     out = []
-    for i in range(min(n, MAX_ANCHORS)):
+    for i in range(min(n, (len(rec) - 1) // stride)):
         off = 1 + i * stride
         if query_ids is not None and int(rec[off + 3]) not in query_ids:
             continue
@@ -137,7 +141,7 @@ def decode_pixels(rec: np.ndarray) -> list[dict]:
     except ValueError:
         return []
     out = []
-    for i in range(min(int(rec[0]), MAX_ANCHORS)):
+    for i in range(min(int(rec[0]), (len(rec) - 1) // stride)):
         off = 1 + i * stride
         det = {
             "query_id": int(rec[off + 3]),

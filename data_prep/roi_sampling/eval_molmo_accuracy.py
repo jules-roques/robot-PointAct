@@ -264,7 +264,13 @@ def main() -> None:
                 dets = [x for x in molmo_cache.decode_pixels(
                     np.frombuffer(bytes(mb), dtype=molmo_cache.RECORD_DTYPE))
                     if x["query_id"] == args.query_id]
-                det = dets[0] if dets else None
+                # A query can carry one centre per view. The sampler concentrates budget on
+                # ALL of them, so the quantity that matters is how close the NEAREST centre
+                # gets: that is what decides whether the target is covered at all.
+                lifted = [x for x in dets if np.isfinite(x["xyz"]).all()]
+                if lifted:
+                    lifted.sort(key=lambda x: float(np.linalg.norm(x["xyz"] - gt)))
+                det = lifted[0] if lifted else (dets[0] if dets else None)
 
                 if det is None:
                     counts["nowhere"] += 1
