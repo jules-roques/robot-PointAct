@@ -191,6 +191,43 @@ def horizon_indices(stride: int, n_future: int) -> dict[float, int]:
     return out
 
 
+def fuse_views(records: list[dict], name: str = "fused") -> list[dict]:
+    """Average the per-view predicted positions of every sample seen from >1 view.
+
+    MolmoMotion is single-camera, so two views mean two independent forwards on the same
+    instant. If their mistakes were independent, averaging would cut the error by up to
+    sqrt(2); if they share a systematic bias -- e.g. both under-shoot the motion, which is
+    what an error growing in step with the travelled distance looks like -- the error vectors
+    are parallel and averaging changes nothing. This measures which regime we are in.
+
+    The mean is taken in the **robot-base frame**, where both views' predictions already
+    live, so no camera convention leaks into the fusion. Samples seen from only one view are
+    dropped rather than passed through, so the fused rows are never a mix of fused and
+    single-view predictions.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for r in records:
+        if "pred_base" not in r:
+            continue
+        groups.setdefault(
+            (r["task"], r["episode"], r["t0"], r["stride"], r["horizon_s"]), []).append(r)
+
+    fused = []
+    for (task, ep, t0, stride, sec), rs in groups.items():
+        if len(rs) < 2:
+            continue
+        pred = np.mean([np.asarray(r["pred_base"], dtype=np.float64) for r in rs], axis=0)
+        truth = np.asarray(rs[0]["truth_base"], dtype=np.float64)
+        fused.append({
+            "task": task, "view": name, "episode": ep, "t0": t0,
+            "stride": stride, "horizon_s": sec,
+            "err_m": float(np.linalg.norm(pred - truth)),
+            "static_err_m": float(rs[0]["static_err_m"]),
+            "pred_base": pred.tolist(), "truth_base": truth.tolist(),
+        })
+    return fused
+
+
 def summarise(records: list[dict]) -> list[dict]:
     """Collapse per-sample errors into a per (task, view, stride, horizon) table."""
     rows = []
@@ -299,6 +336,12 @@ def process_episode(
                     "err_m": float(np.linalg.norm(pred_base[f - 1] - truth)),
                     # The static baseline predicts the gripper does not move at all.
                     "static_err_m": float(np.linalg.norm(eef_base[t0] - truth)),
+                    # Base-frame positions, not just the error magnitude. Required to fuse
+                    # views after the fact: averaging predictions needs the vectors, and a
+                    # run that stored only distances cannot be re-analysed without paying
+                    # for the forwards again.
+                    "pred_base": pred_base[f - 1].tolist(),
+                    "truth_base": truth.tolist(),
                 })
 
             if viz_stride is not None and stride == viz_stride:
@@ -387,6 +430,29 @@ def self_test() -> None:
     b2c[:3, 3] = [0.1, -0.2, 0.8]
     pts = np.array([[0.3, 0.1, 0.2], [0.35, 0.12, 0.25]])
     assert np.allclose(camera_to_base(base_to_camera(pts, b2c), b2c), pts, atol=1e-12)
+
+    # fuse_views: the two regimes that decide whether a second view is worth its forwards.
+    def _rec(view, pred, t0=0):
+        return {"task": "T", "view": view, "episode": 0, "t0": t0, "stride": 2,
+                "horizon_s": 1.0, "err_m": 0.0, "static_err_m": 0.10,
+                "pred_base": pred, "truth_base": [0.0, 0.0, 0.0]}
+
+    # Opposed errors: averaging cancels them exactly.
+    (f,) = fuse_views([_rec("left", [0.1, 0, 0]), _rec("right", [-0.1, 0, 0])])
+    assert f["err_m"] < 1e-12 and f["view"] == "fused", f
+    # Identical (systematically biased) errors: averaging changes nothing at all. This is the
+    # regime a shared under-shoot puts us in, and the reason a second view can be worthless.
+    (f,) = fuse_views([_rec("left", [0.1, 0, 0]), _rec("right", [0.1, 0, 0])])
+    assert abs(f["err_m"] - 0.1) < 1e-12, f
+    # The static baseline must be carried through unchanged: fusing predictions must not
+    # quietly redefine what they are compared against.
+    assert abs(f["static_err_m"] - 0.10) < 1e-12, f
+    # A sample seen from one view only is not a fusion and must be dropped, not passed
+    # through as if it had been.
+    assert fuse_views([_rec("left", [0.1, 0, 0])]) == []
+    # Distinct samples must not be pooled into one another.
+    assert len(fuse_views([_rec("left", [0.1, 0, 0], t0=0), _rec("right", [0, 0, 0], t0=0),
+                           _rec("left", [0.1, 0, 0], t0=8), _rec("right", [0, 0, 0], t0=8)])) == 2
     print("gate self-test OK")
 
 
@@ -523,6 +589,14 @@ def main() -> None:
             + (", and lower --future-horizon: every forward failed to parse"
                if attempts and parse_fail == attempts else ""))
 
+    # A "fused" pseudo-view, only when more than one real view was scored. It costs no extra
+    # forwards: it reuses the predictions already made.
+    if len({r["view"] for r in all_records}) > 1:
+        fused = fuse_views(all_records)
+        print(f"fused {len(fused)} samples across "
+              f"{sorted({r['view'] for r in all_records})}")
+        all_records.extend(fused)
+
     rows = summarise(all_records)
     (out_dir / "gate_summary.json").write_text(json.dumps(
         {"forwards": attempts, "parse_failures": parse_fail,
@@ -534,6 +608,10 @@ def main() -> None:
            for k in ("episode", "t0", "stride", "horizon_s", "err_m", "static_err_m")},
         task=np.array([r["task"] for r in all_records]),
         view=np.array([r["view"] for r in all_records]),
+        # Positions, so a later question about combining views can be answered from the
+        # records instead of by re-running the model.
+        pred_base=np.array([r.get("pred_base", [np.nan] * 3) for r in all_records]),
+        truth_base=np.array([r.get("truth_base", [np.nan] * 3) for r in all_records]),
     )
 
     print(f"\nforwards={attempts} unparseable={parse_fail} ({fail_rate:.1%})")
