@@ -33,6 +33,10 @@ OUT_DIR="$DATASET/roi_meta"
 OUT_NAME="${OUT_NAME:-depth_anchors}"
 MERGED="${MERGED:-$OUT_DIR/${OUT_NAME}.npz}"
 CACHE_DIRNAME="${CACHE_DIRNAME:-points_3views_molmo_depth}"
+# Which estimator in the merged npz becomes the cache: xyz (the --point-window median),
+# xyz_w1 (the same median over a fixed 3x3), or xyz_near. One merged file holds all of them,
+# so switching arms costs a cache write and not another replay.
+CACHE_FIELD="${CACHE_FIELD:-xyz}"
 
 PY="$MAIN_REPO/.venv/bin/python"
 
@@ -51,4 +55,5 @@ rm -rf "$DATASET/$CACHE_DIRNAME"
 "$PY" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
     --dataset-dir "$DATASET" \
     --write-cache "$MERGED" \
-    --out-dirname "$CACHE_DIRNAME"
+    --out-dirname "$CACHE_DIRNAME" \
+    --cache-field "$CACHE_FIELD"
