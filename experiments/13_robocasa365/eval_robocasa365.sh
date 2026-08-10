@@ -147,6 +147,14 @@ except Exception:
             # a MolmoPoint server for the centre at every replan instead.
             POINT_SAMPLING=anchor
             MOLMO=1
+            # A frame the pointer misses must be sampled the way training sampled it. Read
+            # the trained value rather than defaulting: a policy trained with the eef
+            # fallback and evaluated with the uniform one is a mismatch on exactly the
+            # frames the anchor could not handle -- the hardest ones -- and it would show up
+            # as a plausible-looking drop.
+            if grep -qiE '^\s*molmo_fallback:\s*eef' "$DATA_CFG"; then
+                POINT_SAMPLING_FALLBACK=eef
+            fi
         else
             # "uniform" must be a positive finding, not the leftover case. Listing only the
             # arms we know how to reproduce at eval time made this an open-world assumption:
@@ -168,7 +176,8 @@ except Exception:
             fi
             POINT_SAMPLING=uniform
         fi
-        echo "derived point_sampling=${POINT_SAMPLING} from ${DATA_CFG}"
+        echo "derived point_sampling=${POINT_SAMPLING}"\
+" fallback=${POINT_SAMPLING_FALLBACK:-uniform} from ${DATA_CFG}"
     else
         # Deliberately fatal. Defaulting to uniform here silently evaluates an eef- or
         # oracle-trained policy on uniformly drawn clouds -- a train/test mismatch that shows
@@ -253,6 +262,7 @@ uv run --project "$POINTACT_ENV" --no-sync scripts/run_server.py \
     --args.pretrained_path ${ckpt_dir}/checkpoint-${ckpt_step} \
     --args.num_denoise_steps ${num_denoise_steps} \
     --args.point_sampling ${POINT_SAMPLING} \
+    --args.point_sampling_fallback ${POINT_SAMPLING_FALLBACK:-uniform} \
     ${TEXT_CONTEXT_FILE:+--args.text_context_file ${TEXT_CONTEXT_FILE}} \
     --args.host ${host} --args.port ${port} &
 SERVER_PID=$!

@@ -67,7 +67,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # per-frame anchor LMDB (same keys as the point LMDB) written by
         # data_prep/roi_sampling/build_molmo_cache.py is loaded and the Gaussian below is
         # centred on the frozen pointing model's detection(s). Frames with no usable
-        # detection fall back to uniform sampling.
+        # detection fall back to `molmo_fallback`.
         molmo_sampling: bool = False,
         molmo_anchor_dirname: str | None = None,
         # Which of the task's pointing queries to use as Gaussian centres. The cache stores
@@ -76,6 +76,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         molmo_anchor_ids: tuple[int, ...] = (0,),
         molmo_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
         molmo_sampling_floor: float = 0.05,   # minimum weight at infinite distance
+        # What an unanchored frame gets: "uniform" (the baseline draw) or "eef" (the same
+        # density, centred on the gripper, which is never missing). Must match eval -- see
+        # the note in pointact/data/schema.py.
+        molmo_fallback: str = "uniform",
         # EEF-density sampling (optional, mutually exclusive with molmo_anchor_dirname).
         # No cache needed: the anchor is the frame's own end-effector position (state[:3],
         # already in the point-cloud/base frame before centering). Replaces the uniform
@@ -142,6 +146,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.molmo_anchor_ids = tuple(int(i) for i in molmo_anchor_ids)
         self.molmo_sampling_sigma = molmo_sampling_sigma
         self.molmo_sampling_floor = molmo_sampling_floor
+        if molmo_fallback not in ("uniform", "eef"):
+            raise ValueError(f"molmo_fallback must be 'uniform' or 'eef', got {molmo_fallback!r}")
+        self.molmo_fallback = molmo_fallback
         self.molmo_anchor_dir = (
             os.path.join(self.root, molmo_anchor_dirname)
             if molmo_anchor_dirname is not None
@@ -445,17 +452,24 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                     point_cloud[:, :3], eef_pos, self.eef_sampling_sigma, self.eef_sampling_floor
                 )
                 ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
-            elif molmo_anchors is not None:
+            elif self.molmo_sampling:
                 # Same Gaussian as the eef and oracle arms, centred on the frozen pointing
                 # model's detection(s) instead of the gripper or the ground-truth handle.
                 # With two anchors (object + destination) the weights take their max, so the
                 # budget is shared between the regions rather than doubled.
-                rng = np.random.default_rng(np.random.randint(2**31 - 1))
-                w = eef_density_weights(
-                    point_cloud[:, :3], molmo_anchors,
-                    self.molmo_sampling_sigma, self.molmo_sampling_floor,
-                )
-                ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
+                centres = molmo_anchors
+                if centres is None and self.molmo_fallback == "eef":
+                    # The pointer found nothing liftable this frame. Rather than dropping to
+                    # the baseline uniform draw, centre the same density on the gripper --
+                    # always available, and a strong sampler in its own right.
+                    centres = item[OBS_STATE][:3].numpy()
+                if centres is not None:
+                    rng = np.random.default_rng(np.random.randint(2**31 - 1))
+                    w = eef_density_weights(
+                        point_cloud[:, :3], centres,
+                        self.molmo_sampling_sigma, self.molmo_sampling_floor,
+                    )
+                    ridxs = density_weighted_indices(len(point_cloud), max_npoints, w, rng)
             if ridxs is None:  # no usable anchor -> baseline uniform draw
                 ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]

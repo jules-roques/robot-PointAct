@@ -1,0 +1,39 @@
+# PickPlaceCounterToStove / MolmoPoint anchor, object + pan, depth lift + eef fallback --
+# 4096 points, stage 5.
+#
+# Differs from ppcs-molmod-obj ONLY in molmo_anchor_ids, so the pair still isolates whether
+# naming the destination as well as the object is worth splitting one point budget.
+#
+# The stage-3 answer was no: 26% against 32% for object-only. The detection numbers say that
+# was never a detector problem -- the pan is the best-localised target in the whole study
+# (99.7% anchored, 82.6% within sigma under the depth lift, and it barely moved from the
+# cloud lift because it was already good). So this arm is a re-test of budget-splitting with
+# a better object anchor underneath it, not a re-test of whether the pan can be found.
+#
+# One confound removed relative to stage 3: with a uniform fallback, reading both queries
+# also changed how often ANY anchor existed (78.6% -> 99.8% of frames), so the pair moved
+# two things at once. The eef fallback makes an unanchored frame a gripper-centred draw in
+# both arms, which shrinks that difference to the budget split it was meant to test.
+extends: _base.yaml
+
+meta:
+  task: PickPlaceCounterToStove
+  sampling: molmo-depth-objpan
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+
+data:
+  lerobot_datasets:
+    - repo_id: PickPlaceCounterToStove
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo_depth_w5
+      # Query 0 = "Point to the <object>.", query 1 = "Point to the pan."
+      molmo_anchor_ids: [0, 1]
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05
+      molmo_fallback: eef

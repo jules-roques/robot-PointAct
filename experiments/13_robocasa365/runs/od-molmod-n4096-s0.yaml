@@ -1,0 +1,38 @@
+# OpenDrawer / MolmoPoint anchor, depth lift + eef fallback / 4096 points -- stage 5.
+#
+# Two changes from od-molmo-n4096-s0, both in the anchor rather than the policy:
+#  1. The cache is lifted from per-pixel depth instead of from the 1 cm voxel cloud
+#     (points_3views_molmo_depth_w5). A window on the voxelised cloud gathers points at
+#     several depths along the frustum and medians to a position between surfaces.
+#  2. Frames the pointer misses are drawn around the gripper, not uniformly.
+#
+# READ THIS BEFORE INTERPRETING THE RESULT. OpenDrawer is the one task where the depth lift
+# measures WORSE in aggregate: within-sigma 63.2% -> 55.7%, usable 59.9% -> 52.7%, even
+# though tight thresholds improve (<2 cm 19.9% -> 28.0%). By phase it is better for the
+# first 70% of the episode and collapses in the last 30%, where both lifts already fail;
+# the cause is not established (two hypotheses tested and refuted -- see
+# data_prep/roi_sampling/dump_molmo_depth_anchors.py). It is retrained anyway so the arm is
+# not selected on the tasks where the new lift happens to win. The honest prior here is
+# "no better, possibly worse", and the eef fallback only touches 5.4% of frames on this task.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: molmo-depth
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+
+data:
+  lerobot_datasets:
+    - max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo_depth_w5
+      # One query on this task: "Point to the handle of the left/right drawer."
+      molmo_anchor_ids: [0]
+      # Sigma/floor match the eef and oracle arms exactly, so the arms differ only in where
+      # the density bump is centred.
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05
+      molmo_fallback: eef

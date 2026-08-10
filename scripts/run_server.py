@@ -62,6 +62,9 @@ class ServerArgs:
     point_sampling: str = "uniform"   # "uniform" | "eef" | "anchor"
     point_sampling_sigma: float = 0.08
     point_sampling_floor: float = 0.05
+    # What an "anchor" policy does when no anchor arrives for a frame. Must equal the
+    # `molmo_fallback` of the data config it was trained with.
+    point_sampling_fallback: str = "uniform"   # "uniform" | "eef"
 
     # diffusion
     num_denoise_steps: int = 10
@@ -107,11 +110,16 @@ class Policy:
         self.processor = processor_class.from_pretrained(args.pretrained_path)
         if args.point_sampling not in ("uniform", "eef", "anchor"):
             raise ValueError(f"Unknown point_sampling {args.point_sampling!r}")
+        if args.point_sampling_fallback not in ("uniform", "eef"):
+            raise ValueError(
+                f"Unknown point_sampling_fallback {args.point_sampling_fallback!r}")
         self.processor.point_sampling = args.point_sampling
         self.processor.point_sampling_sigma = args.point_sampling_sigma
         self.processor.point_sampling_floor = args.point_sampling_floor
+        self.processor.point_sampling_fallback = args.point_sampling_fallback
         print(
             f"[server] point_sampling={args.point_sampling} "
+            f"fallback={args.point_sampling_fallback} "
             f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor}"
         )
 

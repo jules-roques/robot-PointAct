@@ -281,6 +281,12 @@ class RobotPointProcessorBase(RobotProcessorBase):
     point_sampling: str = "uniform"        # "uniform" | "eef" | "anchor"
     point_sampling_sigma: float = 0.08
     point_sampling_floor: float = 0.05
+    # What an "anchor" policy does on a frame with no anchor. Must equal the `molmo_fallback`
+    # its training data config used: falling back differently at eval than in training is the
+    # same class of mismatch as evaluating an anchor policy on uniform clouds, just narrower
+    # and correspondingly harder to notice. eval_robocasa365.sh derives it from the
+    # checkpoint's data_config.yaml rather than leaving it to the caller.
+    point_sampling_fallback: str = "uniform"   # "uniform" | "eef"
 
     def _sampling_anchor(self, mini_batch: dict) -> np.ndarray | None:
         """Centre of the sampling density for this frame, in the point-cloud (base) frame."""
@@ -321,6 +327,17 @@ class RobotPointProcessorBase(RobotProcessorBase):
             return self._subsample_point_cloud(point_cloud, max_npoints)
 
         anchor = self._sampling_anchor(mini_batch)
+        if anchor is None and self.point_sampling_fallback == "eef":
+            # Trained with molmo_fallback=eef: an unanchored frame is drawn around the
+            # gripper, not uniformly. Read observation.state directly -- _sampling_anchor
+            # resolves to the *anchor* key for this policy, which is the thing that is missing.
+            state = mini_batch.get("observation.state")
+            if state is not None:
+                if isinstance(state, torch.Tensor):
+                    state = state.detach().cpu().numpy()
+                state = np.asarray(state, dtype=np.float64).reshape(-1)
+                if len(state) >= 3 and np.isfinite(state[:3]).all():
+                    anchor = state[:3]
         if anchor is None:
             # No usable anchor this frame (e.g. the handle is occluded): fall back to the
             # uniform draw rather than silently biasing the sample. Falling back on EVERY

@@ -60,11 +60,22 @@ class LerobotConfig:
     # below, so the three differ only in where the bump is centred. `molmo_anchor_ids` picks
     # which of the task's pointing queries become centres: (0,) is the manipulated object
     # alone, (0, 1) adds the destination — one cache, two arms, no rebuild.
+    #
+    # `molmo_fallback` is what happens on a frame where the pointer found nothing liftable.
+    # "uniform" is the original behaviour and the conservative reading -- an unanchored frame
+    # is drawn exactly like the baseline. "eef" instead centres the same density on the
+    # gripper, which is never missing. That matters where misses are common and the eef arm is
+    # strong: on PickPlaceCounterToStove a quarter of object calls do not lift, and uniform
+    # scores 4% there against eef's 51%, so the fallback decides those frames' sampling more
+    # than the anchor does. Whatever is set here MUST be what eval falls back to as well --
+    # eval_robocasa365.sh reads this field out of the checkpoint's data_config.yaml for
+    # exactly that reason.
     molmo_sampling: bool = False
     molmo_anchor_dirname: str | None = None
     molmo_anchor_ids: tuple[int, ...] = (0,)
     molmo_sampling_sigma: float = 0.08
     molmo_sampling_floor: float = 0.05
+    molmo_fallback: str = "uniform"   # uniform | eef
 
     # EEF-density point sampling (optional, mutually exclusive with the Molmo fields above).
     # No cache needed: the anchor is the frame's own end-effector position. See

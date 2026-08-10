@@ -1,0 +1,42 @@
+# PickPlaceCounterToStove / MolmoPoint anchor, object only, depth lift + eef fallback --
+# 4096 points, stage 5.
+#
+# The strongest case in the set. Against the cloud-lifted cache this arm was trained on, the
+# food anchor goes from 71.6% to 91.9% within sigma (median 3.6 -> 3.1 cm), and anchors that
+# land closer to the pan than to the food collapse from 19.8% to 4.5%. Unlike OpenDrawer
+# there is no GT-oracle arm bounding the headroom here, and the stage-3 gap to eef was large
+# and significant (32% vs 51%, p=0.006).
+#
+# The eef fallback matters MORE than the lift on this task and is why it is in this run.
+# A quarter of object calls never lift -- overwhelmingly lone-wrist detections that
+# require_agentview discards -- and those frames were drawn uniformly, which scores 4% here
+# against eef's 51%. This run therefore moves two things at once and cannot attribute a gain
+# between them; ppcs-molmod-objpan has the same fallback, so the obj/objpan contrast stays
+# clean, but obj-vs-stage-3 does not.
+#
+# What neither change fixes: the anchor does not track the food while it is carried
+# (95.8% within sigma before the grasp, 25.0% in transit).
+extends: _base.yaml
+
+meta:
+  task: PickPlaceCounterToStove
+  sampling: molmo-depth-obj
+  npoints: 4096
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+
+data:
+  lerobot_datasets:
+    - repo_id: PickPlaceCounterToStove
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/PickPlaceCounterToStove/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 4096
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo_depth_w5
+      # Query 0 = the object ("Point to the apple."). Query 1 (the pan) is cached but
+      # deliberately not read here.
+      molmo_anchor_ids: [0]
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05
+      molmo_fallback: eef
