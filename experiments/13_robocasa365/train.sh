@@ -59,4 +59,7 @@ if [ -n "$COMPUTE_CAP" ] && [ "${COMPUTE_CAP%%.*}" -lt 8 ]; then
 fi
 
 # No training arguments on the command line, by design: the run yaml is the whole config.
-accelerate launch $ACCELERATE_ARGS scripts/train.py "$RUN_CONFIG"
+# EXTRA_TRAIN_ARGS is the one exception, and it is not for science: scripts/train.py folds the
+# yaml in as argparse defaults, so anything here wins, which is what a smoke run needs to cap
+# max_steps and redirect output_dir. Leave it unset for a real run.
+accelerate launch $ACCELERATE_ARGS scripts/train.py "$RUN_CONFIG" ${EXTRA_TRAIN_ARGS:-}

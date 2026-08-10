@@ -463,6 +463,14 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                     # the baseline uniform draw, centre the same density on the gripper --
                     # always available, and a strong sampler in its own right.
                     centres = item[OBS_STATE][:3].numpy()
+                    # Say so, rate-limited. A fallback that never fires means the flag is
+                    # inert and the run is training the old behaviour under a new name;
+                    # one that fires on EVERY frame means the anchor cache never loaded.
+                    # Both look like a healthy loss curve, so make the count visible.
+                    self._molmo_fallbacks = getattr(self, "_molmo_fallbacks", 0) + 1
+                    if self._molmo_fallbacks in (1, 10, 100, 1000, 10000):
+                        print(f"[dataset] molmo_fallback=eef used on "
+                              f"{self._molmo_fallbacks} unanchored frames so far", flush=True)
                 if centres is not None:
                     rng = np.random.default_rng(np.random.randint(2**31 - 1))
                     w = eef_density_weights(

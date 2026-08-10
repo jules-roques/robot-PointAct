@@ -9,6 +9,11 @@
 #          --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/od-eef-n4096-s0.yaml \
 #          experiments/13_robocasa365/train_jeanzay.slurm
 #
+# Smoke a config on the dev QoS first when anything about the data path changed -- 2 h cap,
+# fast turnaround, and a bad run costs minutes instead of a t3 slot:
+#   sbatch --constraint=h100 --qos=qos_gpu_h100-dev --time=00:40:00 \
+#          --export=ALL,RUN_CONFIG=<run>.yaml,SMOKE_STEPS=30 <this file>
+#
 #SBATCH --job-name=train-od
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
@@ -16,8 +21,12 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=96
 #SBATCH --hint=nomultithread
-#SBATCH --qos=qos_gpu_h100-t4
-#SBATCH --time=100:00:00
+# t3 (20 h) rather than t4 (100 h): a 50K-step run at 4 GPUs finishes in ~7 h, so t4 asks the
+# scheduler to reserve five times what the job needs and queues behind everything. A run that
+# genuinely needs longer (the stage-0 VLM arms are ~22 h) should override BOTH on the command
+# line -- `sbatch --qos=qos_gpu_h100-t4 --time=100:00:00 ...` -- rather than raising it here.
+#SBATCH --qos=qos_gpu_h100-t3
+#SBATCH --time=20:00:00
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365_replay/%x_%j.out
 
@@ -67,5 +76,18 @@ POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
 RUN_CONFIG="${RUN_CONFIG:?set RUN_CONFIG=<experiments/13_robocasa365/runs/*.yaml> via --export}"
 # Everything about the run lives in that yaml -- no training arguments here.
 echo "run_config=$RUN_CONFIG"
+
+# SMOKE_STEPS: train a handful of steps to prove the config, the data path and the sampling
+# arm all work, then stop. It writes to its own output_dir and its own run name -- a smoke
+# sharing the real run's directory would leave checkpoints the real run then resumes from,
+# turning a 30-step sanity check into the first 30 steps of the experiment.
+if [ -n "${SMOKE_STEPS:-}" ]; then
+    SMOKE_NAME="smoke-$(basename "${RUN_CONFIG%.yaml}")"
+    export EXTRA_TRAIN_ARGS="--max_steps ${SMOKE_STEPS} --save_steps ${SMOKE_STEPS} \
+        --logging_steps 1 --output_dir $SCRATCH/PointAct_exprs/robocasa365/smoke/$SMOKE_NAME \
+        --run_name $SMOKE_NAME"
+    export WANDB_MODE=disabled
+    echo "SMOKE: $SMOKE_STEPS steps -> $SCRATCH/PointAct_exprs/robocasa365/smoke/$SMOKE_NAME"
+fi
 uv run --project "$POINTACT_ENV" --no-sync \
     bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
