@@ -104,11 +104,18 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
     body belongs to the fixture and contains any of the substrings, minus any matching
     ``body_excludes``. An empty ``body_contains`` entry means the whole fixture.
 
-    ``object`` takes every geom of one ``env.objects`` entry, by its body naming prefix. The
-    mean over *all* of an object's geoms -- collision and visual alike, which sit on top of
-    each other -- is its centroid, which is the thing a pointing model is being asked for.
-    Not ``body_xpos`` of the root body: that is the MJCF frame origin, which for an
-    asymmetric mesh like a pan is not where the object looks like it is.
+    ``object`` takes every geom of one ``env.objects`` entry, by exact body name. The mean
+    over *all* of an object's geoms -- collision and visual alike, which sit on top of each
+    other -- is its centroid, which is the thing a pointing model is being asked for. Not
+    ``body_xpos`` of the root body: that is the MJCF frame origin, which for an asymmetric
+    mesh like a pan is not where the object looks like it is.
+
+    Matching body names *exactly* rather than by ``naming_prefix``, because RoboCASA's
+    ``try_to_place_in`` registers the receptacle an object starts in as a second object named
+    ``<name>_container``: on PickPlaceCounterToStove the food is ``obj`` and the plate under
+    it is ``obj_container``, whose bodies also start with ``obj_``. A prefix match silently
+    returns the food *and* the plate, and their midpoint is a ground truth that is wrong by a
+    few centimetres -- the scale the whole study is measuring at.
     """
     model = env.env.sim.model
     if "object" in spec:
@@ -116,9 +123,17 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
         objects = getattr(env.env, "objects", {}) or {}
         if key not in objects:
             raise RuntimeError(f"env.objects has no '{key}'; it has {sorted(objects)}")
-        prefix = objects[key].naming_prefix
+        obj = objects[key]
+        # `.bodies` is the authoritative list but raises on some object types whose `_bodies`
+        # carries an unnamed entry (the pan does). The root body alone is right for a
+        # single-body object, and dump_episode refuses a set that matched nothing, so a
+        # narrower match fails loudly instead of silently answering with the wrong position.
+        try:
+            want = {obj.root_body, *(obj.bodies or [])}
+        except (TypeError, AttributeError):
+            want = {obj.root_body}
         return [gid for gid in range(int(model.ngeom))
-                if (model.body_id2name(int(model.geom_bodyid[gid])) or "").startswith(prefix)]
+                if (model.body_id2name(int(model.geom_bodyid[gid])) or "") in want]
 
     if "geom" in spec:
         name = f"{fixture.naming_prefix}{spec['geom']}"
