@@ -196,6 +196,11 @@ def main() -> None:
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="pointact-robocasa365")
     ap.add_argument("--wandb-entity", default="diffusion4robots")
+    ap.add_argument("--wandb-run-name", default=None,
+                    help="Defaults to a name derived from --cache-dirname. Two caches logged "
+                         "under one name is the failure worth avoiding here: the gate is a "
+                         "picture of what the pointer found, and which lift produced it is "
+                         "the whole question.")
     ap.add_argument("--python", default=sys.executable)
     args = ap.parse_args()
 
@@ -206,9 +211,17 @@ def main() -> None:
     run = None
     if args.wandb:
         import wandb
+        # "…-depth" for the per-pixel-depth cache, the bare name for the original voxel-cloud
+        # one, so the two gates are told apart on the W&B side without reading the config.
+        suffix = ""
+        if "depth" in args.cache_dirname:
+            suffix = "-depth"
+        elif args.cache_dirname != "points_3views_molmo":
+            suffix = f"-{args.cache_dirname.replace('points_3views_molmo', '').strip('_')}"
+        run_name = args.wandb_run_name or f"stage3.0-visu-molmopoint{suffix}"
         run = wandb.init(
             project=args.wandb_project, entity=args.wandb_entity,
-            name="stage3.0-visu-molmopoint", job_type="viz",
+            name=run_name, job_type="viz",
             # Same stage tag as the trained arms in experiments/13_robocasa365/runs/*molmo*,
             # so one W&B filter returns the gate and the runs it gated. "gate" and
             # job_type="viz" are what still tell them apart.
