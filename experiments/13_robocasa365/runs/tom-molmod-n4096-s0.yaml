@@ -1,4 +1,4 @@
-# TurnOnMicrowave / MolmoPoint anchor, depth lift + eef fallback / 4096 points -- stage 5.
+# TurnOnMicrowave / MolmoPoint anchor, depth lift + eef fallback / 4096 points -- stage 3, with the better-principled anchor.
 #
 # The task the depth lift helps most. Against the cloud-lifted cache this arm was trained on:
 # median error 13.2 -> 6.7 cm, within-sigma 33.1% -> 55.4%, usable 27.6% -> 46.2%, and
@@ -21,7 +21,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+  stage: "Stage 3: MolmoPoint anchor"
 
 data:
   lerobot_datasets:

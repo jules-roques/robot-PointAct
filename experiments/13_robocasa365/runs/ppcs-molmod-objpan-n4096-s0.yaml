@@ -1,5 +1,5 @@
 # PickPlaceCounterToStove / MolmoPoint anchor, object + pan, depth lift + eef fallback --
-# 4096 points, stage 5.
+# 4096 points, stage 3, with the better-principled anchor.
 #
 # Differs from ppcs-molmod-obj ONLY in molmo_anchor_ids, so the pair still isolates whether
 # naming the destination as well as the object is worth splitting one point budget.
@@ -22,7 +22,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+  stage: "Stage 3: MolmoPoint anchor"
 
 data:
   lerobot_datasets:

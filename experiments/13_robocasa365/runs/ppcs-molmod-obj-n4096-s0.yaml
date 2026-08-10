@@ -1,5 +1,5 @@
 # PickPlaceCounterToStove / MolmoPoint anchor, object only, depth lift + eef fallback --
-# 4096 points, stage 5.
+# 4096 points, stage 3, with the better-principled anchor.
 #
 # The strongest case in the set. Against the cloud-lifted cache this arm was trained on, the
 # food anchor goes from 71.6% to 91.9% within sigma (median 3.6 -> 3.1 cm), and anchors that
@@ -24,7 +24,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+  stage: "Stage 3: MolmoPoint anchor"
 
 data:
   lerobot_datasets:

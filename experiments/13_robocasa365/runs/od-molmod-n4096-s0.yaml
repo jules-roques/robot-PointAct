@@ -1,4 +1,4 @@
-# OpenDrawer / MolmoPoint anchor, depth lift + eef fallback / 4096 points -- stage 5.
+# OpenDrawer / MolmoPoint anchor, depth lift + eef fallback / 4096 points -- stage 3, with the better-principled anchor.
 #
 # Two changes from od-molmo-n4096-s0, both in the anchor rather than the policy:
 #  1. The cache is lifted from per-pixel depth instead of from the 1 cm voxel cloud
@@ -22,7 +22,7 @@ meta:
   npoints: 4096
   context: text_cache
   seed: 0
-  stage: "Stage 5: MolmoPoint depth-lifted anchor"
+  stage: "Stage 3: MolmoPoint anchor"
 
 data:
   lerobot_datasets:
