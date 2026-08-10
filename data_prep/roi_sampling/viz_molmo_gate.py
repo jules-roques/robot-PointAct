@@ -48,7 +48,10 @@ import numpy as np
 
 from pointact.roi_sampling import molmo_cache
 
-VIEWS = ("left", "right")
+#: The wrist is here because it is the view the fusion rule argues about: a lone wrist
+#: detection is discarded for want of an agentview to corroborate it, and on two of the three
+#: tasks that rule is what caps coverage. Judging it needs seeing what the wrist saw.
+VIEWS = ("left", "right", "wrist")
 
 #: One colour per pointing query, so "object" and "destination" stay distinguishable in a
 #: single frame of PickPlaceCounterToStove.
