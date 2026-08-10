@@ -15,6 +15,10 @@ Why not the segmentation labels the oracle arm uses:
   ``.obj`` -- the food item placed *inside* the microwave, not the button being pressed. And a
   start button is a couple of pixels: a segmentation centroid of it would be dominated by
   quantisation. ``sim.data.geom_xpos`` of the button geom is exact and needs no rendering.
+* PickPlaceCounterToStove has none either, and its two targets are *movable objects* rather
+  than parts of a fixture -- the food item the instruction names and the pan it goes into.
+  Both are carried across the episode (the food by the gripper), so this one has to be
+  replayed per frame; ``--reset-only`` would be wrong for it.
 
 Distractors matter as much as the target. RoboCASA's microwave carries a stop button a few
 centimetres from the start button, so "pointed at the wrong button" and "pointed nowhere near
@@ -56,7 +60,8 @@ import numpy as np
 #: every geom hanging off a body of that fixture whose name contains the substring, which is
 #: how ``environments._build_geom_label_lut`` assigns the handle/door labels -- so the
 #: OpenDrawer entry below reproduces the oracle arm's target from geometry instead of from
-#: rendered labels.
+#: rendered labels. ``object`` names a key of ``env.objects`` instead, for tasks whose target
+#: is a movable object rather than part of a fixture.
 TARGET_GEOMS = {
     "TurnOnMicrowave": {
         "fixture_attr": "microwave",
@@ -77,6 +82,17 @@ TARGET_GEOMS = {
             "drawer_panel": {"body_contains": ["drawer", "door"], "body_excludes": ["handle"]},
         },
     },
+    # Both pointing queries here name a movable object, so there is no fixture to hang the
+    # geoms off: `ppcs_queries` asks for the food item (query 0) and "the pan" (query 1), and
+    # the task builds them as env.objects["obj"] and env.objects["container"]. Each is the
+    # other's distractor -- late in an episode the food ends up *in* the pan, so a
+    # "closer to the pan than to the food" reading is only meaningful early on.
+    "PickPlaceCounterToStove": {
+        "sets": {
+            "obj": {"object": "obj"},
+            "pan": {"object": "container"},
+        },
+    },
 }
 
 
@@ -87,8 +103,23 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
     success check finds the button); ``body_contains`` walks every geom and keeps those whose
     body belongs to the fixture and contains any of the substrings, minus any matching
     ``body_excludes``. An empty ``body_contains`` entry means the whole fixture.
+
+    ``object`` takes every geom of one ``env.objects`` entry, by its body naming prefix. The
+    mean over *all* of an object's geoms -- collision and visual alike, which sit on top of
+    each other -- is its centroid, which is the thing a pointing model is being asked for.
+    Not ``body_xpos`` of the root body: that is the MJCF frame origin, which for an
+    asymmetric mesh like a pan is not where the object looks like it is.
     """
     model = env.env.sim.model
+    if "object" in spec:
+        key = spec["object"]
+        objects = getattr(env.env, "objects", {}) or {}
+        if key not in objects:
+            raise RuntimeError(f"env.objects has no '{key}'; it has {sorted(objects)}")
+        prefix = objects[key].naming_prefix
+        return [gid for gid in range(int(model.ngeom))
+                if (model.body_id2name(int(model.geom_bodyid[gid])) or "").startswith(prefix)]
+
     if "geom" in spec:
         name = f"{fixture.naming_prefix}{spec['geom']}"
         try:
@@ -153,10 +184,14 @@ def dump_episode(env, source_dir: Path, episode_index: int, sets: dict, fixture_
         return None
     obs, _ = env.reset(initial_state_dir=episode_dir, step_after_reset=False)
 
-    fixture = getattr(env.env, fixture_attr, None)
-    if fixture is None:
-        raise RuntimeError(
-            f"env has no attribute '{fixture_attr}'; TARGET_GEOMS is out of step with the task")
+    # A task whose sets are all ``object`` entries has no fixture to resolve against.
+    fixture = None
+    if fixture_attr is not None:
+        fixture = getattr(env.env, fixture_attr, None)
+        if fixture is None:
+            raise RuntimeError(
+                f"env has no attribute '{fixture_attr}'; TARGET_GEOMS is out of step with "
+                f"the task")
     gids = {name: resolve_geom_ids(env, fixture, spec) for name, spec in sets.items()}
     missing = [n for n, ids in gids.items() if not ids]
     if missing:
@@ -326,7 +361,7 @@ def main() -> None:
     t0 = time.time()
     try:
         for i, ep in enumerate(episodes):
-            got = dump_episode(env, source_dir, ep, cfg["sets"], cfg["fixture_attr"],
+            got = dump_episode(env, source_dir, ep, cfg["sets"], cfg.get("fixture_attr"),
                                args.max_frames, reset_only=args.reset_only)
             if got is None:
                 print(f"  ep {ep}: no source dir, skipped")
