@@ -138,16 +138,16 @@ def draw_disc(img: np.ndarray, x: float, y: float, color, radius: int = 3) -> No
 
 
 def draw_polyline(img: np.ndarray, uv: np.ndarray, color, radius: int = 1) -> None:
-    """Draw a track by marking each vertex and the midpoints between consecutive ones.
+    """Draw a track as exactly one marker per step -- no interpolation.
 
-    Not a real line rasteriser: at these horizons consecutive forecast steps are a pixel or
-    two apart, so vertices plus midpoints already read as a continuous track, and a Bresenham
-    implementation would be more code for no visible difference.
+    An earlier version also marked the midpoint between consecutive steps, which made the
+    track read as a continuous line but drew 2N-1 blobs for N predicted steps. That is
+    actively misleading when the point of the overlay is to see what the model predicted:
+    the eye counts marks and infers a horizon. One mark per step, so the visible density is
+    the prediction.
     """
     for i in range(len(uv)):
         draw_disc(img, uv[i, 0], uv[i, 1], color, radius)
-        if i + 1 < len(uv):
-            draw_disc(img, *(0.5 * (uv[i] + uv[i + 1])), color, radius)
 
 
 def write_video(path: Path, images: list[np.ndarray], fps: int = 4) -> Path | None:
@@ -450,6 +450,15 @@ def self_test() -> None:
     # A sample seen from one view only is not a fusion and must be dropped, not passed
     # through as if it had been.
     assert fuse_views([_rec("left", [0.1, 0, 0])]) == []
+
+    # draw_polyline must draw exactly one marker per step. It used to interpolate midpoints,
+    # which drew 2N-1 blobs for N steps and made the overlays read as a longer forecast than
+    # they were. Well-separated points, radius 1 -> a 3x3 block each, none overlapping.
+    canvas = np.zeros((60, 60, 3), dtype=np.uint8)
+    track = np.array([[10.0, 10.0], [20.0, 20.0], [30.0, 30.0], [40.0, 40.0]])
+    draw_polyline(canvas, track, (255, 0, 255))
+    lit = int((canvas.any(axis=2)).sum())
+    assert lit == 9 * len(track), f"expected {9 * len(track)} lit pixels, got {lit}"
     # Distinct samples must not be pooled into one another.
     assert len(fuse_views([_rec("left", [0.1, 0, 0], t0=0), _rec("right", [0, 0, 0], t0=0),
                            _rec("left", [0.1, 0, 0], t0=8), _rec("right", [0, 0, 0], t0=8)])) == 2
