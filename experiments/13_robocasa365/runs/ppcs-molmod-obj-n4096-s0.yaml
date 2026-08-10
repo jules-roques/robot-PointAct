@@ -33,7 +33,7 @@ data:
       text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 4096
       molmo_sampling: true
-      molmo_anchor_dirname: points_3views_molmo_depth_mean
+      molmo_anchor_dirname: points_3views_molmo_perview
       # Query 0 = the object ("Point to the apple."). Query 1 (the pan) is cached but
       # deliberately not read here.
       molmo_anchor_ids: [0]

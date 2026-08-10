@@ -31,7 +31,7 @@ data:
       text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 4096
       molmo_sampling: true
-      molmo_anchor_dirname: points_3views_molmo_depth_mean
+      molmo_anchor_dirname: points_3views_molmo_perview
       # Query 0 = "Point to the <object>.", query 1 = "Point to the pan."
       molmo_anchor_ids: [0, 1]
       molmo_sampling_sigma: 0.08

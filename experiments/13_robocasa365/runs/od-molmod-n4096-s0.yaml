@@ -2,7 +2,7 @@
 #
 # Two changes from od-molmo-n4096-s0, both in the anchor rather than the policy:
 #  1. The cache is lifted from per-pixel depth instead of from the 1 cm voxel cloud
-#     (points_3views_molmo_depth_mean). A window on the voxelised cloud gathers points at
+#     (points_3views_molmo_perview). A window on the voxelised cloud gathers points at
 #     several depths along the frustum and medians to a position between surfaces.
 #  2. Frames the pointer misses are drawn around the gripper, not uniformly.
 #
@@ -28,7 +28,7 @@ data:
   lerobot_datasets:
     - max_npoints: 4096
       molmo_sampling: true
-      molmo_anchor_dirname: points_3views_molmo_depth_mean
+      molmo_anchor_dirname: points_3views_molmo_perview
       # One query on this task: "Point to the handle of the left/right drawer."
       molmo_anchor_ids: [0]
       # Sigma/floor match the eef and oracle arms exactly, so the arms differ only in where
