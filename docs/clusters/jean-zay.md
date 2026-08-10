@@ -25,6 +25,25 @@ Note there is **no `t4` QoS on a100**, unlike h100 — asking for one is the lik
 of the earlier `Invalid account/partition` rejection recorded here. Always pass an explicit
 `--qos` from the list above.
 
+### The `-dev` QoS caps wall clock at 2h, and exceeding it fails silently
+
+`*-dev` is the short-turnaround QoS: quick scheduling, but **2 hours maximum**. Ask for more
+and `sbatch` **accepts the job and prints a job id** — then it sits `PENDING` forever with:
+
+```
+$ squeue -u $USER -o "%.10i %.9T %.10l %.30R"
+    812656   PENDING    3:00:00   (QOSMaxWallDurationPerJobLimit)
+```
+
+There is no error, no mail, and no failed state. In a busy queue this is indistinguishable
+from waiting for a node, so a job can be presumed-queued for hours before anyone notices it
+was never schedulable. **Always read the reason field in `squeue`, not just the state**, and
+be wary of overriding a `--time` that a committed slurm script already set correctly — a CLI
+`sbatch --time=...` silently wins over the `#SBATCH` line in the file.
+
+If the work genuinely needs more than 2h, split it or move to `-t3`/`-t4`; do not raise
+`--time` on a `-dev` job.
+
 ## Which GPU for which job
 
 The constraints pull in opposite directions, so this is worth stating explicitly:
