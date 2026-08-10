@@ -30,7 +30,7 @@ data:
       text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 4096
       molmo_sampling: true
-      molmo_anchor_dirname: points_3views_molmo_depth_w5
+      molmo_anchor_dirname: points_3views_molmo_depth_mean
       # One query: "Point to the start button on the microwave."
       molmo_anchor_ids: [0]
       molmo_sampling_sigma: 0.08
