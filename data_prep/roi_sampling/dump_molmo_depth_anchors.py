@@ -16,12 +16,13 @@ script replays each episode and reads ``observation.points.{view}`` -- the organ
 (H, W, 3) per-pixel cloud, already in the robot-base frame, before the workspace crop and
 before ``voxel_downsample`` -- at the pixels the cache already stores.
 
-Only the per-view lift changes. Fusion is the untouched ``fuse``/``apply_wrist`` from
-``pointact.roi_sampling.molmo_anchors``, so a difference against the original cache is a
-difference in lifting and nothing else. In particular the agentviews are still averaged only
-when they agree: on TurnOnMicrowave 44.8% of anchors sit closer to the stop button than to
-the start button, and those buttons are 5.4 cm apart, so averaging a right view with a wrong
-one lands the anchor in mid-air between two plausible targets.
+The method is deliberately unadorned: point in each of the three views, take the median depth
+of the 3x3 pixels around each prediction, lift each to 3D, and average whatever came back.
+There is no agreement threshold and no rule requiring an agentview to validate the wrist --
+both were removed on purpose (see ``molmo_anchors.fuse_mean``). They discarded real
+detections, and worse, they hid pointer disagreement behind a repair step in a study whose
+entire subject is how well the pointer localises a target. A frame where no view lifts gets
+no anchor and falls through to the sampler's fallback.
 
 Why a replay: depth is never persisted. ``replay.py`` asks the env for it, ``make_point_cloud``
 crops and voxelises it immediately, and only the result reaches LMDB. Regenerating it means
@@ -202,7 +203,7 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
                  require_agentview: bool, max_frames: int | None,
                  surface_tol: float = 0.03) -> dict:
     """Replay one episode and re-lift every stored key frame from per-pixel depth."""
-    from pointact.roi_sampling.molmo_anchors import VIEWS, apply_wrist, fuse
+    from pointact.roi_sampling.molmo_anchors import VIEWS, fuse_mean
     from data_prep.robocasa365_to_lerobot.replay import (
         convert_env_action_to_dataset_action, load_source_actions,
         reorder_source_action_to_env,
@@ -226,35 +227,27 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
         origins = camera_origins(env, obs)
         anchors = []
         for det in frames[f]:
-            # Every estimator comes out of the same replay: the GPU cost is the render, so
-            # answering "median or nearest surface?" and "how big a window?" needs one pass,
-            # not three runs. `w1` is the 3x3 window against the default 5x5 -- a smaller
-            # window is less likely to straddle the target's edge onto the background, and
-            # more likely to find no valid depth at all.
-            fused: dict[str, tuple] = {}
-            for est, est_window, origin_of in (("median", window, lambda _v: None),
-                                               ("near", window, origins.get),
-                                               ("w1", 1, lambda _v: None)):
-                per_view: dict[str, tuple[np.ndarray, int]] = {}
-                for v in VIEWS:
-                    uv, cloud = det.get(f"{v}_uv"), clouds.get(v)
-                    if uv is None or cloud is None:
-                        continue
-                    xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, est_window,
-                                                     origin_of(v), surface_tol)
-                    if xyz is not None and in_workspace(xyz, workspace):
-                        per_view[v] = (xyz, n)
-                xyz, agreed = fuse(per_view, agree_dist)
-                xyz, _used = apply_wrist(xyz, per_view, wrist_accept, require_agentview)
-                fused[est] = (xyz if xyz is not None else np.full(3, np.nan),
-                              sum(n for _, n in per_view.values()), agreed)
+            # The whole method: median depth in the window around each predicted pixel, lift
+            # each view independently, mean the results. No agreement gate and no wrist
+            # corroboration rule -- see molmo_anchors.fuse_mean for why they were removed.
+            per_view: dict[str, tuple[np.ndarray, int]] = {}
+            for v in VIEWS:
+                uv, cloud = det.get(f"{v}_uv"), clouds.get(v)
+                if uv is None or cloud is None:
+                    continue
+                xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, window)
+                if xyz is not None and in_workspace(xyz, workspace):
+                    per_view[v] = (xyz, n)
+            xyz, n_views = fuse_mean(per_view)
             anchors.append({
-                "xyz": fused["median"][0],
-                "xyz_near": fused["near"][0],
-                "xyz_w1": fused["w1"][0],
+                "xyz": xyz if xyz is not None else np.full(3, np.nan),
                 "query_id": int(det["query_id"]),
-                "n_support": fused["median"][1],
-                "agree": fused["median"][2],
+                "n_support": sum(n for _, n in per_view.values()),
+                # No longer an agreement flag: how many views contributed to the mean. One
+                # view is a single unchecked opinion, three is a consensus, and the eval
+                # splits on it exactly as it used to.
+                "agree": n_views > 1,
+                "n_views": n_views,
                 **{f"{v}_uv": det.get(f"{v}_uv") for v in VIEWS},
             })
         out[f] = anchors
@@ -277,8 +270,8 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
     from pointact.roi_sampling.molmo_anchors import VIEWS
 
     cols: dict[str, list] = {k: [] for k in
-                             ("ep", "frame", "query_id", "n_support", "agree")}
-    xyz, xyz_near, xyz_w1, uvs = [], [], [], {v: [] for v in VIEWS}
+                             ("ep", "frame", "query_id", "n_support", "agree", "n_views")}
+    xyz, uvs = [], {v: [] for v in VIEWS}
     for ep, frames in sorted(per_episode.items()):
         for f, anchors in sorted(frames.items()):
             for a in anchors:
@@ -287,17 +280,14 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
                 cols["query_id"].append(a["query_id"])
                 cols["n_support"].append(a["n_support"])
                 cols["agree"].append(bool(a["agree"]))
+                cols["n_views"].append(int(a["n_views"]))
                 xyz.append(np.asarray(a["xyz"], dtype=np.float64))
-                xyz_near.append(np.asarray(a["xyz_near"], dtype=np.float64))
-                xyz_w1.append(np.asarray(a["xyz_w1"], dtype=np.float64))
                 for v in VIEWS:
                     uv = a.get(f"{v}_uv")
                     uvs[v].append(np.asarray(uv, dtype=np.float64)
                                   if uv is not None else np.full(2, np.nan))
     out = {k: np.asarray(v) for k, v in cols.items()}
     out["xyz"] = (np.stack(xyz, axis=0) if xyz else np.zeros((0, 3)))
-    out["xyz_near"] = (np.stack(xyz_near, axis=0) if xyz_near else np.zeros((0, 3)))
-    out["xyz_w1"] = (np.stack(xyz_w1, axis=0) if xyz_w1 else np.zeros((0, 3)))
     for v in VIEWS:
         out[f"{v}_uv"] = (np.stack(uvs[v], axis=0) if uvs[v] else np.zeros((0, 2)))
     return out
@@ -392,18 +382,17 @@ def main() -> None:
     ap.add_argument("--write-cache", type=Path, default=None,
                     help="Turn a merged npz into an LMDB cache and exit.")
     ap.add_argument("--out-dirname", default="points_3views_molmo_depth")
-    ap.add_argument("--cache-field", default="xyz", choices=("xyz", "xyz_near", "xyz_w1"),
-                    help="Which estimator to write into the cache. Default 'xyz' is the "
-                         "median over --point-window; 'xyz_w1' is the same median over a "
-                         "fixed 3x3 window; 'xyz_near' is the nearest-surface variant, which "
-                         "measured WORSE -- see the note on depth_anchor_from_pixel before "
-                         "reaching for it.")
+    ap.add_argument("--cache-field", default="xyz", choices=("xyz",),
+                    help="Only one estimator is produced now.")
     ap.add_argument("--surface-tol", type=float, default=0.03,
                     help="Keep window pixels within this many metres of the nearest one.")
-    ap.add_argument("--point-window", type=int, default=2,
-                    help="Half-width in pixels; matches the cache build.")
-    ap.add_argument("--agree-dist", type=float, default=0.10)
-    ap.add_argument("--wrist-accept-dist", type=float, default=0.15)
+    ap.add_argument("--point-window", type=int, default=1,
+                    help="Half-width in pixels: 1 is the 3x3 median the method specifies. "
+                         "Measured against 5x5 and the two are the same result -- identical "
+                         "lift rates, anchors a median 0.0-0.5 cm apart.")
+    # Retained so old invocations do not break; the fusion they configured is gone.
+    ap.add_argument("--agree-dist", type=float, default=0.10, help=argparse.SUPPRESS)
+    ap.add_argument("--wrist-accept-dist", type=float, default=0.15, help=argparse.SUPPRESS)
     ap.add_argument("--allow-lone-wrist", action="store_true",
                     help="Keep a wrist anchor with no agentview to corroborate it.")
     ap.add_argument("--stride", type=int, default=STRIDE)

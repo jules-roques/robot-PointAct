@@ -85,8 +85,37 @@ def queries_for(task: str, instruction: str) -> list[str]:
     return fn(instruction)
 
 
+def fuse_mean(per_view: dict[str, tuple[np.ndarray, int]]):
+    """Mean of every view that produced a 3D point. Returns (xyz | None, n_views).
+
+    This is the whole fusion rule. It deliberately replaces the earlier arrangement --
+    average the two agentviews only when they agree within 10 cm, else keep the
+    better-supported one, then adopt the wrist only if it corroborates them -- for two
+    reasons.
+
+    The first is that those rules threw away real detections. The wrist is the closest camera
+    to the target and is often the ONLY view in which MolmoPoint finds a small control at all;
+    requiring an agentview to validate it discarded exactly those calls, and on
+    TurnOnMicrowave and PickPlaceCounterToStove that is what capped coverage rather than any
+    missing geometry.
+
+    The second is that the gates confounded the measurement. This study asks how well a frozen
+    pointer localises a target; when three views disagree, that IS the pointer being wrong,
+    and a hand-tuned rule that hides the disagreement behind a "pick the better-supported one"
+    fallback reports something other than what it set out to measure. Disagreement now shows
+    up as a worse anchor, which is the honest reading. Frames with no view at all fall through
+    to the sampler's fallback (eef), not to a repaired anchor.
+    """
+    got = [a for a, _n in per_view.values()]
+    if not got:
+        return None, 0
+    return np.mean(np.stack(got, axis=0), axis=0), len(got)
+
+
 def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
-    """Combine the agentview anchors for one query. Returns (xyz | None, agreed).
+    """SUPERSEDED by :func:`fuse_mean`; kept to reproduce the earlier caches.
+
+    Combine the agentview anchors for one query. Returns (xyz | None, agreed).
 
     Agreeing views are averaged; disagreeing ones fall back to the better-supported view,
     since a disagreement means at least one of them lifted through an occluder and the

@@ -33,16 +33,15 @@ import numpy as np
 from pointact.roi_sampling.molmo_anchors import (
     STATIC_VIEWS,
     VIEWS,
-    apply_wrist,
-    fuse,
+    fuse_mean,
     queries_for,
 )
 
 #: Half-width in pixels of the box a returned point is padded into. Matches
-#: build_molmo_cache.py's --point-window default, which was measured: on these 256x256
-#: renders the median anchor error is 3.2 cm at window 2 against 4.4 cm at window 6, because
-#: a handle is only a few pixels across and a wide window pulls in the cabinet face behind it.
-POINT_WINDOW = 2
+#: the builder's --point-window: 1, i.e. the 3x3 median the method specifies. Measured
+#: against 5x5 on all three tasks and the two agree to within 0.5 cm, so this is the smaller
+#: of two equivalent choices.
+POINT_WINDOW = 1
 
 #: Fewer valid cloud points than this in the window -> no anchor from that view. 1, i.e.
 #: effectively off, matching the builder: for a single pointed pixel a sparse neighbourhood
@@ -50,13 +49,9 @@ POINT_WINDOW = 2
 #: to a uniform fallback.
 MIN_IN_WINDOW = 1
 
-#: Metres. Agentview anchors closer than this are averaged; further apart, the
-#: better-supported one wins. Matches the builder's --agree-dist.
-AGREE_DIST = 0.10
-
-#: Metres. The wrist anchor is adopted only within this of the agentview one. Matches the
-#: builder's --wrist-accept-dist.
-WRIST_ACCEPT_DIST = 0.15
+#: No agreement or corroboration thresholds any more: every view that lifts contributes to
+#: the mean. The constants they configured are gone rather than left dangling, so nothing can
+#: quietly read a stale value -- see molmo_anchors.fuse_mean.
 
 
 def lift_pixel(
@@ -191,16 +186,18 @@ class LiveMolmoAnchor:
             self.stats.queries += 1
             if sum(v in per_view for v in STATIC_VIEWS) == 2:
                 self.stats.both_views += 1
-            xyz, agreed = fuse(per_view, AGREE_DIST)
+            # Mean of every view that lifted -- no agreement gate, no wrist corroboration
+            # rule. Must stay identical to the cache builder or the policy is evaluated on a
+            # different signal than it was trained on; see fuse_mean's own note for why the
+            # gates went.
             if "wrist" in per_view:
                 self.stats.wrist_lifted += 1
-            xyz, used_wrist = apply_wrist(xyz, per_view, WRIST_ACCEPT_DIST,
-                                          require_agentview=True)
-            if used_wrist:
-                self.stats.wrist_adopted += 1
+                if len(per_view) == 1:
+                    self.stats.wrist_adopted += 1   # the lone-wrist call, formerly discarded
+            xyz, n_views = fuse_mean(per_view)
             if xyz is not None:
                 self.stats.query_hits += 1
-                self.stats.agree += int(agreed)
+                self.stats.agree += int(n_views > 1)
                 anchors.append(xyz)
 
         if not anchors:
