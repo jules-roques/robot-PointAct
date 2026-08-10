@@ -55,9 +55,11 @@ N_TASKS="${SLURM_ARRAY_TASK_COUNT:-1}"
 # lmdb, the root env has no MuJoCo. So the pixels come out of the cache in the root env
 # first. Every array task wants the same file; the first to arrive writes it under a
 # task-private name and renames, so the others see it whole or not at all.
+# The temp name must itself end in .npz: np.savez appends the suffix when it is missing, so
+# a "<name>.tmp" target is written as "<name>.tmp.npz" and the rename below finds nothing.
 PIX="$OUT_DIR/molmo_pixels_stride8.npz"
 if [ ! -f "$PIX" ]; then
-    TMP="$PIX.$IDX.tmp"
+    TMP="$OUT_DIR/molmo_pixels_stride8.$IDX.tmp.npz"
     "$MAIN_REPO/.venv/bin/python" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
         --dataset-dir "$DATASET" --export-pixels "$TMP"
     mv -n "$TMP" "$PIX" && rm -f "$TMP" || true

@@ -226,16 +226,21 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
         origins = camera_origins(env, obs)
         anchors = []
         for det in frames[f]:
-            # Both estimators come out of the same replay: the GPU cost is the render, so
-            # answering "median or nearest surface?" needs one pass, not two runs.
+            # Every estimator comes out of the same replay: the GPU cost is the render, so
+            # answering "median or nearest surface?" and "how big a window?" needs one pass,
+            # not three runs. `w1` is the 3x3 window against the default 5x5 -- a smaller
+            # window is less likely to straddle the target's edge onto the background, and
+            # more likely to find no valid depth at all.
             fused: dict[str, tuple] = {}
-            for est, origin_of in (("median", lambda _v: None), ("near", origins.get)):
+            for est, est_window, origin_of in (("median", window, lambda _v: None),
+                                               ("near", window, origins.get),
+                                               ("w1", 1, lambda _v: None)):
                 per_view: dict[str, tuple[np.ndarray, int]] = {}
                 for v in VIEWS:
                     uv, cloud = det.get(f"{v}_uv"), clouds.get(v)
                     if uv is None or cloud is None:
                         continue
-                    xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, window,
+                    xyz, n = depth_anchor_from_pixel(np.asarray(cloud), uv, est_window,
                                                      origin_of(v), surface_tol)
                     if xyz is not None and in_workspace(xyz, workspace):
                         per_view[v] = (xyz, n)
@@ -246,6 +251,7 @@ def lift_episode(env, source_dir: Path, source_ep: int, frames: dict, window: in
             anchors.append({
                 "xyz": fused["median"][0],
                 "xyz_near": fused["near"][0],
+                "xyz_w1": fused["w1"][0],
                 "query_id": int(det["query_id"]),
                 "n_support": fused["median"][1],
                 "agree": fused["median"][2],
@@ -272,7 +278,7 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
 
     cols: dict[str, list] = {k: [] for k in
                              ("ep", "frame", "query_id", "n_support", "agree")}
-    xyz, xyz_near, uvs = [], [], {v: [] for v in VIEWS}
+    xyz, xyz_near, xyz_w1, uvs = [], [], [], {v: [] for v in VIEWS}
     for ep, frames in sorted(per_episode.items()):
         for f, anchors in sorted(frames.items()):
             for a in anchors:
@@ -283,6 +289,7 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
                 cols["agree"].append(bool(a["agree"]))
                 xyz.append(np.asarray(a["xyz"], dtype=np.float64))
                 xyz_near.append(np.asarray(a["xyz_near"], dtype=np.float64))
+                xyz_w1.append(np.asarray(a["xyz_w1"], dtype=np.float64))
                 for v in VIEWS:
                     uv = a.get(f"{v}_uv")
                     uvs[v].append(np.asarray(uv, dtype=np.float64)
@@ -290,6 +297,7 @@ def pack_shard(per_episode: dict[int, dict[int, list[dict]]]) -> dict:
     out = {k: np.asarray(v) for k, v in cols.items()}
     out["xyz"] = (np.stack(xyz, axis=0) if xyz else np.zeros((0, 3)))
     out["xyz_near"] = (np.stack(xyz_near, axis=0) if xyz_near else np.zeros((0, 3)))
+    out["xyz_w1"] = (np.stack(xyz_w1, axis=0) if xyz_w1 else np.zeros((0, 3)))
     for v in VIEWS:
         out[f"{v}_uv"] = (np.stack(uvs[v], axis=0) if uvs[v] else np.zeros((0, 2)))
     return out
@@ -384,11 +392,12 @@ def main() -> None:
     ap.add_argument("--write-cache", type=Path, default=None,
                     help="Turn a merged npz into an LMDB cache and exit.")
     ap.add_argument("--out-dirname", default="points_3views_molmo_depth")
-    ap.add_argument("--cache-field", default="xyz", choices=("xyz", "xyz_near"),
+    ap.add_argument("--cache-field", default="xyz", choices=("xyz", "xyz_near", "xyz_w1"),
                     help="Which estimator to write into the cache. Default 'xyz' is the "
-                         "window median, the one that was measured; 'xyz_near' is the "
-                         "nearest-surface variant, which measured WORSE -- see the note on "
-                         "depth_anchor_from_pixel before reaching for it.")
+                         "median over --point-window; 'xyz_w1' is the same median over a "
+                         "fixed 3x3 window; 'xyz_near' is the nearest-surface variant, which "
+                         "measured WORSE -- see the note on depth_anchor_from_pixel before "
+                         "reaching for it.")
     ap.add_argument("--surface-tol", type=float, default=0.03,
                     help="Keep window pixels within this many metres of the nearest one.")
     ap.add_argument("--point-window", type=int, default=2,
