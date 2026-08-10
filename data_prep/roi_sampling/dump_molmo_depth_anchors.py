@@ -356,8 +356,14 @@ def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int
     out_env = lmdb.open(str(dataset_dir / out_dirname), subdir=True,
                         map_size=int(map_size_gb * 1024 ** 3))
     n_written = 0
-    with out_env.begin(write=True) as wtxn:
-        for ep, last in sorted(lengths.items()):
+    # Chunked commits: one transaction over the whole dataset keeps every dirty page resident
+    # until the end, which OOM-killed the per-view build (records are 3x the fused ones).
+    # Committing per episode batch bounds the peak; a failure leaves a partial cache, but the
+    # caller rm -rf's the directory before rebuilding, so that is already the contract.
+    CHUNK = 50
+    wtxn = out_env.begin(write=True)
+    try:
+        for n_ep, (ep, last) in enumerate(sorted(lengths.items()), start=1):
             key_frames = sorted(f for (e, f) in by_key if e == ep)
             for i, f in enumerate(key_frames):
                 rec = molmo_cache.encode_record(by_key[(ep, f)]).tobytes()
@@ -365,6 +371,13 @@ def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int
                 for ff in range(f, end):
                     wtxn.put(f"{ep}-{ff}".encode("ascii"), rec)
                     n_written += 1
+            if n_ep % CHUNK == 0:
+                wtxn.commit()
+                wtxn = out_env.begin(write=True)
+        wtxn.commit()
+    except BaseException:
+        wtxn.abort()
+        raise
     out_env.sync()
     out_env.close()
     print(f"wrote {dataset_dir / out_dirname}: {n_written} frame records")
