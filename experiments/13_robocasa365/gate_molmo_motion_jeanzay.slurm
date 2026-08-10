@@ -34,6 +34,10 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_h100-dev
+# 2h is the qos_gpu_h100-dev ceiling, not a guess. `sbatch --time=03:00:00` is accepted at
+# submit time and then sits PENDING forever with QOSMaxWallDurationPerJobLimit, which looks
+# exactly like a busy queue. Need longer? Split the work (e.g. one job per view and fuse
+# with fuse_gate_views.py), or drop --qos for a non-dev QoS -- do not raise this.
 #SBATCH --time=02:00:00
 #SBATCH --output=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%j.out
 #SBATCH --error=/lustre/fsn1/projects/rech/rgx/unw24jl/logs/robocasa365/%x_%j.out
