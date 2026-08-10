@@ -254,12 +254,19 @@ def main() -> None:
         summary[task] = {"episode": ep, "instruction": instruction, "point_rate": round(hit, 3)}
 
         media = {}
-        for view in VIEWS:
-            p = render_view_video(dataset_dir, ep, view, key_frames, pixels,
-                                  args.out_dir / f"{task}_ep{ep}_{view}.mp4",
-                                  chunks_size, args.scale, args.fps)
-            if p is not None:
-                media[f"{task}/{view}_camera"] = p
+        for arm, arm_ids in spec["arms"].items():
+            # One video per ARM, not per task: an arm that reads only query 0 must not be
+            # shown a frame with the destination marker on it as well, or the picture claims
+            # a budget split the arm does not have.
+            keep = set(arm_ids)
+            arm_pixels = {f: [d for d in dets if d["query_id"] in keep]
+                          for f, dets in pixels.items()}
+            for view in VIEWS:
+                p = render_view_video(dataset_dir, ep, view, key_frames, arm_pixels,
+                                      args.out_dir / f"{task}_ep{ep}_{arm}_{view}.mp4",
+                                      chunks_size, args.scale, args.fps)
+                if p is not None:
+                    media[f"{task}/{arm}/{view}_camera"] = p
 
         html = {}
         for arm, ids in spec["arms"].items():
