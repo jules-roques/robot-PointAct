@@ -22,7 +22,8 @@
 # on one node); the script adapts the batch split automatically:
 #   sbatch --gres=gpu:2 --cpus-per-task=48 ... same as above
 #
-#SBATCH --job-name=dev
+# Neutral default: pass --job-name=<arm> at submission (the successor inherits it below).
+#SBATCH --job-name=train-dev
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --nodes=1
@@ -110,7 +111,10 @@ fi
 # Resolve where this run writes without starting it, so the completion guard and the log agree
 # with the real output_dir instead of duplicating the naming rules. The run yaml is the single
 # source of truth, so this asks it directly.
-OUTPUT_DIR=$(PYTHONPATH="$REPO" "${POINTACT_ENV:-$WORK/code/robot-PointAct}/.venv/bin/python" -c "
+# --project must name a checkout that HAS a .venv. This one is run from a clone that does
+# not, and a bare `uv run` would build an empty venv there (docs/envs.md).
+POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
+OUTPUT_DIR=$(PYTHONPATH="$REPO" "$POINTACT_ENV/.venv/bin/python" -c "
 from pointact.train.run_config import resolve_run_config
 print(resolve_run_config('$RUN_CONFIG')[2]['output_dir'])")
 
@@ -145,6 +149,7 @@ fi
 if [ "${CHAIN_REMAINING}" -gt 0 ]; then
     NEXT=$((CHAIN_REMAINING - 1))
     NEXT_ID=$(sbatch --parsable \
+        --job-name="${SLURM_JOB_NAME}" \
         --dependency=afterany:${SLURM_JOB_ID} \
         --constraint=h100 \
         --nodes=1 \
@@ -162,7 +167,7 @@ fi
 # `bash` fails with "accelerate: command not found".
 START_TS=$SECONDS
 set +e
-uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
+uv run --project "$POINTACT_ENV" --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
 RC=$?
 set -e
 ELAPSED=$(( SECONDS - START_TS ))

@@ -14,7 +14,9 @@
 #   sbatch --constraint=h100 --qos=qos_gpu_h100-dev --time=00:40:00 \
 #          --export=ALL,RUN_CONFIG=<run>.yaml,SMOKE_STEPS=30 <this file>
 #
-#SBATCH --job-name=train-od
+# Neutral default: pass --job-name=<arm> at submission, or four arms share one name in
+# squeue and there is no way to tell which is which.
+#SBATCH --job-name=train
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
 #SBATCH --ntasks=1
