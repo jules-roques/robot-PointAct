@@ -331,7 +331,10 @@ def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int
     from pointact.roi_sampling import molmo_cache
     from pointact.roi_sampling.molmo_anchors import VIEWS
 
-    d = np.load(npz_path)
+    # Materialise the columns: an NpzFile decompresses the whole array on every __getitem__,
+    # and the row loop below indexes eight of them per row.
+    with np.load(npz_path) as _npz:
+        d = {k: _npz[k] for k in _npz.files}
     src_env = lmdb.open(str(dataset_dir / "points_3views"), readonly=True, lock=False,
                         subdir=True)
     with src_env.begin() as t:
