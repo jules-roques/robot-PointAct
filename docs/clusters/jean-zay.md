@@ -84,7 +84,15 @@ not directory entries, so a venv next to its cache is nearly free. Two consequen
 - Moving `UV_CACHE_DIR` alone, leaving the venv behind, is a pessimisation: uv falls back
   to copying and the venv grows its own tens of thousands of inodes. Move both or neither.
 - Deleting a cache does not free inodes still hardlinked from a venv elsewhere. Retire the
-  venv first, then the cache.
+  venv first, then the cache. Miss one and its files simply drop to `nlink=1` and stay
+  charged — the space is not lost, but the deletion buys nothing until that venv moves too.
+
+Find *every* venv before touching the cache. This repo has two, and the second one sits
+four levels down, so the obvious `find -maxdepth 3 -name pyvenv.cfg` misses it:
+
+```sh
+find $WORK -name pyvenv.cfg -not -path '*/lib/*'
+```
 
 To relocate a venv, **copy it and leave a symlink behind** rather than rebuilding it:
 
@@ -101,6 +109,13 @@ the `cuda` extra, so a clean sync does *not* reproduce it.
 
 A venv on `$SCRATCH` is purgeable, so tar it to `$STORE` — one inode, and restoring it
 needs no internet.
+
+The same copy-and-symlink works for the conda base at `$WORK/miniforge3` (27,899 entries,
+over half of it the `pkgs/` package cache). Note that its `envs/` is **empty on Jean Zay**:
+the `$HOME/miniforge3/envs/ffmpeg-libs/lib` that `train.slurm`, `data_prep_*.slurm` and
+`eval_robocasa365.sh` prepend to `LD_LIBRARY_PATH` is a CLEPS-ism (see `docs/clusters/cleps.md`
+— no ffmpeg module there). A missing `LD_LIBRARY_PATH` entry is silently ignored, so those
+lines are dead here rather than broken.
 
 ## Camera calibration (RoboCasa datasets)
 
