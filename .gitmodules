@@ -1,0 +1,4 @@
+[submodule "envs/robocasa365/robocasa"]
+	path = envs/robocasa365/robocasa
+	url = https://github.com/robocasa/robocasa.git
+	branch = robocasa365_release
