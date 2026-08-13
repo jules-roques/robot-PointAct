@@ -2,8 +2,6 @@
 
 This converter uses action rollout replay for RoboCasa365 PandaOmron demos and writes a LeRobot dataset plus a fused 3-view point-cloud LMDB.
 
-Note: `robocasa365` simulator cannot be properly ran in H100 GPU.
-
 Run it in two stages, in **two different environments**:
 
 - `envs/robocasa365`: read the source parquet actions, replay them in simulation, and cache
