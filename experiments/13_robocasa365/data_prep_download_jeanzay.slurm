@@ -23,7 +23,10 @@ set -euo pipefail
 
 module purge
 
-WORKTREE="$WORK/code/robot-PointAct/.claude/worktrees/pointcount-ablation"
+# The checkout to run from is wherever this was submitted, exactly as the roi_sampling jobs
+# already do it. A hardcoded worktree path outlives the worktree: this named
+# .claude/worktrees/pointcount-ablation, which no longer exists on this cluster.
+WORKTREE="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 cd "$WORKTREE"
 export PYTHONPATH="$WORKTREE:${PYTHONPATH:-}"
 

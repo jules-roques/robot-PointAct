@@ -12,6 +12,13 @@ task_date() {
         OpenDrawer)              echo 20250816 ;;
         PickPlaceCounterToStove) echo 20250818 ;;
         TurnOnMicrowave)         echo 20250813 ;;
+        # Stage 5's two additions. Both have a `target` split, so the usual
+        # `download_demos.py --split target --source human` applies. Note CoffeeSetupMug's
+        # PRETRAIN path is 20250819 -- the date below is the target one, which is what every
+        # stage here consumes, and the two differ for this task exactly as they do for
+        # TurnOnMicrowave.
+        CloseBlenderLid)         echo 20250822 ;;
+        CoffeeSetupMug)          echo 20250813 ;;
         *) echo "unknown task: $1 (add it from dataset_registry.py)" >&2; return 1 ;;
     esac
 }
