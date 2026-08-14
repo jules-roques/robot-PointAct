@@ -1,0 +1,25 @@
+# OpenDrawer / eef / 8192 points, 30K steps -- stage 5.
+# EEF-density sampling: a Gaussian-with-floor density centred on the frame's own
+# end-effector position. No cache and no privileged information -- the deployable arm.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: eef
+  npoints: 8192
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: Five tasks x four samplers"
+
+train:
+  max_steps: 30000
+
+data:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 8192
+      eef_sampling: true
+      eef_sampling_sigma: 0.08
+      eef_sampling_floor: 0.05

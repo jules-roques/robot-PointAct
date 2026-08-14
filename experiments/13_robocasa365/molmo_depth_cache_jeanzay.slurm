@@ -43,10 +43,30 @@ PY="$MAIN_REPO/.venv/bin/python"
 echo "host=$(hostname) task=$TASK merged=$MERGED cache=$CACHE_DIRNAME"
 
 # Merge is idempotent; skip it if a merged file is already in place and newer than the shards.
-"$PY" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
-    --dataset-dir "$DATASET" \
-    --merge "$OUT_DIR/${OUT_NAME}_shard*.npz" \
-    --out "$MERGED"
+# SKIP_MERGE=1 when the merged file is the input and its shards are long gone (the stage-5
+# best-view selection reads the per-view merge that stage 3 produced).
+if [ -z "${SKIP_MERGE:-}" ]; then
+    "$PY" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
+        --dataset-dir "$DATASET" \
+        --merge "$OUT_DIR/${OUT_NAME}_shard*.npz" \
+        --out "$MERGED"
+fi
+
+# SELECT_GT=1 collapses each query's per-view centres to the one nearest the ground truth --
+# the stage-5 privileged upper bound on the pointer. Pure numpy over rows that already exist,
+# so it costs minutes and no GPU; see dump_molmo_depth_anchors.select_closest_gt.
+if [ -n "${SELECT_GT:-}" ]; then
+    GT_NPZ="${GT_NPZ:-$OUT_DIR/target_positions.npz}"
+    [ -f "$GT_NPZ" ] || { echo "ERROR: no $GT_NPZ; run target_positions_jeanzay.slurm for $TASK first" >&2; exit 1; }
+    SELECTED="${SELECTED:-$OUT_DIR/${OUT_NAME}_bestgt.npz}"
+    "$PY" -m data_prep.roi_sampling.dump_molmo_depth_anchors \
+        --dataset-dir "$DATASET" \
+        --task "$TASK" \
+        --select-closest-gt "$MERGED" \
+        --gt-npz "$GT_NPZ" \
+        --out "$SELECTED"
+    MERGED="$SELECTED"
+fi
 
 # A partial cache from a killed run is not resumable -- LMDB will happily open it and serve
 # the records that made it in. Clear it so a failure here is a missing cache, not a short one.

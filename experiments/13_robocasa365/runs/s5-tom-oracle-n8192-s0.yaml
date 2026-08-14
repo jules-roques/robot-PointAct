@@ -1,0 +1,32 @@
+# TurnOnMicrowave / oracle / 8192 points, 30K steps -- stage 5.
+# GT-oracle sampling: the same density centred on where the simulator says the
+# target actually is. Privileged; an upper bound on what any sampler could buy,
+# not a deployable policy.
+extends: _base.yaml
+
+meta:
+  task: TurnOnMicrowave
+  sampling: oracle
+  npoints: 8192
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: Five tasks x four samplers"
+
+train:
+  max_steps: 30000
+
+data:
+  lerobot_datasets:
+    - repo_id: TurnOnMicrowave
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/TurnOnMicrowave/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 8192
+      oracle_sampling: true
+      # Geometry, not rendered segmentation labels: a label centroid averages only the
+      # VISIBLE surface, so it moves with the camera and is undefined once the target is
+      # occluded. geom_gt.ORACLE_TARGET picks the set for this task.
+      oracle_gt: geom
+      oracle_gt_npz: roi_meta/target_positions.npz
+      oracle_gt_set: start_button
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05
