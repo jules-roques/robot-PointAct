@@ -84,12 +84,22 @@ TARGET_GEOMS = {
             "obj": {"object": "obj"},
         },
     },
-    # NOTE: CloseBlenderLid is deliberately absent. Its target is the lid, which is an
-    # auxiliary FIXTURE (env.blender.blender_lid, body "<lid name>_main"), not an entry of
-    # env.objects, and the `body_contains` matcher filters on `fixture.name` being a
-    # substring of the body name -- which holds only if the blender fixture happens to be
-    # named "blender". Add the entry after checking the real names against a built env; a
-    # guess here would silently anchor on the blender body instead of its lid.
+    # CloseBlenderLid's target is the lid, which is an auxiliary FIXTURE hanging off the
+    # blender (env.blender.blender_lid) rather than an entry of env.objects -- the task has
+    # no movable objects at all. `sub_fixture` resolves it the way RoboCasa's own success
+    # check does, through the sub-fixture's name rather than by matching a substring of the
+    # body: kitchen_blender.py asks for f"{self.blender.blender_lid.name}_main", which on a
+    # built env is "blender_main_group_auxiliary_main_group_main" (5 geoms) -- a name no one
+    # would have guessed, and "auxiliary" is a framework-generated token, not a lid one.
+    "CloseBlenderLid": {
+        "fixture_attr": "blender",
+        "sets": {
+            "lid": {"sub_fixture": "blender_lid"},
+            # The appliance the lid goes back onto: the distractor for a pointing model that
+            # answers "blender" when asked for its lid.
+            "blender": {"body_contains": [""], "body_excludes": ["auxiliary"]},
+        },
+    },
 }
 
 #: task -> geom set the ORACLE arm centres its density on. "The object to grab", except on
@@ -99,6 +109,7 @@ ORACLE_TARGET = {
     "TurnOnMicrowave": "start_button",
     "PickPlaceCounterToStove": "obj",
     "CoffeeSetupMug": "obj",
+    "CloseBlenderLid": "lid",
 }
 
 #: task -> {MolmoPoint query id: geom set that query is asking for}. Indexes
@@ -109,6 +120,7 @@ QUERY_TARGETS = {
     "TurnOnMicrowave": {0: "start_button"},
     "PickPlaceCounterToStove": {0: "obj", 1: "pan"},
     "CoffeeSetupMug": {0: "obj"},
+    "CloseBlenderLid": {0: "lid"},
 }
 
 
@@ -211,6 +223,20 @@ def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
     few centimetres -- the scale the whole study is measuring at.
     """
     model = env.env.sim.model
+    if "sub_fixture" in spec:
+        # An auxiliary fixture attached to the main one -- a blender's lid, say. Resolved
+        # through the sub-fixture's own name, which is how RoboCasa's task code refers to it
+        # (`f"{self.blender.blender_lid.name}_main"`), rather than by guessing a substring of
+        # a framework-generated body name.
+        sub = getattr(fixture, spec["sub_fixture"], None)
+        if sub is None:
+            raise RuntimeError(
+                f"fixture {getattr(fixture, 'name', fixture)!r} has no sub-fixture "
+                f"'{spec['sub_fixture']}'; TARGET_GEOMS is out of step with the task")
+        want = f"{sub.name}_main"
+        return [gid for gid in range(int(model.ngeom))
+                if (model.body_id2name(int(model.geom_bodyid[gid])) or "") == want]
+
     if "object" in spec:
         key = spec["object"]
         objects = getattr(env.env, "objects", {}) or {}

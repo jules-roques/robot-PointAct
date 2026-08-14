@@ -60,6 +60,31 @@ def tom_queries(instruction: str) -> list[str]:
     return ["Point to the start button on the microwave."]
 
 
+def mug_queries(instruction: str) -> list[str]:
+    """"Pick the mug from the counter and place it under the coffee machine dispenser."
+
+    One query, the manipulated object. The destination is deliberately not asked: stage 3
+    ran PickPlaceCounterToStove both ways and the second query made it clearly worse (26%
+    against 45%), because splitting the density between two centres costs more than knowing
+    where the object is going buys.
+
+    The object word is read from the instruction like ppcs_queries does rather than hardcoded
+    to "mug", so a variant that renames it does not silently point at the wrong noun.
+    """
+    m = re.search(r"pick the (.+?) from the", instruction, re.I)
+    return [f"Point to the {m.group(1).strip() if m else 'mug'}."]
+
+
+def blender_queries(instruction: str) -> list[str]:
+    """"Close the lid blender by securely placing the lid on top." -> the lid, not the blender.
+
+    The lid is the thing being grasped and is a separate fixture from the appliance; the
+    wording says "lid" first so a pointer that latches onto the more salient object has to
+    work against the prompt rather than with it.
+    """
+    return ["Point to the blender lid."]
+
+
 #: task -> instruction -> pointing queries. Derived from each episode's own instruction
 #: rather than hard-coded per task, because PickPlaceCounterToStove varies the object.
 #:
@@ -71,6 +96,8 @@ TASK_QUERIES = {
     "OpenDrawer": opendrawer_queries,
     "PickPlaceCounterToStove": ppcs_queries,
     "TurnOnMicrowave": tom_queries,
+    "CoffeeSetupMug": mug_queries,
+    "CloseBlenderLid": blender_queries,
 }
 
 
