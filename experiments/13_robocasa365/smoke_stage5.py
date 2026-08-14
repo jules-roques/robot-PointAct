@@ -38,7 +38,8 @@ import numpy as np  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pointact.constants import OBS_POINTS  # noqa: E402
-from pointact.data.robot.data_3d import LeRobotPointCloudDataset  # noqa: E402
+from pointact.data.robot.multi_data import load_single_lerobot_dataset  # noqa: E402
+from pointact.data.schema import LerobotConfig  # noqa: E402
 from pointact.roi_sampling.geometry import eef_density_weights  # noqa: E402
 from pointact.train.run_config import resolve_run_config  # noqa: E402
 
@@ -65,9 +66,12 @@ def main() -> None:
         if any(k in key for k in ("oracle", "molmo", "eef")) and key != "eef_sampling_floor":
             print(f"  {key}: {cfg[key]}")
 
-    kwargs = {k: v for k, v in cfg.items() if k != "class_name"}
-    ds = LeRobotPointCloudDataset(**kwargs)
-    print(f"  dataset: {ds.num_frames} frames, {len(ds.meta.episodes)} episodes")
+    # Built through the trainer's own loader rather than by calling the dataset class here:
+    # it is what joins `root` to `repo_id` and derives delta_timestamps from the metadata's
+    # fps, and a smoke check that constructs the dataset differently from training is
+    # checking something other than training.
+    ds = load_single_lerobot_dataset(0, [LerobotConfig(**cfg)], chunk_size=train["chunk_size"])
+    print(f"  dataset: {ds.num_frames} frames, {ds.num_episodes} episodes")
 
     rng = np.random.default_rng(0)
     idxs = rng.choice(ds.num_frames, size=min(args.frames, ds.num_frames), replace=False)
