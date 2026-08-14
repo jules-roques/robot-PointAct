@@ -107,6 +107,14 @@ meta:
 
 train:
   max_steps: {steps}
+  # Both of these exist to avoid colliding with stage 1, which trained OpenDrawer at this
+  # same point count. run_name is derived from `meta` alone, so s5-od-uniform-n8192-s0 and
+  # the stage-1 od-uniform-n8192-s0 would resolve to ONE deterministic output_dir -- and the
+  # trainer resumes from whatever checkpoints it finds there, so a 30K stage-5 run would
+  # start from a finished 50K stage-1 checkpoint and report success. Stated explicitly here
+  # rather than hoping the coordinates differ.
+  run_name: {name}
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage5
 
 data:
   lerobot_datasets:
@@ -150,7 +158,7 @@ def main() -> None:
             (out_dir / f"{name}.yaml").write_text(TEMPLATE.format(
                 task=task, sampling=sampling, npoints=args.npoints,
                 steps=args.steps, steps_k=args.steps // 1000, seed=args.seed,
-                stage=STAGE, head=HEAD[sampling], block=block,
+                stage=STAGE, head=HEAD[sampling], block=block, name=name,
             ))
             written.append(name)
 
