@@ -114,6 +114,12 @@ echo "port=$port"
 # rather than relying on the caller to pass a matching flag by hand.
 POINT_SAMPLING="${POINT_SAMPLING:-}"
 ORACLE_ANCHOR=""
+# Defaults for the two arm-identity fields read out of the data config below. They must exist
+# even when there is no readable config, because the flag lines reference them unconditionally
+# and `set -u` would otherwise abort the eval on an unbound variable. Both defaults are the
+# pre-stage-5 behaviour, which is what a checkpoint without the field was trained on.
+ORACLE_GT="${ORACLE_GT:-labels}"
+MOLMO_VIEW_SELECT="${MOLMO_VIEW_SELECT:-per_view}"
 # Set when the checkpoint's anchor has to be produced live by MolmoPoint rather than by the
 # simulator. Overridable so `POINT_SAMPLING=anchor MOLMO=1 ...` can force the molmo path for a
 # checkpoint whose data config is unreadable.
@@ -136,6 +142,36 @@ except Exception:
 
     if [ -n "$DATA_CFG" ] && [ -f "$DATA_CFG" ]; then
         # yaml booleans are True/true depending on writer (hand-edited vs yaml.safe_dump).
+        # Which ground truth the privileged arms were trained against. Stage 5 moved the
+        # oracle from rendered segmentation labels to the simulator's geom positions, and the
+        # two differ by centimetres -- the scale this whole study measures at -- so this is
+        # read from the checkpoint rather than defaulted. Absent field = a pre-stage-5 run,
+        # which was trained on labels.
+        ORACLE_GT=$(grep -oiE '^\s*oracle_gt:\s*[a-z]+' "$DATA_CFG" \
+                    | head -1 | awk '{print $2}')
+        ORACLE_GT="${ORACLE_GT:-labels}"
+        case "$ORACLE_GT" in
+            labels|geom) ;;
+            *) echo "ERROR: ${DATA_CFG} has oracle_gt='${ORACLE_GT}', which this script has" >&2
+               echo "  no eval-time producer for. Add one rather than guessing." >&2
+               exit 1 ;;
+        esac
+
+        # Same argument for how the molmo per-view lifts became centres. A checkpoint trained
+        # on one centre per query and evaluated with one per VIEW is scored on a density that
+        # covers regions training never spent budget on -- and it reads as a success rate,
+        # not as an error. Absent field = the per-view arm, which is what shipped.
+        MOLMO_VIEW_SELECT=$(grep -oiE '^\s*molmo_view_select:\s*[a-z_]+' "$DATA_CFG" \
+                            | head -1 | awk '{print $2}')
+        MOLMO_VIEW_SELECT="${MOLMO_VIEW_SELECT:-per_view}"
+        case "$MOLMO_VIEW_SELECT" in
+            per_view|closest_gt) ;;
+            *) echo "ERROR: ${DATA_CFG} has molmo_view_select='${MOLMO_VIEW_SELECT}', which" >&2
+               echo "  this script has no eval-time producer for. Add one rather than" >&2
+               echo "  evaluating the checkpoint on a rule it was not trained on." >&2
+               exit 1 ;;
+        esac
+
         if grep -qiE '^\s*oracle_sampling:\s*true' "$DATA_CFG"; then
             POINT_SAMPLING=anchor
         elif grep -qiE '^\s*eef_sampling:\s*true' "$DATA_CFG"; then
@@ -177,7 +213,8 @@ except Exception:
             POINT_SAMPLING=uniform
         fi
         echo "derived point_sampling=${POINT_SAMPLING}"\
-" fallback=${POINT_SAMPLING_FALLBACK:-uniform} from ${DATA_CFG}"
+" fallback=${POINT_SAMPLING_FALLBACK:-uniform} oracle_gt=${ORACLE_GT}"\
+" molmo_view_select=${MOLMO_VIEW_SELECT} from ${DATA_CFG}"
     else
         # Deliberately fatal. Defaulting to uniform here silently evaluates an eef- or
         # oracle-trained policy on uniformly drawn clouds -- a train/test mismatch that shows
@@ -252,8 +289,10 @@ print(' '.join(out))
     echo "Molmo pointer started, PID=$MOLMO_PID port=$molmo_port"
 
     MOLMO_FLAGS="--args.molmo_anchor --args.molmo_host ${host} --args.molmo_port ${molmo_port} --args.molmo_anchor_ids ${MOLMO_IDS}"
+    MOLMO_FLAGS="$MOLMO_FLAGS --args.molmo_view_select ${MOLMO_VIEW_SELECT}"
+    [ "$MOLMO_VIEW_SELECT" = "closest_gt" ] && MOLMO_FLAGS="$MOLMO_FLAGS --args.gt_source ${ORACLE_GT}"
 elif [ "$POINT_SAMPLING" = "anchor" ]; then
-    ORACLE_ANCHOR="--args.oracle_anchor"
+    ORACLE_ANCHOR="--args.oracle_anchor --args.gt_source ${ORACLE_GT}"
 fi
 
 # --- Policy server (pointact / root env) ---

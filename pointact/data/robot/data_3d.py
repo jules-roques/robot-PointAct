@@ -19,7 +19,7 @@ from pointact.data.transforms.pointcloud import (
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
 )
-from pointact.roi_sampling import molmo_cache
+from pointact.roi_sampling import geom_gt, molmo_anchors, molmo_cache
 from pointact.roi_sampling.geometry import eef_density_weights
 from pointact.roi_sampling.sampling import density_weighted_indices
 
@@ -80,6 +80,11 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # density, centred on the gripper, which is never missing). Must match eval -- see
         # the note in pointact/data/schema.py.
         molmo_fallback: str = "uniform",
+        # How the cache's per-view centres were produced -- purely declarative here, since
+        # the selection already happened offline and this reads whatever the cache holds.
+        # It is recorded so the archived data_config.yaml states which arm the checkpoint is,
+        # and eval_robocasa365.sh can refuse to evaluate it under the other rule.
+        molmo_view_select: str = "per_view",  # per_view | closest_gt
         # EEF-density sampling (optional, mutually exclusive with molmo_anchor_dirname).
         # No cache needed: the anchor is the frame's own end-effector position (state[:3],
         # already in the point-cloud/base frame before centering). Replaces the uniform
@@ -106,6 +111,14 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         oracle_anchor_fallback_labels: tuple[int, ...] = (3,),
         oracle_sampling_sigma: float = 0.08,   # Gaussian bandwidth, meters
         oracle_sampling_floor: float = 0.05,   # minimum weight at infinite distance
+        # Where the ground truth comes from. "labels" is the original arm described above.
+        # "geom" instead reads the simulator's geom positions from a target_positions.npz
+        # dump, which is the SAME quantity the live evaluator can read out of a running env
+        # -- see pointact.roi_sampling.geom_gt for why that matters and why a label centroid
+        # is not it. "geom" needs oracle_gt_npz; "labels" needs oracle_label_dirname.
+        oracle_gt: str = "labels",             # labels | geom
+        oracle_gt_npz: str | None = None,      # path under `root`, e.g. roi_meta/target_positions.npz
+        oracle_gt_set: str | None = None,      # geom set name; defaults to geom_gt.ORACLE_TARGET
         **kwargs,
     ):
         super().__init__(
@@ -149,6 +162,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if molmo_fallback not in ("uniform", "eef"):
             raise ValueError(f"molmo_fallback must be 'uniform' or 'eef', got {molmo_fallback!r}")
         self.molmo_fallback = molmo_fallback
+        if molmo_view_select not in molmo_anchors.VIEW_SELECT:
+            raise ValueError(f"molmo_view_select must be one of "
+                             f"{molmo_anchors.VIEW_SELECT}, got {molmo_view_select!r}")
+        self.molmo_view_select = molmo_view_select
         self.molmo_anchor_dir = (
             os.path.join(self.root, molmo_anchor_dirname)
             if molmo_anchor_dirname is not None
@@ -171,8 +188,26 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         )
         self.oracle_sampling_sigma = oracle_sampling_sigma
         self.oracle_sampling_floor = oracle_sampling_floor
-        if oracle_sampling and oracle_label_dirname is None:
-            raise ValueError("oracle_sampling requires oracle_label_dirname")
+
+        if oracle_gt not in ("labels", "geom"):
+            raise ValueError(f"oracle_gt must be 'labels' or 'geom', got {oracle_gt!r}")
+        self.oracle_gt = oracle_gt
+        self.oracle_gt_lookup = None
+        self.oracle_gt_set = oracle_gt_set
+        if oracle_sampling and oracle_gt == "labels" and oracle_label_dirname is None:
+            raise ValueError("oracle_sampling with oracle_gt=labels requires "
+                             "oracle_label_dirname")
+        if oracle_sampling and oracle_gt == "geom":
+            if oracle_gt_npz is None:
+                raise ValueError("oracle_sampling with oracle_gt=geom requires oracle_gt_npz")
+            # Resolved once, in the parent process: the dump is a few MB and the lookup is a
+            # plain dict, so every worker inherits it by fork instead of reopening an LMDB.
+            self.oracle_gt_set = oracle_gt_set or geom_gt.oracle_target_for(repo_id)
+            self.oracle_gt_lookup = geom_gt.load_targets(
+                os.path.join(self.root, oracle_gt_npz),
+                [self.oracle_gt_set],
+                geom_gt.load_episode_map(self.root),
+            )
         self.oracle_label_dir = (
             os.path.join(self.root, oracle_label_dirname)
             if oracle_label_dirname is not None
@@ -278,9 +313,14 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # Frame-level anchors: unaffected by the workspace crop below.
         molmo_anchors = self.load_molmo_anchors(ep_idx, frame_idx) if self.molmo_sampling else None
         # Per-point ground-truth labels must be cropped alongside the cloud to stay aligned.
-        point_labels = self.load_point_labels(ep_idx, frame_idx) if self.oracle_sampling else None
+        # Only the label-based oracle needs them; the geom one is a frame-level lookup.
+        point_labels = (self.load_point_labels(ep_idx, frame_idx)
+                        if self.oracle_sampling and self.oracle_gt == "labels" else None)
+        oracle_anchor = (self.load_oracle_geom_anchor(ep_idx, frame_idx)
+                         if self.oracle_sampling and self.oracle_gt == "geom" else None)
         point_cloud, point_labels = self.filter_point_cloud_by_workspace(point_cloud, point_labels)
-        point_cloud = self.augment_point_cloud(point_cloud, item, molmo_anchors, point_labels)
+        point_cloud = self.augment_point_cloud(point_cloud, item, molmo_anchors, point_labels,
+                                               oracle_anchor)
         point_cloud = self.center_point_cloud(point_cloud, item)
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
@@ -405,6 +445,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         rec = np.frombuffer(bytes(buf), dtype=molmo_cache.RECORD_DTYPE)
         return molmo_cache.decode_anchors(rec, self.molmo_anchor_ids)
 
+    def load_oracle_geom_anchor(self, ep_idx: int, frame_idx: int):
+        """The simulator's own position for this frame's target, or None.
+
+        Unlike :meth:`oracle_anchor` this does not depend on the target being *visible*: it is
+        read from a geom dump, so an occluded handle still anchors the density. That is the
+        whole reason the geom source exists -- see pointact.roi_sampling.geom_gt. None means
+        the dump has no row for this frame (an episode it did not cover, or a frame past its
+        end), and the caller falls through to the uniform draw exactly as a missing label
+        centroid does.
+        """
+        if self.oracle_gt_lookup is None:
+            return None
+        return self.oracle_gt_lookup(self.oracle_gt_set, ep_idx, frame_idx)
+
     def oracle_anchor(self, point_cloud: np.ndarray, point_labels: np.ndarray):
         """Centroid of the ground-truth handle points, or None if nothing usable is visible.
 
@@ -427,17 +481,19 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         item: dict,
         molmo_anchors: np.ndarray | None = None,
         point_labels: np.ndarray | None = None,
+        oracle_anchor: np.ndarray | None = None,
     ):
         # Baseline count rule is preserved exactly; only the *selection* changes when a
         # guiding anchor is present.
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = None
-            if self.oracle_sampling and point_labels is not None:
+            if self.oracle_sampling and (point_labels is not None or oracle_anchor is not None):
                 # Same Gaussian-with-floor density as the eef arm, centred on the handle the
                 # gripper is reaching for instead of on the gripper itself. Frames with no
-                # visible anchor fall through to the uniform draw below.
-                anchor = self.oracle_anchor(point_cloud, point_labels)
+                # anchor fall through to the uniform draw below.
+                anchor = (oracle_anchor if oracle_anchor is not None
+                          else self.oracle_anchor(point_cloud, point_labels))
                 if anchor is not None:
                     rng = np.random.default_rng(np.random.randint(2**31 - 1))
                     w = eef_density_weights(

@@ -76,6 +76,13 @@ class LerobotConfig:
     molmo_sampling_sigma: float = 0.08
     molmo_sampling_floor: float = 0.05
     molmo_fallback: str = "uniform"   # uniform | eef
+    # Which rule turned the per-view lifts into centres when the cache was built. "per_view"
+    # gives every lifting view its own Gaussian bump -- the deployable arm. "closest_gt"
+    # keeps only the view nearest the simulator's ground truth, which makes the arm an upper
+    # bound on the pointer rather than a system, and is privileged in the same way the oracle
+    # arm is. Declarative on this side (the selection already happened offline), but it MUST
+    # be recorded, because eval reproduces the rule live and has no other way to know it.
+    molmo_view_select: str = "per_view"   # per_view | closest_gt
 
     # EEF-density point sampling (optional, mutually exclusive with the Molmo fields above).
     # No cache needed: the anchor is the frame's own end-effector position. See
@@ -96,12 +103,24 @@ class LerobotConfig:
     # anchor. `oracle_label_dirname` is the per-point label LMDB (under `root`) written by
     # convert.py --point-labels.
     # Labels: 0 background, 1 robot, 2 target fixture, 3 target door/drawer panel, 4 handle.
+    #
+    # `oracle_gt` picks where that ground truth comes from. "labels" is the arm just
+    # described. "geom" instead reads the simulator's geom positions from a
+    # target_positions.npz dump (`oracle_gt_npz`, `oracle_gt_set`), which is the same
+    # quantity a running env can hand the evaluator -- a label centroid is not, because it
+    # averages only the *visible surface* and is undefined when the target is occluded. From
+    # stage 5 on, "geom" is the arm: it is one definition across every task, where the label
+    # LUT only ever knew about drawers. Whatever is set here MUST be what eval centres on as
+    # well; eval_robocasa365.sh reads it out of the checkpoint's data_config.yaml.
     oracle_sampling: bool = False
     oracle_label_dirname: str | None = None
     oracle_anchor_labels: tuple[int, ...] = (4,)
     oracle_anchor_fallback_labels: tuple[int, ...] = (3,)
     oracle_sampling_sigma: float = 0.08
     oracle_sampling_floor: float = 0.05
+    oracle_gt: str = "labels"          # labels | geom
+    oracle_gt_npz: str | None = None
+    oracle_gt_set: str | None = None
 
     image_size: int | None = None
 

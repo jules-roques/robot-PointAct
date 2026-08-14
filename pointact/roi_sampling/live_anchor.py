@@ -32,9 +32,10 @@ import numpy as np
 
 from pointact.roi_sampling.molmo_anchors import (
     STATIC_VIEWS,
+    VIEW_SELECT,
     VIEWS,
-    fuse_mean,
     queries_for,
+    select_closest,
 )
 
 #: Half-width in pixels of the box a returned point is padded into. Matches
@@ -110,6 +111,9 @@ class AnchorStats:
         self.wrist_lifted = 0
         self.wrist_adopted = 0
         self.gt_errors: list[float] = []
+        # closest_gt arm only: which view won, and how often no ground truth was available.
+        self.chosen_view = {v: 0 for v in VIEWS}
+        self.no_gt = 0
 
     def summary(self) -> dict:
         n = max(1, self.queries)
@@ -125,6 +129,8 @@ class AnchorStats:
             "gt_error_median_m": (round(float(np.median(self.gt_errors)), 4)
                                   if self.gt_errors else None),
             "gt_error_n": len(self.gt_errors),
+            "chosen_view": dict(self.chosen_view),
+            "no_gt": self.no_gt,
         }
 
 
@@ -138,13 +144,21 @@ class LiveMolmoAnchor:
             adds the destination. Only the selected queries are asked, so the object-only arm
             costs one forward per replan rather than two.
         client: a connected ``PolicyClient`` for the molmo pointing server.
+        view_select: how the per-view lifts become centres. Must match the cache the
+            checkpoint was trained on -- "per_view" gives each lifting view its own centre
+            (the deployable arm), "closest_gt" keeps only the view nearest the ground truth
+            (the privileged upper bound, and it makes ``gt`` mandatory in ``__call__``).
     """
 
-    def __init__(self, task: str, anchor_ids, client, verbose: bool = False):
+    def __init__(self, task: str, anchor_ids, client, verbose: bool = False,
+                 view_select: str = "per_view"):
         self.task = task
         self.anchor_ids = tuple(int(i) for i in anchor_ids)
         self.client = client
         self.verbose = verbose
+        if view_select not in VIEW_SELECT:
+            raise ValueError(f"view_select must be one of {VIEW_SELECT}, got {view_select!r}")
+        self.view_select = view_select
         self.stats = AnchorStats()
         # Validate here rather than at the first replan, which is after the 18 GB pointer has
         # loaded and the first scene has been reset. The instruction only picks the wording,
@@ -156,8 +170,13 @@ class LiveMolmoAnchor:
                 f"{n} pointing quer{'y' if n == 1 else 'ies'}"
             )
 
-    def __call__(self, obs: dict, workspace: dict | None = None) -> np.ndarray | None:
-        """The (K, 3) sampling anchors for this frame, or None to fall back to uniform."""
+    def __call__(self, obs: dict, workspace: dict | None = None,
+                 gt: dict | None = None) -> np.ndarray | None:
+        """The (K, 3) sampling anchors for this frame, or None to fall back to uniform.
+
+        ``gt`` is {query id: target xyz} and is required only by the ``closest_gt`` arm;
+        the deployable ``per_view`` arm ignores it.
+        """
         queries = queries_for(self.task, obs.get("task", ""))
         wanted = [i for i in self.anchor_ids if i < len(queries)]
         if not wanted:
@@ -197,7 +216,23 @@ class LiveMolmoAnchor:
             # Every view that lifted becomes its own centre, exactly as the cache stores
             # them. Fusing here and not there -- or the reverse -- evaluates the policy on a
             # signal it was not trained on.
-            if per_view:
+            if per_view and self.view_select == "closest_gt":
+                # Privileged upper bound: keep only the view that landed nearest the truth.
+                # `gt` is keyed by query id because a task can point at more than one thing.
+                target = None if gt is None else gt.get(qi)
+                xyz, view = select_closest(per_view, target)
+                if xyz is None:
+                    # No ground truth for this frame. Emitting all the centres instead would
+                    # make the arm a silent mixture of two rules, so drop the query and let
+                    # the configured fallback handle the frame -- and count it, because a
+                    # high rate here means the dump does not cover the episodes being run.
+                    self.stats.no_gt += 1
+                else:
+                    self.stats.query_hits += 1
+                    self.stats.agree += int(len(per_view) > 1)
+                    self.stats.chosen_view[view] += 1
+                    anchors.append(xyz)
+            elif per_view:
                 self.stats.query_hits += 1
                 self.stats.agree += int(len(per_view) > 1)
                 for _v, (xyz, _n) in per_view.items():

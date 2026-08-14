@@ -320,6 +320,100 @@ def merge_shards(shards: list[Path], out: Path) -> None:
           f"{lifted.mean():.1%} lifted")
 
 
+def select_closest_gt(npz_path: Path, dataset_dir: Path, task: str, gt_npz: Path,
+                      out: Path) -> None:
+    """Collapse each query's per-view centres to the single one nearest the ground truth.
+
+    The privileged upper bound on the pointer: it answers "what would this arm score if the
+    policy spent its whole budget on the RIGHT view, instead of one bump per hypothesis?".
+    Everything else about the arm is unchanged -- same detections, same lift, same sigma --
+    so the contrast against the per-view cache isolates view selection and nothing else.
+
+    Pure numpy over the merged rows: the detections and their 3D lifts are already stored per
+    view, so this needs no GPU, no MolmoPoint forward and no simulator replay. Minutes, not
+    the 10 h array the lift itself cost.
+
+    A frame with no ground truth (an episode the dump did not cover, or a frame past its end)
+    emits the "nothing lifted" placeholder rather than falling back to the per-view rule, so
+    the arm stays one rule throughout and those frames take the configured molmo_fallback.
+    The count is printed, because a large one means the dump and the cache disagree about
+    which episodes exist.
+    """
+    from pointact.roi_sampling.geom_gt import QUERY_TARGETS, load_episode_map, load_targets
+    from pointact.roi_sampling.molmo_anchors import VIEWS
+
+    with np.load(npz_path) as _npz:
+        d = {k: _npz[k] for k in _npz.files}
+    qmap = QUERY_TARGETS[task]
+    lookup = load_targets(gt_npz, sorted(set(qmap.values())),
+                          load_episode_map(dataset_dir))
+
+    groups: dict[tuple[int, int, int], list[int]] = {}
+    for i in range(len(d["ep"])):
+        key = (int(d["ep"][i]), int(d["frame"][i]), int(d["query_id"][i]))
+        groups.setdefault(key, []).append(i)
+
+    keep: list[int] = []
+    placeholders: list[tuple[int, int, int]] = []
+    sel_err, mean_err, chosen = [], [], {v: 0 for v in VIEWS}
+    no_gt = no_lift = 0
+    for (ep, frame, qid), idxs in sorted(groups.items()):
+        lifted = [i for i in idxs
+                  if int(d["view_id"][i]) >= 0 and np.isfinite(d["xyz"][i]).all()]
+        if not lifted:
+            no_lift += 1
+            placeholders.append((ep, frame, qid))
+            continue
+        gt = lookup(qmap[qid], ep, frame) if qid in qmap else None
+        if gt is None:
+            no_gt += 1
+            placeholders.append((ep, frame, qid))
+            continue
+        dists = [float(np.linalg.norm(d["xyz"][i] - gt)) for i in lifted]
+        best = int(np.argmin(dists))
+        keep.append(lifted[best])
+        sel_err.append(dists[best])
+        # What the shipped per-view arm's centres average to, for the same frame. Not the
+        # arm's own metric (it is scored on its nearest centre) but the honest "one anchor"
+        # comparison, and the number the pre-per-view caches were built on.
+        mean_err.append(float(np.linalg.norm(
+            np.mean([d["xyz"][i] for i in lifted], axis=0) - gt)))
+        chosen[VIEWS[int(d["view_id"][lifted[best]])]] += 1
+
+    n_out = len(keep) + len(placeholders)
+    cols = {}
+    for k, v in d.items():
+        rows = v[keep]
+        if len(placeholders):
+            pad = np.zeros((len(placeholders),) + v.shape[1:], dtype=v.dtype)
+            if k == "xyz":
+                pad[:] = np.nan
+            elif k.endswith("_uv"):
+                pad[:] = np.nan
+            elif k == "view_id":
+                pad[:] = -1
+            rows = np.concatenate([rows, pad], axis=0)
+        cols[k] = rows
+    for j, (ep, frame, qid) in enumerate(placeholders):
+        cols["ep"][len(keep) + j] = ep
+        cols["frame"][len(keep) + j] = frame
+        cols["query_id"][len(keep) + j] = qid
+    order = np.lexsort((cols["query_id"], cols["frame"], cols["ep"]))
+    cols = {k: v[order] for k, v in cols.items()}
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, **cols)
+    print(f"wrote {out}: {n_out} rows ({len(keep)} selected, {len(placeholders)} without a "
+          f"centre: {no_lift} nothing lifted, {no_gt} no ground truth)")
+    if sel_err:
+        sel_err, mean_err = np.asarray(sel_err), np.asarray(mean_err)
+        print(f"  chosen view: {chosen}")
+        print(f"  best-view error: median {np.median(sel_err) * 100:.1f} cm, "
+              f"within 8 cm {np.mean(sel_err < 0.08):.1%}")
+        print(f"  mean-of-views:   median {np.median(mean_err) * 100:.1f} cm, "
+              f"within 8 cm {np.mean(mean_err < 0.08):.1%}")
+
+
 def write_cache(npz_path: Path, dataset_dir: Path, out_dirname: str, stride: int,
                 map_size_gb: float, field: str = "xyz") -> None:
     """Turn the merged rows into a cache in the builder's own on-disk format.
@@ -401,6 +495,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None, help="Shard/merged npz path.")
     ap.add_argument("--merge", nargs="*", type=Path, default=None,
                     help="Merge these shards into --out and exit (no simulator needed).")
+    ap.add_argument("--select-closest-gt", type=Path, default=None,
+                    help="Merged npz to collapse to one centre per query -- the view whose "
+                         "lift lands nearest the ground truth. Privileged: an upper bound on "
+                         "the pointer, not a deployable arm. Needs --task and --gt-npz.")
+    ap.add_argument("--gt-npz", type=Path, default=None,
+                    help="target_positions.npz for --select-closest-gt.")
     ap.add_argument("--write-cache", type=Path, default=None,
                     help="Turn a merged npz into an LMDB cache and exit.")
     ap.add_argument("--out-dirname", default="points_3views_molmo_depth")
@@ -444,6 +544,14 @@ def main() -> None:
         if not shards:
             raise SystemExit("--merge matched no files")
         merge_shards(shards, args.out or (args.dataset_dir / "roi_meta" / "depth_anchors.npz"))
+        return
+
+    if args.select_closest_gt:
+        if args.task is None or args.gt_npz is None:
+            raise SystemExit("--select-closest-gt needs --task and --gt-npz")
+        select_closest_gt(args.select_closest_gt, args.dataset_dir, args.task, args.gt_npz,
+                          args.out or (args.dataset_dir / "roi_meta"
+                                       / "depth_anchors_bestgt.npz"))
         return
 
     if args.write_cache:

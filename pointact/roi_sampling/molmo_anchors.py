@@ -112,6 +112,35 @@ def fuse_mean(per_view: dict[str, tuple[np.ndarray, int]]):
     return np.mean(np.stack(got, axis=0), axis=0), len(got)
 
 
+#: Values ``molmo_view_select`` may take. "per_view" is the shipped arm: every view that
+#: lifts becomes its own Gaussian centre. "closest_gt" is the stage-5 upper bound below.
+VIEW_SELECT = ("per_view", "closest_gt")
+
+
+def select_closest(per_view: dict[str, tuple[np.ndarray, int]], gt):
+    """The one view whose lift lands nearest the ground truth. Returns (xyz|None, view|None).
+
+    An UPPER BOUND on the pointer, not a deployable rule: choosing among the views by their
+    distance to the answer is privileged information, exactly like the oracle arm's anchor.
+    What it isolates is how much of MolmoPoint's error is *view-selection* error rather than
+    pointing error -- the per-view arm spends budget on every view's hypothesis, including
+    the wrong ones, and this says what the policy would get if that spend were perfect.
+
+    It is also the anchor the accuracy table already reports: ``eval_molmo_accuracy`` scores
+    the centre nearest the ground truth, so a policy trained on this arm consumes the anchor
+    whose within-sigma numbers are already tabulated, instead of a mixture the table never
+    described.
+
+    ``gt is None`` (no dump row for this frame) returns None rather than quietly reverting to
+    a different rule -- the caller then takes the arm's configured fallback, and counts it.
+    """
+    if not per_view or gt is None:
+        return None, None
+    gt = np.asarray(gt, dtype=np.float64).reshape(3)
+    view = min(per_view, key=lambda v: float(np.linalg.norm(per_view[v][0] - gt)))
+    return per_view[view][0], view
+
+
 def fuse(per_view: dict[str, tuple[np.ndarray, int]], agree_dist: float):
     """SUPERSEDED by :func:`fuse_mean`; kept to reproduce the earlier caches.
 

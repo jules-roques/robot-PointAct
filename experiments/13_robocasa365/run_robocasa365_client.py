@@ -32,6 +32,7 @@ from pointact.robot_envs.robocasa365_utils.environments import (
     POINT_LABEL_TARGET_HANDLE,
     RoboCasa365Env,
 )
+from pointact.roi_sampling import geom_gt
 from pointact.roi_sampling.live_anchor import LiveMolmoAnchor
 from pointact.utils.rotation import convert_rotation
 from pointact.utils.server_client import PolicyClient
@@ -57,6 +58,13 @@ class ClientArgs:
     # upper bound, not a deployable system. Must be paired with --args.point_sampling anchor on
     # the server, and must be off for the uniform and eef-density policies.
     oracle_anchor: bool = False
+    # Where --args.oracle_anchor gets its ground truth, and what the closest_gt molmo arm
+    # selects against. "geom" reads the simulator's geom positions (no render, always
+    # defined, one table entry per task); "labels" is the original segmentation-centroid
+    # rule, which only OpenDrawer's label LUT supports and which is undefined whenever the
+    # target is occluded. MUST match the checkpoint's data config -- eval_robocasa365.sh
+    # reads oracle_gt out of it for exactly that reason.
+    gt_source: str = "geom"  # geom | labels
 
     # Produce the sampling anchor live with MolmoPoint, for policies trained with
     # molmo_sampling. Unlike --args.oracle_anchor this uses no privileged information: the
@@ -69,6 +77,12 @@ class ClientArgs:
     # destination. Getting this wrong is a silent train/eval mismatch, which is the exact
     # failure that voided the first round of stage-3 numbers.
     molmo_anchor_ids: tuple[int, ...] = (0,)
+    # How the per-view lifts become Gaussian centres. "per_view" gives each lifting view its
+    # own centre -- the deployable arm. "closest_gt" keeps only the view nearest the ground
+    # truth, which is privileged and makes this an upper bound on the pointer rather than a
+    # system. MUST match the cache the checkpoint was trained on; a mismatch trains on one
+    # centre and evaluates on three, which reads as a plausible success rate.
+    molmo_view_select: str = "per_view"  # per_view | closest_gt
     # Render segmentation and log the live anchor's distance to the ground-truth target. Only
     # OpenDrawer exposes those labels. Off by default: it costs an extra render pass per step,
     # and it is a diagnostic, not part of the arm.
@@ -232,7 +246,24 @@ def main(args: ClientArgs) -> None:
             pass
         print(f"Molmo pointer is running on host {args.molmo_host} port {args.molmo_port}")
         molmo_anchor = LiveMolmoAnchor(args.env_name, args.molmo_anchor_ids, molmo_client,
-                                       verbose=args.verbose)
+                                       verbose=args.verbose,
+                                       view_select=args.molmo_view_select)
+
+    # One geom-target reader serves both privileged arms: the oracle's anchor and the
+    # closest_gt selector are then provably the same quantity, which is the point of
+    # pointact.roi_sampling.geom_gt. Built before the env so a task missing from the table
+    # fails now rather than after the first scene has been generated.
+    geom_targets = None
+    needs_geom = args.gt_source == "geom" and (
+        args.oracle_anchor or args.molmo_view_select == "closest_gt" or args.molmo_audit_gt)
+    if needs_geom:
+        wanted = None
+        if args.oracle_anchor:
+            wanted = [geom_gt.oracle_target_for(args.env_name)]
+        else:
+            qmap = geom_gt.QUERY_TARGETS[args.env_name]
+            wanted = sorted({qmap[i] for i in args.molmo_anchor_ids if i in qmap})
+        geom_targets = geom_gt.LiveGeomTargets(args.env_name, wanted)
 
     video_out_dir = None
     log_filename = None
@@ -255,9 +286,11 @@ def main(args: ClientArgs) -> None:
         image_resolution=args.image_size,
         use_depth=args.use_depth,
         use_point_cloud=args.use_depth,
-        # Segmentation is what ground_truth_anchor reads. The molmo arm does not need it to
-        # run -- only to be audited against the GT target it is trying to find.
-        use_segmentation=args.oracle_anchor or args.molmo_audit_gt,
+        # Segmentation is what ground_truth_anchor reads, and it costs an extra render pass
+        # per step. The geom ground truth needs none of it -- it is an array read off the
+        # simulator state -- so only the "labels" source turns it on.
+        use_segmentation=args.gt_source == "labels" and (
+            args.oracle_anchor or args.molmo_audit_gt),
         enable_render=True,
         terminate_on_success=True,  # so `done` marks success, as in the Libero client
     )
@@ -302,6 +335,8 @@ def main(args: ClientArgs) -> None:
                 "success_rate": total_successes / max(total_episodes, 1),
                 "oracle_anchor": bool(args.oracle_anchor),
                 "molmo_anchor": bool(args.molmo_anchor),
+                "gt_source": args.gt_source,
+                "molmo_view_select": args.molmo_view_select,
                 # The molmo arm's failure mode is quiet: a pointer that answers nothing turns
                 # every frame into a uniform draw and the run still reports a plausible
                 # success rate. Writing the counters next to the rate is what tells "did not
@@ -319,6 +354,9 @@ def main(args: ClientArgs) -> None:
         # Each reset re-randomises the scene. TODO(verify): reseeding per trial for
         # reproducible-yet-varied scenes may need explicit env support.
         obs, _ = env.reset()
+        # Geom ids do not survive a scene re-randomisation, so re-resolve them every trial.
+        if geom_targets is not None:
+            geom_targets.reset(env)
         action_plan = collections.deque()
         replay_images = []
         rollout_frames = []
@@ -349,15 +387,29 @@ def main(args: ClientArgs) -> None:
                 # before the anchor block rather than just before the request.
                 points_workspace = env.get_points_workspace(obs)
 
+                # Ground truth for whichever privileged arm is running, from the source the
+                # checkpoint was trained against. Cheap for "geom" (an array slice), an
+                # extra render pass for "labels".
+                targets = geom_targets(env, obs) if geom_targets is not None else None
+
                 anchor = None
                 if args.oracle_anchor:
-                    anchor = ground_truth_anchor(obs)
+                    anchor = (targets[geom_gt.oracle_target_for(args.env_name)]
+                              if targets is not None else ground_truth_anchor(obs))
                 elif molmo_anchor is not None:
                     # Once per replan, matching the stride the training cache was built at:
                     # both the cache and this hold one anchor for the following 8 steps.
-                    anchor = molmo_anchor(obs, points_workspace)
+                    gt_by_query = None
+                    if targets is not None:
+                        qmap = geom_gt.QUERY_TARGETS[args.env_name]
+                        gt_by_query = {i: targets[qmap[i]]
+                                       for i in args.molmo_anchor_ids
+                                       if i in qmap and qmap[i] in targets}
+                    anchor = molmo_anchor(obs, points_workspace, gt=gt_by_query)
                     if args.molmo_audit_gt:
-                        molmo_anchor.record_gt_error(anchor, ground_truth_anchor(obs))
+                        ref = (targets[geom_gt.QUERY_TARGETS[args.env_name][0]]
+                               if targets is not None else ground_truth_anchor(obs))
+                        molmo_anchor.record_gt_error(anchor, ref)
                 if anchor is not None:
                     batch["observation.sampling_anchor"] = [anchor]
 

@@ -54,118 +54,13 @@ import numpy as np
 # The simulator imports live inside the functions that need them: --merge and the summary
 # are pure numpy, and they run in the root env, which has no MuJoCo.
 
-#: task -> {output name: how to find the geoms whose mean xpos is that position}.
-#:
-#: ``geom`` names an exact geom (after the fixture's naming prefix); ``body_contains`` takes
-#: every geom hanging off a body of that fixture whose name contains the substring, which is
-#: how ``environments._build_geom_label_lut`` assigns the handle/door labels -- so the
-#: OpenDrawer entry below reproduces the oracle arm's target from geometry instead of from
-#: rendered labels. ``object`` names a key of ``env.objects`` instead, for tasks whose target
-#: is a movable object rather than part of a fixture.
-TARGET_GEOMS = {
-    "TurnOnMicrowave": {
-        "fixture_attr": "microwave",
-        "sets": {
-            "start_button": {"geom": "start_button"},
-            "stop_button": {"geom": "stop_button"},
-            "microwave": {"body_contains": ""},
-        },
-    },
-    "OpenDrawer": {
-        "fixture_attr": "drawer",
-        "sets": {
-            "handle": {"body_contains": ["handle"]},
-            # A drawer's front panel is a "door" body in RoboCASA's naming, whatever the
-            # fixture is called, and the handle hangs off a body whose name contains "door"
-            # too -- hence the exclusion. This is the same handle-before-door precedence
-            # environments._build_geom_label_lut uses to assign labels 4 and 3.
-            "drawer_panel": {"body_contains": ["drawer", "door"], "body_excludes": ["handle"]},
-        },
-    },
-    # Both pointing queries here name a movable object, so there is no fixture to hang the
-    # geoms off: `ppcs_queries` asks for the food item (query 0) and "the pan" (query 1), and
-    # the task builds them as env.objects["obj"] and env.objects["container"]. Each is the
-    # other's distractor -- late in an episode the food ends up *in* the pan, so a
-    # "closer to the pan than to the food" reading is only meaningful early on.
-    "PickPlaceCounterToStove": {
-        "sets": {
-            "obj": {"object": "obj"},
-            "pan": {"object": "container"},
-        },
-    },
-}
-
-
-def resolve_geom_ids(env, fixture, spec: dict) -> list[int]:
-    """Geom ids matching one entry of a task's ``sets``.
-
-    ``geom`` is looked up through the fixture's ``naming_prefix`` (that is how RoboCASA's own
-    success check finds the button); ``body_contains`` walks every geom and keeps those whose
-    body belongs to the fixture and contains any of the substrings, minus any matching
-    ``body_excludes``. An empty ``body_contains`` entry means the whole fixture.
-
-    ``object`` takes every geom of one ``env.objects`` entry, by exact body name. The mean
-    over *all* of an object's geoms -- collision and visual alike, which sit on top of each
-    other -- is its centroid, which is the thing a pointing model is being asked for. Not
-    ``body_xpos`` of the root body: that is the MJCF frame origin, which for an asymmetric
-    mesh like a pan is not where the object looks like it is.
-
-    Matching body names *exactly* rather than by ``naming_prefix``, because RoboCASA's
-    ``try_to_place_in`` registers the receptacle an object starts in as a second object named
-    ``<name>_container``: on PickPlaceCounterToStove the food is ``obj`` and the plate under
-    it is ``obj_container``, whose bodies also start with ``obj_``. A prefix match silently
-    returns the food *and* the plate, and their midpoint is a ground truth that is wrong by a
-    few centimetres -- the scale the whole study is measuring at.
-    """
-    model = env.env.sim.model
-    if "object" in spec:
-        key = spec["object"]
-        objects = getattr(env.env, "objects", {}) or {}
-        if key not in objects:
-            raise RuntimeError(f"env.objects has no '{key}'; it has {sorted(objects)}")
-        obj = objects[key]
-        # `.bodies` is the authoritative list but raises on some object types whose `_bodies`
-        # carries an unnamed entry (the pan does). The root body alone is right for a
-        # single-body object, and dump_episode refuses a set that matched nothing, so a
-        # narrower match fails loudly instead of silently answering with the wrong position.
-        try:
-            want = {obj.root_body, *(obj.bodies or [])}
-        except (TypeError, AttributeError):
-            want = {obj.root_body}
-        return [gid for gid in range(int(model.ngeom))
-                if (model.body_id2name(int(model.geom_bodyid[gid])) or "") in want]
-
-    if "geom" in spec:
-        name = f"{fixture.naming_prefix}{spec['geom']}"
-        try:
-            return [int(model.geom_name2id(name))]
-        except Exception:
-            return []
-
-    want = spec["body_contains"]
-    if isinstance(want, str):
-        want = [want]
-    drop = spec.get("body_excludes", [])
-    fixture_name = fixture.name
-    out = []
-    for gid in range(int(model.ngeom)):
-        body = model.body_id2name(int(model.geom_bodyid[gid])) or ""
-        if fixture_name not in body:
-            continue
-        if any(x in body for x in drop):
-            continue
-        if any(w in body for w in want):
-            out.append(gid)
-    return out
-
-
-def world_to_base(points_world: np.ndarray, base_pos, base_quat_xyzw) -> np.ndarray:
-    """(N, 3) world points expressed in the robot-base frame the point clouds use."""
-    from scipy.spatial.transform import Rotation as R
-
-    rot = R.from_quat(np.asarray(base_quat_xyzw, dtype=np.float64).reshape(4)).as_matrix()
-    p = np.asarray(points_world, dtype=np.float64).reshape(-1, 3)
-    return (p - np.asarray(base_pos, dtype=np.float64).reshape(1, 3)) @ rot
+# TARGET_GEOMS, resolve_geom_ids and world_to_base moved to
+# pointact.roi_sampling.geom_gt: the live evaluator needs the identical table and the
+# identical resolution rules, and a second copy here is how the two would drift.
+# Re-exported so existing callers of this module keep working.
+from pointact.roi_sampling.geom_gt import (  # noqa: E402
+    TARGET_GEOMS, resolve_geom_ids, world_to_base,
+)
 
 
 def infer_env_name(source_dir: Path) -> str:

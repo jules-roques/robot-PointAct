@@ -59,6 +59,7 @@ from data_prep.roi_sampling.build_molmo_cache import (
     VIEWS, load_calib, read_episode_states, read_meta, wrist_cam_at,
 )
 from pointact.roi_sampling import molmo_cache
+from pointact.roi_sampling.geom_gt import load_targets
 from pointact.roi_sampling.geometry import project_base_points
 
 msgpack_numpy.patch()
@@ -109,39 +110,13 @@ def load_gt_geom(path: Path, target: str, distractors: list[str],
                  converted_to_source: dict[int, int] | None = None):
     """``lookup(name, ep, frame) -> xyz | None`` over a target-position dump.
 
-    ``ep`` is a **converted** episode index, because that is what the anchor cache is keyed
-    by. The dump is indexed by *source* episode, and on OpenDrawer the two differ -- 18 failed
-    replays were dropped and the rest renumbered. ``converted_to_source`` bridges them; pass
-    None only when a verified map says the two are the identity.
-
-    An episode dumped with ``--reset-only`` has a single row, because its target does not
-    move; that row answers for every frame of the episode. Anything else is indexed per
-    frame, and a frame past the end of the dump has no answer rather than a wrong one.
+    Thin wrapper over :func:`pointact.roi_sampling.geom_gt.load_targets`, which is where the
+    implementation moved when the oracle arm and the MolmoPoint best-view arm started needing
+    the same lookup at train and eval time. Kept for this script's callers, and because the
+    accuracy report wants the name list back alongside the lookup.
     """
-    z = np.load(path, allow_pickle=True)
-    available = json.loads(str(z["geom_sets"]))
-    for name in [target, *distractors]:
-        if name not in available:
-            raise SystemExit(f"{path} has no geom set '{name}'; it has {available}")
-
-    eps, frames = z["episode"], z["frame"]
-    tables = {name: {} for name in [target, *distractors]}
-    static: dict[int, bool] = {}
-    for name in tables:
-        arr = z[name]
-        for ep, fr, xyz in zip(eps.tolist(), frames.tolist(), arr):
-            tables[name][(ep, fr)] = xyz
-    for ep in np.unique(eps).tolist():
-        static[ep] = int((eps == ep).sum()) == 1
-
-    def lookup(name: str, ep: int, frame: int):
-        src = ep if converted_to_source is None else converted_to_source.get(ep)
-        if src is None:
-            return None
-        got = tables[name].get((src, 0 if static.get(src) else frame))
-        return None if got is None else np.asarray(got, dtype=np.float64)
-
-    return lookup, [target, *distractors]
+    names = [target, *distractors]
+    return load_targets(path, names, converted_to_source), names
 
 
 def main() -> None:
