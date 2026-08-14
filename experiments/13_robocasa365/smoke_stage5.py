@@ -37,6 +37,8 @@ import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from lerobot.constants import OBS_STATE  # noqa: E402
+
 from pointact.constants import OBS_POINTS  # noqa: E402
 from pointact.data.robot.multi_data import load_single_lerobot_dataset  # noqa: E402
 from pointact.data.schema import LerobotConfig  # noqa: E402
@@ -94,7 +96,10 @@ def main() -> None:
             cloud_c, labels_c = ds.filter_point_cloud_by_workspace(cloud, labels)
             centres = ds.oracle_anchor(cloud_c, labels_c)
         elif ds.eef_sampling:
-            centres = np.asarray(ds[int(i)]["observation.state"][:3])
+            # The RAW state, not ds[i]'s: __getitem__ centres the cloud and may rotate the
+            # state with it, so the processed copy is in a different frame from the raw cloud
+            # this check measures against. augment_point_cloud reads it before either happens.
+            centres = np.asarray(item[OBS_STATE], dtype=np.float64)[:3]
 
         if centres is None:
             n_fallback += 1
@@ -140,6 +145,12 @@ def main() -> None:
                         "this arm is training its fallback under another name.")
     if arm != "uniform" and n_fallback == n_anchor + n_fallback:
         problems.append("every frame fell back; the anchor source is empty.")
+    if arm != "uniform" and n_anchor and not concentrations:
+        # Silence here is not a pass. It means no frame had a single cloud point within one
+        # sigma of its anchor, which is either an anchor in the wrong coordinate frame or a
+        # target outside the workspace crop -- and the arm would train as a uniform draw.
+        problems.append("no frame had any point within 1 sigma of its anchor -- the anchor "
+                        "and the cloud are probably not in the same frame.")
     if concentrations and np.median(concentrations) < MIN_CONCENTRATION:
         problems.append(f"draw is barely concentrated "
                         f"({np.median(concentrations):.2f}x uniform) -- check sigma/floor.")
