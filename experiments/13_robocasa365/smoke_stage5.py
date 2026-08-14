@@ -21,10 +21,19 @@ Reports what the sampler ACTUALLY did over a sample of frames rather than that i
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
-import numpy as np
+# LeRobotDatasetMetadata resolves a revision against the Hub unless told not to, and these
+# repo_ids ("TurnOnMicrowave") are local directories that do not exist there -- the failure is
+# a 401, which reads as a credentials problem rather than a lookup that should never have
+# happened. The training jobs set this in their slurm scripts; set it here too so the check
+# runs the same way from a login node. Must precede the huggingface_hub import.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
