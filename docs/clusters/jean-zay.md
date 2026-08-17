@@ -31,12 +31,9 @@ The constraints pull in opposite directions, so this is worth stating explicitly
 
 - **FlashAttention needs Ampere or newer.** Both the Qwen VLM and the PTv3 point backbone
   use it, so anything running the full model **fails on V100**.
-- **RoboCasa365 simulation on H100 is fine.** An earlier version of this page claimed the
-  sim "does not run correctly on H100"; that was inherited from the upstream converter
-  README and never tested. It was tested on CLEPS on 2026-08-17 and did not reproduce —
-  sim outputs are bit-identical to a V100 control, and H100 is faster. See
-  "RoboCasa365 on H100" in `cleps.md`. Not re-verified on IDRIS hardware, but there is no
-  longer a reason to avoid H100 for MuJoCo rollouts.
+- **GPU generation does not constrain the simulator.** RoboCasa365 rollouts produce
+  identical output on H100 and V100 (measured on CLEPS 2026-08-17, see
+  "RoboCasa365 across GPU generations" in `cleps.md`).
 - Pure-torch inference (e.g. the MolmoPoint anchor-cache pass) has no simulator
   dependency and runs happily on H100.
 

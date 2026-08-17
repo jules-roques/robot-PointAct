@@ -281,9 +281,7 @@ Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) o
 A100** GPU, driven by `eval.slurm` (CLEPS) / `eval_jeanzay.slurm` (Jean Zay) — same payload
 (`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. Ampere+ (not V100) is
 required because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone. A100
-is the default out of availability, not necessity — the "RoboCasa365 breaks on H100" caveat that
-used to justify pinning A100 was tested on 2026-08-17 and is false (see "RoboCasa365 on H100" in
-`docs/clusters/cleps.md`).
+is the default out of availability, not necessity — H100 works equally well.
 
 **100 trials per checkpoint, at 10/20/30/40/50K** — the `eval_grid*.slurm` default, and the
 convention for everything from here on. The first sweep used 50 on the intermediate points and

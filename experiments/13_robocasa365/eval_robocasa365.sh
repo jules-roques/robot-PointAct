@@ -4,8 +4,7 @@
 #
 # Both processes need the SAME GPU (server = model inference, client = MuJoCo/EGL rendering).
 # Needs Ampere+ (A100 or H100): both the Qwen VLM and the PTv3 backbone use FlashAttention, which
-# fails on V100/pre-Ampere. The sim itself runs fine on H100 (tested 2026-08-17; see
-# docs/clusters/cleps.md). See experiments/13_robocasa365/eval.slurm for the CLEPS invocation.
+# fails on V100/pre-Ampere. See experiments/13_robocasa365/eval.slurm for the CLEPS invocation.
 #
 # Usage: eval_robocasa365.sh <env_name> <ckpt_dir> <ckpt_step> <pred_rot_type> [client_opts]
 

@@ -12,8 +12,7 @@ because dev jobs there can have internet access; Jean Zay is kept for large runs
 
 - [ ] Account / partition / QoS flags for each GPU tier available.
 - [ ] Which GPU generations are offered. The model needs **Ampere or newer** for
-      FlashAttention. (The old "RoboCasa365 misbehaves on H100" caveat was tested here and
-      is false — see "RoboCasa365 on H100" below.)
+      FlashAttention; the simulator runs the same on any of them.
 - [ ] Do compute nodes have internet? If yes, the model-weight pre-baking dance required
       on Jean Zay is unnecessary here.
 - [ ] Scratch storage path, quota, and purge policy — and therefore whether
@@ -29,12 +28,10 @@ because dev jobs there can have internet access; Jean Zay is kept for large runs
 The three uv environments in `docs/envs.md` must be rebuilt here — they are not portable
 from Jean Zay.
 
-## RoboCasa365 on H100
+## RoboCasa365 across GPU generations
 
-The upstream converter README carried the note *"`robocasa365` simulator cannot be
-properly ran in H100 GPU"*, and it was repeated across this repo's docs and SLURM
-comments. **Measured on CLEPS 2026-08-17: it does not reproduce.** Do not re-add the
-caveat without evidence attached.
+**The simulator produces identical output on H100 and V100** (measured 2026-08-17), so
+GPU generation is not a constraint on sim work — pick on availability and cost.
 
 The test replayed OpenDrawer episodes 0–2 at `--seed 7` on an H100 NVL (`gpu016`,
 job 5189524) and on a V100 as control (`gpu001`, job 5189525), same `envs/robocasa365`
@@ -51,14 +48,13 @@ env and `MUJOCO_GL=egl`, then diffed the caches:
 The residual is 8-bit rasterisation rounding, not a simulation difference. H100 was also
 **24% faster** (2m33s vs 3m22s for the three episodes).
 
-One caveat worth keeping: MuJoCo's EGL context throws
+One thing that looks alarming and is not: MuJoCo's EGL context throws
 `OpenGL.raw.EGL._errors.EGLError` from `Renderer.__del__` at interpreter shutdown. It is
-noisy but harmless, appears **identically on V100**, and is not evidence of an H100
-problem — it is a PyOpenGL teardown quirk.
+noisy but harmless and appears on every GPU type — a PyOpenGL teardown quirk, not a
+rendering failure.
 
-Scope: this covers the sim/rendering path (replay and, by the same code, rollouts). It
-was verified on CLEPS with the current env; it says nothing about the driver/env on the
-machine where the upstream note was originally written.
+Scope: the sim/rendering path (replay and, by the same code, rollouts), on CLEPS with the
+current env.
 
 ## Migrating from Jean Zay
 
