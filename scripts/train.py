@@ -133,12 +133,35 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
         else:
             skipped_shape.append((name, tuple(value.shape), tuple(target_state[name].shape)))
 
-    ptv3_module.load_state_dict(compatible_state, strict=False)
+    # An init checkpoint that matches nothing is never what anyone meant, and the permissive
+    # load makes it invisible: training proceeds from random init with a normal-looking loss
+    # curve and one INFO line saying zero parameters were resumed. The usual cause is a
+    # backbone whose architecture args do not match the weights -- Concerto's channel widths
+    # with Utonia's checkpoint, say, where every tensor mismatches on shape.
+    if not compatible_state:
+        example = ", ".join(f"{n}: ckpt{s} vs model{t}" for n, s, t in skipped_shape[:3])
+        raise ValueError(
+            f"{training_args.ptv3_init_ckpt_file} initialised NOTHING: 0 of "
+            f"{len(state_dict)} checkpoint tensors matched the {len(target_state)} in the "
+            f"model ({len(skipped_shape)} were name matches that disagreed on shape). "
+            f"Check ptv3_backend and the enc_channels/enc_num_head against the checkpoint."
+            + (f" First mismatches -- {example}" if skipped_shape else "")
+        )
     logger.info(
         f"resumed {len(compatible_state)} ptv3 parameters from {training_args.ptv3_init_ckpt_file}; "
         f"skipped {len(skipped_shape)} shape mismatches",
         main_process_only=True,
     )
+    # A partial match is legitimate (the input stem is deliberately sliced above), but a mostly
+    # partial one means the same misconfiguration caught more quietly, so make it visible at
+    # WARNING rather than leaving it in a count nobody reads.
+    if len(compatible_state) < 0.5 * len(target_state):
+        logger.warning(
+            f"only {len(compatible_state)}/{len(target_state)} ptv3 parameters were "
+            f"initialised from the checkpoint -- most of the backbone is starting from "
+            f"random weights. Verify this is intended before spending the run.",
+            main_process_only=True,
+        )
 
 
 def apply_lora(model, training_args: TrainPipelineConfig, compute_dtype: torch.dtype):

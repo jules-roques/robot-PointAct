@@ -61,15 +61,23 @@ train:
   use_robot_state: true
   ctx_embed_size: 512
 
-  ptv3_backend: concerto
+  # Utonia, not Concerto. The three settings below are ONE choice, not three: the widths and
+  # head counts are Utonia's, and mixing them with Concerto's (64/128/256/512/768, heads
+  # 4/8/16/32/48) is not a variant of this arm -- it is an untrained backbone. scripts/train.py
+  # loads the init checkpoint with strict=False and silently drops every tensor whose shape
+  # disagrees, so a half-applied switch reports "resumed 0 ptv3 parameters" in one log line and
+  # then trains from random init with a loss curve that looks entirely normal. scripts/train.py
+  # now refuses that case outright; the log line is still what to read after any change here.
+  # Values taken from experiments/10_rlbench/train_pointact_reg_utonia.sh, the reference run.
+  ptv3_backend: utonia
   ptv3_patch_size: 1024
   ptv3_enc_mode: true
-  ptv3_enc_channels: [64, 128, 256, 512, 768]
+  ptv3_enc_channels: [54, 108, 216, 432, 576]
   ptv3_enc_depths: [3, 3, 3, 12, 3]
-  ptv3_enc_num_head: [4, 8, 16, 32, 48]
+  ptv3_enc_num_head: [3, 6, 12, 24, 32]
   ptv3_input_channels: 6
   ptv3_apply_point_ca: false
-  ptv3_init_ckpt_file: $SCRATCH/models/Pointcept-Concerto/concerto_large.pth
+  ptv3_init_ckpt_file: $SCRATCH/models/Pointcept-Utonia/utonia.pth
 
   action_regression_loss: l2
   regression_head_heatmap_temp: 0.1
