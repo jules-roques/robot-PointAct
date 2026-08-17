@@ -2,8 +2,7 @@
 # Stage 1/3 of the RoboCasa365 -> LeRobot point-dataset pipeline: replay the source OpenDrawer
 # demonstrations in sim and cache per-episode observations + fused point clouds.
 # See data_prep/robocasa365_to_lerobot/README.md. V100 is plenty since this stage does no model
-# inference, just MuJoCo/EGL rendering. (H100 also works — the old "avoid H100" note was tested
-# 2026-08-17 and is false, see docs/clusters/cleps.md — it is just wasted on this stage.)
+# inference, just MuJoCo/EGL rendering — a newer GPU would be wasted here.
 # --resume skips already-cached episodes, so resubmitting this same job continues past the
 # walltime limit.
 #

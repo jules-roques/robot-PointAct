@@ -9,8 +9,7 @@
 #          data_prep/robocasa365_to_lerobot/replay.slurm
 #
 # Targets the V100 partition because this stage only renders (no model inference), so the
-# cheapest available GPU is the right one — not because of any H100 problem. (The old
-# "sim breaks on H100" note was tested 2026-08-17 and is false; see docs/clusters/cleps.md.)
+# cheapest available GPU is the right one.
 #
 #SBATCH --job-name=rc365-replay
 #SBATCH --account=rgx@v100
