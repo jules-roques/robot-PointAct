@@ -62,6 +62,18 @@ uv run --project "$WORK/code/robot-PointAct" --no-sync \
         --rotation_type quat --target_rotation_type rot6d \
         --replace_zero_std
 
+# Converted episode -> source episode. Every stage that joins a source-indexed dump to a
+# converted-indexed cache needs this: the geom oracle's target_positions lookup, the MolmoPoint
+# depth lift, and eval_molmo_accuracy. Conversion drops episodes whose replay failed and
+# renumbers the rest -- OpenDrawer's 514 became 496 -- so assuming identity reads a different
+# episode's answer and looks entirely plausible. It had no wrapper and was a manual step, which
+# is exactly how a new task ends up without one; it belongs here, where both directories are
+# already in hand. Verifies itself against replay_length and fails the job if the map is wrong.
+uv run --project "$WORK/code/robot-PointAct" --no-sync \
+    python -m data_prep.robocasa365_to_lerobot.episode_index_map \
+        --source-dir "$INPUT_DIR/lerobot" \
+        --dataset-dir "$OUTPUT_DIR"
+
 # Frame count feeds the steps-per-epoch check: the grid fixes 50K gradient steps, which is only
 # comparable across tasks while their frames-per-epoch stay within ~10% of each other.
 python - <<EOF
