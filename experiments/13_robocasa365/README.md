@@ -61,7 +61,7 @@ navigation tasks where the base actually turns.
 
 Same architecture as Libero (frozen vision tower + LLM + merger; trainable PTv3 point-action
 expert). Effective batch size 128 on 1–2 H100. RoboCasa365 training has no simulator
-dependency, so it runs in the `pointact` (root) env and can use H100.
+dependency, so it runs in the `pointact` (root) env.
 
 ```bash
 # PTv3 = Concerto
@@ -101,9 +101,11 @@ both easy to sweep — no rebuild required, unlike the ROI halo cache).
 
 Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) on the **same
 A100** GPU, driven by `eval.slurm` (CLEPS) / `eval_jeanzay.slurm` (Jean Zay) — same payload
-(`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. A100 (not V100) is required
-because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only);
-H100 is avoided because RoboCasa365 does not run correctly there.
+(`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. Ampere+ (not V100) is
+required because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone. A100
+is the default out of availability, not necessity — the "RoboCasa365 breaks on H100" caveat that
+used to justify pinning A100 was tested on 2026-08-17 and is false (see "RoboCasa365 on H100" in
+`docs/clusters/cleps.md`).
 
 ```bash
 # Full 50-trial success rate (default checkpoint = the OpenDrawer concerto run):

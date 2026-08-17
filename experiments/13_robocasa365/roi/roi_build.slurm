@@ -1,7 +1,8 @@
 #!/bin/bash
 # Stage B: build the per-point ROI-flag LMDB with YOLO-World (.venv-roi, H100).
 # H100 (not V100) because the ultralytics-pulled torch is a CUDA-13 build that no longer
-# supports Volta (sm_70); only the RoboCASA *sim* dislikes H100, not YOLO inference.
+# supports Volta (sm_70). (This used to add "only the RoboCASA sim dislikes H100" — that caveat
+# was tested 2026-08-17 and is false; see docs/clusters/cleps.md.)
 #   module load arch/h100
 #   sbatch --constraint=h100 experiments/13_robocasa365/roi/roi_build.slurm       # all episodes
 #   sbatch --constraint=h100 --export=ALL,EPISODES="0 1 2" --qos=qos_gpu_h100-dev --time=00:30:00 \

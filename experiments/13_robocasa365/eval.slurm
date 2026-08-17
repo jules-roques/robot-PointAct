@@ -1,8 +1,9 @@
 #!/bin/bash
 # Evaluate a trained PointAct checkpoint on a RoboCasa365 task (server + client on one GPU).
 # Runs on A100: the model uses FlashAttention in both the Qwen VLM and the PTv3 point backbone,
-# which needs Ampere+ (fails on V100), while MuJoCo/EGL rendering runs fine on A100. (H100 is
-# avoided because RoboCasa365 does not run correctly there.)
+# which needs Ampere+ (fails on V100), while MuJoCo/EGL rendering runs fine on A100. H100 would
+# also work — the old "RoboCasa365 breaks on H100" caveat was tested 2026-08-17 and is false
+# (see "RoboCasa365 on H100" in docs/clusters/cleps.md); A100 is kept here for queue reasons.
 #
 # Smoke (3 trials + videos, short walltime):
 #   sbatch --time=01:00:00 \
