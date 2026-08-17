@@ -377,6 +377,24 @@ def convert_cache_to_lerobot(args: argparse.Namespace) -> None:
                 continue
             shutil.rmtree(pc, ignore_errors=True)
         (repo_dir / "replay_summary.jsonl").unlink(missing_ok=True)
+
+    # LeRobotDataset.create() calls mkdir(exist_ok=False), so the directory must not exist at
+    # all by the time we get there -- passing our own check above is not enough. Anything a
+    # sibling stage already wrote here (roi_meta/ from dump_camera_calib is the common one)
+    # has to be moved out first. Refusing with the exact command rather than relocating it
+    # automatically: a job killed midway through that juggling would leave the data in a
+    # temporary directory nobody knows to look in, and it costs the operator one command.
+    leftovers = sorted(p.name for p in repo_dir.iterdir()) if repo_dir.exists() else []
+    if leftovers:
+        stash = repo_dir.with_name(repo_dir.name + ".pre-convert")
+        raise FileExistsError(
+            f"{repo_dir} exists and holds {leftovers} from another stage, but lerobot needs "
+            f"to create this directory itself. Move them aside and put them back after:\n"
+            f"  mv {repo_dir} {stash}\n"
+            f"  # ... rerun this conversion ...\n"
+            f"  mv {stash}/* {repo_dir}/ && rmdir {stash}\n"
+            f"Running dump_camera_calib (or any roi_meta stage) BEFORE the conversion is what "
+            f"puts a task in this state; the conversion goes first.")
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
     cache_meta = read_cache_meta(cache_dir)
