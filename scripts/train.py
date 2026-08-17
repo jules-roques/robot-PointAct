@@ -152,14 +152,17 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
         f"skipped {len(skipped_shape)} shape mismatches",
         main_process_only=True,
     )
-    # A partial match is legitimate (the input stem is deliberately sliced above), but a mostly
-    # partial one means the same misconfiguration caught more quietly, so make it visible at
-    # WARNING rather than leaving it in a count nobody reads.
-    if len(compatible_state) < 0.5 * len(target_state):
+    # Measured against the CHECKPOINT, not the model: the trained backbone is the
+    # cross-attention variant, whose extra blocks no self-supervised checkpoint has weights
+    # for, so model coverage sits near 50% even on a perfect load and thresholding on it
+    # would warn about every healthy run. What a misconfiguration actually looks like is a
+    # checkpoint that goes mostly unused.
+    if len(compatible_state) < 0.95 * len(state_dict):
         logger.warning(
-            f"only {len(compatible_state)}/{len(target_state)} ptv3 parameters were "
-            f"initialised from the checkpoint -- most of the backbone is starting from "
-            f"random weights. Verify this is intended before spending the run.",
+            f"only {len(compatible_state)}/{len(state_dict)} tensors in "
+            f"{training_args.ptv3_init_ckpt_file} were used -- most of the pretrained "
+            f"backbone is being discarded and those layers start from random weights. "
+            f"Verify the architecture arguments match this checkpoint before spending the run.",
             main_process_only=True,
         )
 
