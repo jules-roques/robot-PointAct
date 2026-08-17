@@ -1,0 +1,47 @@
+# CloseBlenderLid / molmo / 8192 points, 30K steps -- stage 5.
+# MolmoPoint best-view anchor: the frozen pointer answers in all three views, each
+# answer is lifted to 3D, and the one nearest the ground truth is kept.
+# Privileged in its SELECTION only -- the anchor itself is a real detection, so
+# this bounds the pointer rather than the sampler. Against the eef arm it says
+# whether pointing can match a gripper prior; against the oracle arm, how much
+# of the remaining gap is the detector.
+extends: _base.yaml
+
+meta:
+  task: CloseBlenderLid
+  sampling: molmo
+  npoints: 8192
+  context: text_cache
+  seed: 0
+  stage: "Stage 5: Five tasks x four samplers"
+
+train:
+  max_steps: 30000
+  # Both of these exist to avoid colliding with stage 1, which trained OpenDrawer at this
+  # same point count. run_name is derived from `meta` alone, so s5-od-uniform-n8192-s0 and
+  # the stage-1 od-uniform-n8192-s0 would resolve to ONE deterministic output_dir -- and the
+  # trainer resumes from whatever checkpoints it finds there, so a 30K stage-5 run would
+  # start from a finished 50K stage-1 checkpoint and report success. Stated explicitly here
+  # rather than hoping the coordinates differ.
+  run_name: s5-blender-molmo-n8192-s0
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage5
+
+data:
+  lerobot_datasets:
+    - repo_id: CloseBlenderLid
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/CloseBlenderLid/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 8192
+      molmo_sampling: true
+      molmo_anchor_dirname: points_3views_molmo_bestgt
+      # Query 0 = the manipulated object (the control being pressed, on TurnOnMicrowave).
+      # The destination query stage 3 also tried is dropped: it lost, clearly.
+      molmo_anchor_ids: [0]
+      molmo_view_select: closest_gt
+      molmo_sampling_sigma: 0.08
+      molmo_sampling_floor: 0.05
+      # A frame where no view lifted a detection gets the same density centred on the
+      # gripper instead of a uniform draw. Never missing, and a strong sampler in its own
+      # right -- on PickPlaceCounterToStove uniform scores 4% where eef scores 51%, so the
+      # fallback decides those frames more than the anchor does.
+      molmo_fallback: eef
