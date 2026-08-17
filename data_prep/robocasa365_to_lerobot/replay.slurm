@@ -8,7 +8,9 @@
 #   sbatch --qos=qos_gpu-dev --time=00:30:00 --export=ALL,EPISODES="0 1 2" \
 #          data_prep/robocasa365_to_lerobot/replay.slurm
 #
-# RoboCasa365 does not run correctly on H100, so this targets the V100 partition.
+# Targets the V100 partition because this stage only renders (no model inference), so the
+# cheapest available GPU is the right one — not because of any H100 problem. (The old
+# "sim breaks on H100" note was tested 2026-08-17 and is false; see docs/clusters/cleps.md.)
 #
 #SBATCH --job-name=replay
 #SBATCH --account=rgx@v100

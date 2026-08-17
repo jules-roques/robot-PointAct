@@ -202,7 +202,7 @@ resumes one run instead of creating a second. Training runs are `job_type=train`
 
 Same architecture as Libero (frozen vision tower + LLM + merger; trainable PTv3 point-action
 expert). Effective batch size 128 on 1–2 H100. RoboCasa365 training has no simulator
-dependency, so it runs in the `pointact` (root) env and can use H100.
+dependency, so it runs in the `pointact` (root) env.
 
 The three 20-epoch with-VLM runs that produced the first sampling ablation (uniform 30.7% /
 eef 51.3% / oracle 66.7%) live in `runs/legacy/`, which reproduces the shell scripts they were
@@ -279,9 +279,11 @@ is unchanged.
 
 Policy server (pointact env, model) + sim client (robocasa365 env, MuJoCo/EGL) on the **same
 A100** GPU, driven by `eval.slurm` (CLEPS) / `eval_jeanzay.slurm` (Jean Zay) — same payload
-(`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. A100 (not V100) is required
-because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone (Ampere+ only);
-H100 is avoided because RoboCasa365 does not run correctly there.
+(`eval_robocasa365.sh`), different `#SBATCH` directives per cluster. Ampere+ (not V100) is
+required because the model uses FlashAttention in both the Qwen VLM and the PTv3 backbone. A100
+is the default out of availability, not necessity — the "RoboCasa365 breaks on H100" caveat that
+used to justify pinning A100 was tested on 2026-08-17 and is false (see "RoboCasa365 on H100" in
+`docs/clusters/cleps.md`).
 
 **100 trials per checkpoint, at 10/20/30/40/50K** — the `eval_grid*.slurm` default, and the
 convention for everything from here on. The first sweep used 50 on the intermediate points and

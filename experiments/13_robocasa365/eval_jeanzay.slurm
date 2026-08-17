@@ -2,8 +2,9 @@
 # Jean Zay counterpart to eval.slurm (CLEPS) — separate SLURM controllers, so #SBATCH
 # account/partition/module directives can't be shared; the payload (eval_robocasa365.sh) is.
 # Runs on A100: the model uses FlashAttention in both the Qwen VLM and the PTv3 point backbone,
-# which needs Ampere+ (fails on V100), while MuJoCo/EGL rendering runs fine on A100. (H100 is
-# avoided because RoboCasa365 does not run correctly there.)
+# which needs Ampere+ (fails on V100), while MuJoCo/EGL rendering runs fine on A100. H100 would
+# also work — the old "RoboCasa365 breaks on H100" caveat was tested 2026-08-17 and is false
+# (see "RoboCasa365 on H100" in docs/clusters/cleps.md); A100 is kept here for queue reasons.
 #
 # Smoke (3 trials + videos, short dev QoS):
 #   sbatch --qos=qos_gpu_a100-dev --time=01:00:00 \

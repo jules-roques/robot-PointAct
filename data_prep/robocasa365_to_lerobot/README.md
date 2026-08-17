@@ -2,7 +2,10 @@
 
 This converter uses action rollout replay for RoboCasa365 PandaOmron demos and writes a LeRobot dataset plus a fused 3-view point-cloud LMDB.
 
-Note: `robocasa365` simulator cannot be properly ran in H100 GPU.
+Note: upstream's README said "`robocasa365` simulator cannot be properly ran in H100 GPU".
+Tested on CLEPS on 2026-08-17 and it did not reproduce — replayed episodes are bit-identical
+to a V100 control (states, actions, rewards, point-cloud xyz) and H100 is faster. See
+"RoboCasa365 on H100" in `docs/clusters/cleps.md` for the measurements.
 
 Run it in two stages:
 

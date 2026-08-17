@@ -31,14 +31,18 @@ The constraints pull in opposite directions, so this is worth stating explicitly
 
 - **FlashAttention needs Ampere or newer.** Both the Qwen VLM and the PTv3 point backbone
   use it, so anything running the full model **fails on V100**.
-- **RoboCasa365 simulation does not run correctly on H100.** Avoid H100 for anything doing
-  MuJoCo rollouts.
+- **RoboCasa365 simulation on H100 is fine.** An earlier version of this page claimed the
+  sim "does not run correctly on H100"; that was inherited from the upstream converter
+  README and never tested. It was tested on CLEPS on 2026-08-17 and did not reproduce —
+  sim outputs are bit-identical to a V100 control, and H100 is faster. See
+  "RoboCasa365 on H100" in `cleps.md`. Not re-verified on IDRIS hardware, but there is no
+  longer a reason to avoid H100 for MuJoCo rollouts.
 - Pure-torch inference (e.g. the MolmoPoint anchor-cache pass) has no simulator
   dependency and runs happily on H100.
 
-That leaves rollout-plus-model workloads (i.e. policy evaluation) wanting A100, which is
-available here via `rgx@a100 --partition=gpu_p5 --qos=qos_gpu_a100-t3`. Jean Zay and CLEPS
-therefore both contribute eval capacity; training stays on H100.
+So rollout-plus-model workloads (i.e. policy evaluation) need Ampere+, which here means
+A100 (`rgx@a100 --partition=gpu_p5 --qos=qos_gpu_a100-t3`) or H100 — pick on availability
+rather than on a sim constraint. Jean Zay and CLEPS both contribute eval capacity.
 
 ## Submit from a login shell, not `ssh host 'sbatch ...'`
 
