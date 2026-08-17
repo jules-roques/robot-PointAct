@@ -351,10 +351,32 @@ def convert_cache_to_lerobot(args: argparse.Namespace) -> None:
     cache_dir = args.cache_dir.expanduser().resolve()
     repo_id = args.repo_id
     repo_dir = args.output_dir.expanduser().resolve()
-    if repo_dir.exists():
+    # "Already converted" means this stage's own output is there, not that the directory
+    # exists: sibling stages write into the same task directory, and several of them can be
+    # run before the conversion (dump_camera_calib creates roi_meta/, which is how this check
+    # once refused a task whose only contents were a 3-minute calibration). Overwriting on
+    # the directory would then have deleted their work to redo this one.
+    converted = repo_dir / "meta" / "info.json"
+    if converted.exists():
         if not args.overwrite:
-            raise FileExistsError(f"{repo_dir} already exists. Pass --overwrite to replace it.")
-        shutil.rmtree(repo_dir)
+            raise FileExistsError(
+                f"{repo_dir} already holds a converted dataset ({converted}). "
+                f"Pass --overwrite to replace it.")
+        # Only this stage's own outputs go; anything a sibling stage put here stays. The
+        # point-cloud LMDB is matched by prefix because its name comes from the cache meta
+        # read below, and the anchor caches (points_3views_molmo*) are NOT this stage's to
+        # delete -- they cost GPU-hours and are keyed by episode, so they survive a
+        # reconversion only if the episode numbering does. Left in place deliberately, and
+        # loudly: a reconversion that renumbers episodes invalidates them.
+        for name in ("data", "meta", "videos", "images"):
+            shutil.rmtree(repo_dir / name, ignore_errors=True)
+        for pc in repo_dir.glob("points_*"):
+            if "molmo" in pc.name or pc.name.endswith("_labels"):
+                print(f"keeping {pc.name} -- rebuilt by another stage, not this one. "
+                      f"Check it against the new episode numbering before training on it.")
+                continue
+            shutil.rmtree(pc, ignore_errors=True)
+        (repo_dir / "replay_summary.jsonl").unlink(missing_ok=True)
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
     cache_meta = read_cache_meta(cache_dir)
