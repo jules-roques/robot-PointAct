@@ -154,6 +154,28 @@ def load_episode_map(dataset_dir: Path) -> dict[int, int]:
             for k, v in json.loads(p.read_text())["converted_to_source"].items()}
 
 
+class TargetLookup:
+    """``lookup(name, ep, frame) -> xyz | None`` over a loaded target-position dump.
+
+    A class rather than the closure this used to be, because the dataset that holds one is
+    built inside a multiprocessing Pool and shipped back to the parent -- which pickles it,
+    and a local function cannot be pickled. The failure is not at the lookup but at dataset
+    construction, with a MaybeEncodingError naming the closure, so it is worth the class.
+    """
+
+    def __init__(self, tables: dict, static: dict, converted_to_source: dict | None):
+        self.tables = tables
+        self.static = static
+        self.converted_to_source = converted_to_source
+
+    def __call__(self, name: str, ep: int, frame: int):
+        src = ep if self.converted_to_source is None else self.converted_to_source.get(int(ep))
+        if src is None:
+            return None
+        got = self.tables[name].get((int(src), 0 if self.static.get(int(src)) else int(frame)))
+        return None if got is None else np.asarray(got, dtype=np.float64)
+
+
 def load_targets(path: Path, names: list[str],
                  converted_to_source: dict[int, int] | None = None):
     """``lookup(name, ep, frame) -> xyz | None`` over a ``target_positions.npz``.
@@ -182,14 +204,7 @@ def load_targets(path: Path, names: list[str],
             tables[name][(ep, fr)] = xyz
     static = {int(ep): int((eps == ep).sum()) == 1 for ep in np.unique(eps).tolist()}
 
-    def lookup(name: str, ep: int, frame: int):
-        src = ep if converted_to_source is None else converted_to_source.get(int(ep))
-        if src is None:
-            return None
-        got = tables[name].get((int(src), 0 if static.get(int(src)) else int(frame)))
-        return None if got is None else np.asarray(got, dtype=np.float64)
-
-    return lookup
+    return TargetLookup(tables, static, converted_to_source)
 
 
 def world_to_base(points_world: np.ndarray, base_pos, base_quat_xyzw) -> np.ndarray:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 import sys
 from pathlib import Path
 
@@ -74,6 +75,21 @@ def main() -> None:
     # checking something other than training.
     ds = load_single_lerobot_dataset(0, [LerobotConfig(**cfg)], chunk_size=train["chunk_size"])
     print(f"  dataset: {ds.num_frames} frames, {ds.num_episodes} episodes")
+
+    # MultiLeRobotDataset builds these inside a multiprocessing Pool and ships them back to
+    # the parent, which PICKLES them. Anything unpicklable hung off the dataset -- a closure,
+    # an open lmdb handle -- fails there, in dataset construction, with a MaybeEncodingError
+    # rather than anything pointing at the arm. All five oracle arms died on exactly that
+    # (`Can't pickle local object 'load_targets.<locals>.lookup'`) AFTER this check had passed
+    # them, because building one dataset directly never pickles it. So pickle it here.
+    try:
+        pickle.loads(pickle.dumps(ds))
+    except Exception as exc:
+        raise SystemExit(
+            f"\n  PROBLEM: this dataset cannot be pickled, so MultiLeRobotDataset's worker "
+            f"pool cannot return it and training dies before the first step:\n    "
+            f"{type(exc).__name__}: {exc}")
+    print("  picklable: yes (the worker pool can return it)")
 
     rng = np.random.default_rng(0)
     idxs = rng.choice(ds.num_frames, size=min(args.frames, ds.num_frames), replace=False)
