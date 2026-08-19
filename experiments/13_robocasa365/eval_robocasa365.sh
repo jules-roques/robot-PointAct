@@ -290,7 +290,15 @@ print(' '.join(out))
 
     MOLMO_FLAGS="--args.molmo_anchor --args.molmo_host ${host} --args.molmo_port ${molmo_port} --args.molmo_anchor_ids ${MOLMO_IDS}"
     MOLMO_FLAGS="$MOLMO_FLAGS --args.molmo_view_select ${MOLMO_VIEW_SELECT}"
-    [ "$MOLMO_VIEW_SELECT" = "closest_gt" ] && MOLMO_FLAGS="$MOLMO_FLAGS --args.gt_source ${ORACLE_GT}"
+    # geom, NOT ${ORACLE_GT}. `oracle_gt` is the oracle arm's field and no molmo config
+    # carries it, so reading the selector's ground truth from it resolves to the "labels"
+    # default -- which switches off the live geom reader, hands select_closest a None, and
+    # sends EVERY frame to the eef fallback. The arm would then score as pure eef under the
+    # molmo name, exactly the way stage 3's molmo arm was silently evaluated uniform.
+    # geom is also the only correct answer rather than a safe one: the cache these
+    # checkpoints trained on was selected with --gt-npz roi_meta/target_positions.npz, the
+    # geom dump, so any other source would score them on a rule they never saw.
+    [ "$MOLMO_VIEW_SELECT" = "closest_gt" ] && MOLMO_FLAGS="$MOLMO_FLAGS --args.gt_source geom"
 elif [ "$POINT_SAMPLING" = "anchor" ]; then
     ORACLE_ANCHOR="--args.oracle_anchor --args.gt_source ${ORACLE_GT}"
 fi
