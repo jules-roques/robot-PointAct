@@ -147,8 +147,13 @@ except Exception:
         # two differ by centimetres -- the scale this whole study measures at -- so this is
         # read from the checkpoint rather than defaulted. Absent field = a pre-stage-5 run,
         # which was trained on labels.
+        # `|| true` is load-bearing under `set -euo pipefail`: the field is ABSENT from
+        # every non-oracle config, so grep exits 1, pipefail promotes that to the pipeline's
+        # status, and the assignment's non-zero status kills the script -- one line before
+        # the default below that exists to handle precisely this case. It died silently
+        # right after "port=", with no message, on every uniform/eef/molmo arm.
         ORACLE_GT=$(grep -oiE '^\s*oracle_gt:\s*[a-z]+' "$DATA_CFG" \
-                    | head -1 | awk '{print $2}')
+                    | head -1 | awk '{print $2}' || true)
         ORACLE_GT="${ORACLE_GT:-labels}"
         case "$ORACLE_GT" in
             labels|geom) ;;
@@ -161,8 +166,9 @@ except Exception:
         # on one centre per query and evaluated with one per VIEW is scored on a density that
         # covers regions training never spent budget on -- and it reads as a success rate,
         # not as an error. Absent field = the per-view arm, which is what shipped.
+        # Same `|| true` for the same reason -- absent from every non-molmo config.
         MOLMO_VIEW_SELECT=$(grep -oiE '^\s*molmo_view_select:\s*[a-z_]+' "$DATA_CFG" \
-                            | head -1 | awk '{print $2}')
+                            | head -1 | awk '{print $2}' || true)
         MOLMO_VIEW_SELECT="${MOLMO_VIEW_SELECT:-per_view}"
         case "$MOLMO_VIEW_SELECT" in
             per_view|closest_gt) ;;
