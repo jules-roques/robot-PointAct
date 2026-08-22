@@ -32,8 +32,14 @@
 
 set -euo pipefail
 
-module purge
+# `module` is a shell FUNCTION exported by the login profile, and `sbatch --export=ALL` only
+# carries it when the submitting shell had it. Submitting over `ssh host 'sbatch ...'` does
+# not, and the job then dies in one second with "module: command not found" -- exit 127, which
+# reads as a missing binary rather than a missing shell function. Source the initialiser here
+# so the job does not depend on how it was submitted.
+source /etc/profile.d/modules.sh
 module load arch/h100
+module load ffmpeg/6.1.1
 
 REPO="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
