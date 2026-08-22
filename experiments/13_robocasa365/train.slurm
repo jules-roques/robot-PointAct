@@ -38,8 +38,13 @@ export WANDB_MODE=offline
 export WANDB_DIR="$SCRATCH/wandb"
 mkdir -p "$WANDB_DIR"
 
-REPO="$HOME/code/robot-PointAct"
+# Run whatever checkout was submitted from, so a worktree on a feature branch trains its own
+# code. A hardcoded $HOME path silently trains the main checkout instead -- and the main
+# checkout does not always carry the run-config machinery this script depends on.
+REPO="${SLURM_SUBMIT_DIR:-$HOME/code/robot-PointAct}"
+MAIN_CHECKOUT="$HOME/code/robot-PointAct"   # holds the uv env; see docs/envs.md
 cd "$REPO"
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 echo "host=$(hostname) gpus=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L
@@ -47,4 +52,4 @@ nvidia-smi -L
 # accelerate (inside the train script) spawns the 4 GPU processes itself — no srun.
 RUN_CONFIG="${RUN_CONFIG:?set RUN_CONFIG=<experiments/13_robocasa365/runs/*.yaml> via --export}"
 # Everything about the run lives in that yaml -- no training arguments here.
-uv run --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"
+uv run --project "$MAIN_CHECKOUT" --no-sync bash experiments/13_robocasa365/train.sh "$RUN_CONFIG"

@@ -125,7 +125,7 @@ def main() -> None:
 
         counts.append(len(np.asarray(ds[int(i)][OBS_POINTS])))
 
-        if centres is not None and arm != "uniform":
+        if centres is not None and arm not in ("uniform", "none"):
             # How much of the budget the density steers inside one sigma of the anchor,
             # against the share a uniform draw would put there. Computed from the weights
             # rather than by re-drawing: the draw is proportional to w, so comparing mass is
@@ -140,7 +140,7 @@ def main() -> None:
 
     print(f"\n  points drawn: median {int(np.median(counts))} "
           f"(min {min(counts)}, max {max(counts)}) of a {cfg.get('max_npoints')} budget")
-    if arm != "uniform":
+    if arm not in ("uniform", "none"):
         total = n_anchor + n_fallback
         print(f"  anchored frames: {n_anchor}/{total}"
               f"   fallback ({cfg.get('molmo_fallback', 'uniform')}): {n_fallback}/{total}")
@@ -151,17 +151,29 @@ def main() -> None:
         if concentrations:
             print(f"  budget inside 1 sigma vs uniform: {np.median(concentrations):.1f}x")
 
+    # `sampling: none` is the no-sampler arm: max_npoints is set above the cloud size on
+    # purpose, so no budget binds and no anchor exists. Every check keyed on "the budget was
+    # met" or "an anchor was found" is inverted for it -- the failure to guard against here is
+    # the opposite one, a cap that silently DOES bind and turns it back into a uniform draw.
+    unsampled = arm == "none"
     problems = []
-    if int(np.median(counts)) != int(cfg.get("max_npoints", 0)):
+    if unsampled:
+        # augment_point_cloud() keeps int(len(cloud) * U(0.8, 1.0)) points whatever the cap, so
+        # the draw should track the cloud, not the budget.
+        if int(np.max(counts)) >= int(cfg.get("max_npoints", 0)):
+            problems.append(f"the cap IS binding: max drawn {int(np.max(counts))} reaches "
+                            f"max_npoints={cfg.get('max_npoints')}. Raise it above the cloud "
+                            f"size or this arm is just a large uniform draw.")
+    elif int(np.median(counts)) != int(cfg.get("max_npoints", 0)):
         problems.append(f"point budget not met: median {int(np.median(counts))} "
                         f"!= {cfg.get('max_npoints')}. The cloud may be smaller than the "
                         f"budget after voxelisation and the workspace crop.")
-    if arm != "uniform" and n_anchor == 0:
+    if arm not in ("uniform", "none") and n_anchor == 0:
         problems.append("NO frame got an anchor -- the cache or npz is not being read, and "
                         "this arm is training its fallback under another name.")
-    if arm != "uniform" and n_fallback == n_anchor + n_fallback:
+    if arm not in ("uniform", "none") and n_fallback == n_anchor + n_fallback:
         problems.append("every frame fell back; the anchor source is empty.")
-    if arm != "uniform" and n_anchor and not concentrations:
+    if arm not in ("uniform", "none") and n_anchor and not concentrations:
         # Silence here is not a pass. It means no frame had a single cloud point within one
         # sigma of its anchor, which is either an anchor in the wrong coordinate frame or a
         # target outside the workspace crop -- and the arm would train as a uniform draw.

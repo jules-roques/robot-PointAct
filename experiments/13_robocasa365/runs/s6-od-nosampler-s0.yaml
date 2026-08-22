@@ -1,0 +1,37 @@
+# OpenDrawer / no input sampler -- Stage 6.
+#
+# Removes the input-stage point sampler entirely and feeds the whole 1 cm cloud (~22K points,
+# median 22.5K / p95 26.7K / max 28.5K measured over 200 frames). Everything else is identical
+# to the stage 1-5 arms, so this is the arm those were all implicitly measured against.
+#
+# Why: the eef/oracle arms win by covering the cells within one sigma of the target, and a
+# uniform draw at 4096 covers 18.6% of the cloud's cells, at 8192 covers 37%, but the full
+# cloud covers 100% -- the same coverage the eef arm reaches at 8192. If cell coverage is the
+# mechanism, this arm should land near the 71% oracle with no sampler at all. If it does not,
+# the sampler is doing something coverage does not explain.
+#
+# max_npoints is a cap, not a target: augment_point_cloud() draws
+# int(len(cloud) * U(0.8, 1.0)) points regardless, so the 0-20% random dropout that every
+# other arm had is preserved here. Setting the cap above the cloud size removes only the
+# budget, not the augmentation.
+#
+# per_device_train_batch_size drops 32 -> 16 because this arm carries ~2.7x the stage-0 tokens
+# of the 8192 arm; effective_batch stays 128 (gradient accumulation absorbs it), which is the
+# quantity the arms must share to be comparable. If it still OOMs, resubmit at 8 -- the run
+# auto-resumes from output_dir.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: none
+  npoints: all
+  context: text_cache
+  seed: 0
+  stage: "Stage 6: Warp space"
+
+train:
+  per_device_train_batch_size: 16
+
+data:
+  lerobot_datasets:
+    - max_npoints: 32768
