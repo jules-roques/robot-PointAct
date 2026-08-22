@@ -24,7 +24,11 @@ extends: _base.yaml
 meta:
   task: OpenDrawer
   sampling: none
-  npoints: all
+  # No npoints coordinate on purpose. exp_npoints is the *configured budget*, and this arm
+  # does not have one -- max_npoints below is a cap set above the cloud size so that nothing
+  # binds. Recording 32768 would label an arm that trains on ~19K points as a 32768-point arm,
+  # which is exactly the kind of fiction smoke_stage5.py exists to catch. Run name is
+  # od-none-s0.
   context: text_cache
   seed: 0
   stage: "Stage 6: Warp space"
