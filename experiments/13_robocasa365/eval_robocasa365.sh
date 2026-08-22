@@ -205,9 +205,13 @@ except Exception:
             # evaluated on uniform ones -- exactly the mismatch the block below calls fatal,
             # arrived at silently. Any *_sampling knob we do not have an eval-time producer
             # for is now an error, so the next arm added to the dataloader cannot repeat it.
+            # `|| true` on a pipeline whose EXPECTED result is empty: a uniform arm enables
+            # no sampling knob at all, so the first grep exits 1 and, under `set -euo
+            # pipefail`, takes the whole eval with it. The guard below then never runs -- and
+            # the arm it was written to protect, uniform, was the one arm it killed.
             UNKNOWN=$(grep -oiE '^\s*[a-z0-9_]+_sampling:\s*true' "$DATA_CFG" \
                       | grep -oiE '[a-z0-9_]+_sampling' \
-                      | grep -viE '^(oracle|eef|molmo)_sampling$' | sort -u | tr '\n' ' ')
+                      | grep -viE '^(oracle|eef|molmo)_sampling$' | sort -u | tr '\n' ' ' || true)
             if [ -n "$UNKNOWN" ]; then
                 echo "ERROR: ${DATA_CFG} enables a sampling arm this script cannot reproduce" >&2
                 echo "  at eval time: ${UNKNOWN}" >&2
