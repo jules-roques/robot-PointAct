@@ -36,6 +36,18 @@ meta:
 train:
   per_device_train_batch_size: 16
 
+  # Checkpoint 2x more often than _base.yaml, because this arm runs as a chain of 2 h dev-QoS
+  # slices rather than one 20 h t3 job. Each slice is killed at the walltime with no chance to
+  # save, so everything since the last checkpoint is lost and re-run: at _base's 5000 that is
+  # up to 86 min of a 120 min slice, and ~21 min on average at 2500. The eval grid still lands
+  # on saved steps (10K/20K/30K/40K/50K are all multiples of 2500).
+  #
+  # The limit must then rise too: 50K/2500 = 20 checkpoints, and _base's 12 would evict
+  # checkpoint-10000 long before the grid is evaluated. 20 x 3.6 GB = 72 GB on $SCRATCH,
+  # which has 398 TB free.
+  save_steps: 2500
+  save_total_limit: 22
+
 data:
   lerobot_datasets:
     - max_npoints: 32768

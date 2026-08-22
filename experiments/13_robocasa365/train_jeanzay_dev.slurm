@@ -38,6 +38,14 @@
 
 set -euo pipefail
 
+# NOTE: with the RUN_CONFIG payload (train.sh + a run yaml), VARIANT, EFFECTIVE_BATCH,
+# PER_DEVICE_BATCH_SIZE, GRAD_ACCUM, SAVE_STEPS and SAVE_TOTAL_LIMIT below are INERT --
+# `grep` them in train.sh and scripts/train.py and there are no hits. They are left over from
+# the older train_pointact_concerto*.sh payload. The run yaml is the only thing that sets
+# batch size and checkpoint cadence now, and the effective-batch guard below therefore checks
+# numbers it does not control. Do not "fix" an arm's batch size by exporting these; edit its
+# yaml. (The Stage 6 no-sampler arm needs per-device 16, while the case block below still says
+# 32 for 4 GPUs -- harmless only because nothing reads it.)
 VARIANT="${VARIANT:-concerto}"
 CHAIN_REMAINING="${CHAIN_REMAINING:-0}"
 EFFECTIVE_BATCH="${EFFECTIVE_BATCH:-128}"
