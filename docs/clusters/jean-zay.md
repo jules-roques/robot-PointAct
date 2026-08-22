@@ -40,6 +40,45 @@ That leaves rollout-plus-model workloads (i.e. policy evaluation) wanting A100, 
 available here via `rgx@a100 --partition=gpu_p5 --qos=qos_gpu_a100-t3`. Jean Zay and CLEPS
 therefore both contribute eval capacity; training stays on H100.
 
+## Submit from a login shell, not `ssh host 'sbatch ...'`
+
+The slurm scripts here call `module load arch/h100` and read `$DSDIR`. Both come from the
+IDRIS **login** profile, and `sbatch --export=ALL` propagates them only if the submitting
+shell had them. `ssh jean-zay 'sbatch ...'` is non-interactive and does not, so the job dies
+in one second — `module: command not found` (exit 127), then `DSDIR: unbound variable` under
+`set -u`, one line at a time. Submit like this instead:
+
+```bash
+ssh jean-zay 'bash -lc "cd <repo> && module load arch/h100 && sbatch --constraint=h100 ..."'
+```
+
+Chained jobs only need this for the first slice: successors are submitted from inside a job
+that already has the environment.
+
+Two dead ends, so nobody retries them:
+
+- **`/etc/profile.d/modules.sh` is a stub** — its entire content is *"Replacement file to
+  avoid loading environment modules installed at system level."* Sourcing it defines `module`
+  against an empty `MODULEPATH`, so `module` appears to work and every load fails with
+  "Unable to locate a modulefile".
+- **`/etc/profile.d/z_modules.sh` is the real one, but exists on the login nodes only.** The
+  compute nodes do not have it. Verifying a fix on the login node is exactly where this
+  difference is invisible.
+
+To make a script self-sufficient anyway, bootstrap from the shared lustre install that
+`z_modules.sh` itself points at (guarded, so a module-loaded submission is unaffected):
+
+```bash
+if ! type module >/dev/null 2>&1; then
+    . /lustre/fshomisc/sup/spack_soft/environment-modules/current/init/bash
+    export MODULEPATH=/lustre/fshomisc/sup/hpe/pub/module-rh/modulefiles:/lustre/fshomisc/sup/hpe/pub/modules-idris-env4/modulefiles/linux-rhel9-skylake_avx512
+fi
+: "${DSDIR:=/lustre/fsmisc/dataset}"
+```
+
+`$WORK` and `$SCRATCH` survive a bare ssh (they come from `~/.bashrc`), which makes the
+problem look narrower than it is — the script gets several lines in before failing.
+
 ## Compute nodes have no internet
 
 Login nodes have network access; compute nodes do not. Anything that would download at
