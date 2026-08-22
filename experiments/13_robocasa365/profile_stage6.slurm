@@ -37,9 +37,16 @@ set -euo pipefail
 # not, and the job then dies in one second with "module: command not found" -- exit 127, which
 # reads as a missing binary rather than a missing shell function. Source the initialiser here
 # so the job does not depend on how it was submitted.
-source /etc/profile.d/modules.sh
+# NOT modules.sh -- on Jean Zay that file is a stub ("Replacement file to avoid loading
+# environment modules installed at system level"), so sourcing it defines `module` against an
+# empty MODULEPATH and every load fails with "Unable to locate a modulefile". The IDRIS setup
+# is z_modules.sh.
+source /etc/profile.d/z_modules.sh
 module load arch/h100
 module load ffmpeg/6.1.1
+# Fail here rather than 20 minutes in: a missing module shows up as an import error deep in
+# torch, which reads as an env problem rather than a module one.
+module list 2>&1
 
 REPO="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
