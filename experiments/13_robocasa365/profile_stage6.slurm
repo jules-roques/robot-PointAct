@@ -32,16 +32,18 @@
 
 set -euo pipefail
 
-# `module` is a shell FUNCTION exported by the login profile, and `sbatch --export=ALL` only
-# carries it when the submitting shell had it. Submitting over `ssh host 'sbatch ...'` does
-# not, and the job then dies in one second with "module: command not found" -- exit 127, which
-# reads as a missing binary rather than a missing shell function. Source the initialiser here
-# so the job does not depend on how it was submitted.
-# NOT modules.sh -- on Jean Zay that file is a stub ("Replacement file to avoid loading
-# environment modules installed at system level"), so sourcing it defines `module` against an
-# empty MODULEPATH and every load fails with "Unable to locate a modulefile". The IDRIS setup
-# is z_modules.sh.
-source /etc/profile.d/z_modules.sh
+# `module` is a shell FUNCTION, exported by the login profile and carried into the job by
+# --export=ALL -- but only if the SUBMITTING shell had it, which `ssh host 'sbatch ...'` does
+# not. Bootstrap it when it is missing, from the shared lustre install rather than from
+# /etc/profile.d: z_modules.sh (the file that does this on the login nodes) is not present on
+# the compute nodes, and its sibling modules.sh is a deliberate no-op stub that defines
+# `module` against an empty MODULEPATH -- so every load then fails with "Unable to locate a
+# modulefile" while `module` itself appears to work. Both were tried; these are the paths
+# z_modules.sh itself uses.
+if ! type module >/dev/null 2>&1; then
+    . /lustre/fshomisc/sup/spack_soft/environment-modules/current/init/bash
+    export MODULEPATH=/lustre/fshomisc/sup/hpe/pub/module-rh/modulefiles:/lustre/fshomisc/sup/hpe/pub/modules-idris-env4/modulefiles/linux-rhel9-skylake_avx512
+fi
 module load arch/h100
 module load ffmpeg/6.1.1
 # Fail here rather than 20 minutes in: a missing module shows up as an import error deep in
