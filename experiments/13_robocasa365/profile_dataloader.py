@@ -70,10 +70,13 @@ def stage_profile(ds, idxs: list[int], timer: Timer) -> list[int]:
     is to see the split, and a copy that drifts from data_3d.py is caught by the end-to-end
     row below, which calls the real __getitem__ and must agree with the sum.
     """
-    # One untimed pass first. Without it the FIRST budget measured absorbs every cold
-    # page-cache miss on the LMDB and reports ~200 ms for a read that costs 0.3 ms warm --
-    # which would put the whole cost on the one stage that does not scale with the budget.
-    for i in idxs[: min(len(idxs), 16)]:
+    # One untimed pass over EVERY sampled frame, not a prefix of them. Without it the first
+    # budget measured absorbs the cold page-cache misses and reports ~27 ms for a read that
+    # costs 0.15 ms warm -- putting the whole cost on the one stage that does not scale with
+    # the budget. A 16-frame prefix was not enough and left exactly that artefact in run
+    # 1271201: its n4096 row reads 26.88 ms against 0.14 ms for the two warm budgets below it,
+    # and its stage sum (31 ms) contradicts its own end-to-end figure (3.49 ms).
+    for i in idxs:
         item = ds.hf_dataset[i]
         ds.load_point_cloud(int(item["episode_index"]), int(item["frame_index"]))
 
