@@ -50,6 +50,12 @@ module load ffmpeg/6.1.1
 # torch, which reads as an env problem rather than a module one.
 module list 2>&1
 
+# Same inheritance story as `module` above: $DSDIR is set by the IDRIS *login* profile, so a
+# job submitted with `ssh host 'sbatch ...'` never sees it and `set -u` kills the script on
+# first use. $WORK and $SCRATCH survive (they come from ~/.bashrc, which ssh does source).
+# Defaulting a cluster path is fine HERE -- this is a slurm script; see CLAUDE.md.
+: "${DSDIR:=/lustre/fsmisc/dataset}"
+
 REPO="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 POINTACT_ENV="${POINTACT_ENV:-$WORK/code/robot-PointAct}"
 cd "$REPO"
@@ -62,6 +68,20 @@ export UV_OFFLINE=1
 export WANDB_MODE=disabled
 export POINTACT_VLM_PATH="$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct"
 [ -e robot_data ] || ln -s "$SCRATCH/datasets/robot_data" robot_data
+
+# Check every path up front. Three submissions of this job died one line at a time on an
+# environment the login node has and the compute node does not; each cost a queue wait to
+# discover. Fail on all of them at once instead.
+missing=""
+for path in "$POINTACT_VLM_PATH" "$POINTACT_ENV/.venv" "$REPO/robot_data/robocasa365" \
+            "$SCRATCH/models/Pointcept-Utonia/utonia.pth"; do
+    [ -e "$path" ] || missing="$missing\n  $path"
+done
+if [ -n "$missing" ]; then
+    echo -e "missing paths:$missing" >&2
+    exit 1
+fi
+echo "paths ok; DSDIR=$DSDIR REPO=$REPO"
 
 RUN=experiments/13_robocasa365/runs/s6-od-nosampler-s0.yaml
 OUT="$SCRATCH/logs/robocasa365/s6_profile_${SLURM_JOB_ID}"
