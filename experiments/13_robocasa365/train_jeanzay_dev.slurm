@@ -181,11 +181,28 @@ set -e
 ELAPSED=$(( SECONDS - START_TS ))
 
 # A chain that resubmits on immediate failure just burns through slots (and, on a busy dev
-# QoS, other people's turn) without ever training. If we died quickly, stop the chain.
-if [ "${RC}" -ne 0 ] && [ "${ELAPSED}" -lt 600 ] && [ -n "${NEXT_ID:-}" ]; then
-    echo "Training failed after ${ELAPSED}s (rc=${RC}); cancelling successor ${NEXT_ID}" \
-         "rather than looping."
-    scancel "${NEXT_ID}" || true
+# QoS, other people's turn) without ever training. But killing the chain on the FIRST fast
+# failure is worse: transient node faults happen, and one of them ("CUDA error: CUDA-capable
+# device(s) is/are busy or unavailable", 45 s in, job 1279138) left a half-finished run idle
+# for 21 h until someone noticed. So tolerate a few CONSECUTIVE fast failures and stop only
+# if they keep coming -- a real breakage reproduces on every node, a busy GPU does not.
+FASTFAIL_FILE="${OUTPUT_DIR}/.chain_fastfails"
+MAX_FASTFAILS="${MAX_FASTFAILS:-3}"
+if [ "${RC}" -ne 0 ] && [ "${ELAPSED}" -lt 600 ]; then
+    FAILS=$(( $(cat "${FASTFAIL_FILE}" 2>/dev/null || echo 0) + 1 ))
+    echo "${FAILS}" > "${FASTFAIL_FILE}"
+    if [ "${FAILS}" -ge "${MAX_FASTFAILS}" ] && [ -n "${NEXT_ID:-}" ]; then
+        echo "Training failed after ${ELAPSED}s (rc=${RC}); that is ${FAILS} consecutive fast" \
+             "failures, so this is not transient. Cancelling successor ${NEXT_ID}."
+        scancel "${NEXT_ID}" || true
+    else
+        echo "Training failed after ${ELAPSED}s (rc=${RC}); fast failure ${FAILS}/${MAX_FASTFAILS}." \
+             "Letting successor ${NEXT_ID:-<none>} run in case the node was at fault."
+    fi
+elif [ "${ELAPSED}" -ge 600 ]; then
+    # Any slice that actually trained clears the counter, so the limit counts a run of
+    # failures rather than accumulating unrelated ones over the life of the run.
+    rm -f "${FASTFAIL_FILE}"
 fi
 
 echo "training exited rc=${RC} after ${ELAPSED}s"
