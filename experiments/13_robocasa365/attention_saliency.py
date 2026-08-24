@@ -74,6 +74,18 @@ def instrument(model):
         raise SystemExit("no SerializedAttentionWithAction layers found -- wrong model class?")
 
     for layer, mod in enumerate(mods):
+        # The flash and non-flash branches are configured differently at construction
+        # (model.py:188-196), so flipping the flag alone leaves the non-flash path missing
+        # two attributes it needs:
+        #   * patch_size_max is only set in the non-flash branch. Seed it from the flash
+        #     branch's patch_size so the non-flash path derives the SAME 1024 training used
+        #     -- otherwise this would read attention at a different window size.
+        #   * attn_drop is a bare float under flash but is CALLED as a module here.
+        # enable_rpe / upcast_* are asserted False whenever flash is on, so the non-flash
+        # path skips the RPE entirely and this reads the same attention training computed.
+        mod.patch_size_max = mod.patch_size
+        if not isinstance(mod.attn_drop, torch.nn.Module):
+            mod.attn_drop = torch.nn.Dropout(0.0)
         mod.enable_flash = False
 
         # `pad` is what maps padded/serialised rows back to input point indices, and it is
