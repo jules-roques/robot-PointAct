@@ -79,6 +79,22 @@ fi
 `$WORK` and `$SCRATCH` survive a bare ssh (they come from `~/.bashrc`), which makes the
 problem look narrower than it is — the script gets several lines in before failing.
 
+**What an unset `$DSDIR` cost, concretely** (2026-08-24). `train.sh` reads the VLM from
+`$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct` and falls back to
+`$SCRATCH/models/Qwen2.5-VL-3B-Instruct` when `$DSDIR` is empty. `--export=ALL` propagates the
+emptiness faithfully, the fallback had since been eaten by the 30-day `$SCRATCH` purge, and
+the job died ~40 s in on
+
+```
+OSError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/lustre/.../models/Qwen2.5-VL-3B-Instruct'
+```
+
+which reads as a bad Hub identifier rather than as a directory that is not there — transformers
+treats a non-existent path as a repo name. Two arms were lost to it. `train_jeanzay.slurm` and
+`train_jeanzay_dev.slurm` now default `$DSDIR` themselves, so the submission path no longer
+decides which weights a run gets. Prefer `$DSDIR` over a private `$SCRATCH` copy for anything
+IDRIS already mirrors: it is read-only, shared, and exempt from the purge.
+
 ## Compute nodes have no internet
 
 Login nodes have network access; compute nodes do not. Anything that would download at

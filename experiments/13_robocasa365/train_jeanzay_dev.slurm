@@ -82,6 +82,10 @@ export SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-3}"
 module load arch/h100
 module load ffmpeg/6.1.1
 
+# Set when you sbatch by hand, EMPTY over a non-interactive ssh -- see the long note in
+# train_jeanzay.slurm. Without it train.sh falls back to a $SCRATCH copy the purge has eaten.
+: "${DSDIR:=/lustre/fsmisc/dataset}"
+export DSDIR
 export HF_HOME="$SCRATCH/.cache/huggingface"
 export HF_HUB_OFFLINE=1
 export UV_OFFLINE=1

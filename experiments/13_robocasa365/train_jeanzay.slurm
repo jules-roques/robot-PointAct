@@ -38,6 +38,15 @@ module load arch/h100
 module load ffmpeg/6.1.1
 
 export NUM_NODES=1
+# $DSDIR comes from the interactive profile, so it is set when you sbatch by hand and EMPTY
+# when you sbatch over a non-interactive `ssh jean-zay '...'` -- and --export=ALL faithfully
+# propagates the emptiness. train.sh then falls back to $SCRATCH/models/Qwen2.5-VL-3B-Instruct,
+# which $SCRATCH's 30-day purge has since removed, and the job dies ~40 s in on a transformers
+# error that reads as a bad repo id rather than a missing directory. Defaulting it here (the
+# same idiom as docs/clusters/jean-zay.md) makes the submission path irrelevant, and keeps
+# every arm on the one read-only copy that is never purged.
+: "${DSDIR:=/lustre/fsmisc/dataset}"
+export DSDIR
 export HF_HOME="$SCRATCH/.cache/huggingface"
 export HF_HUB_OFFLINE=1
 export UV_OFFLINE=1
