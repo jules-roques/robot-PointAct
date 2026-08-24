@@ -101,11 +101,34 @@ def instrument(model):
         mod.get_padding_and_inverse = wrapped
 
         def hook(_module, _inp, out, _m=mod, _layer=layer):
+            # _inp[0] is the PRE-softmax logit tensor, same shape as `out`.
             # out: [patches, heads, A + K, A + K], each row a softmax over [actions | points].
             point = _m._viz_point
             A = point.action_feat.size(1)
             P, H = out.shape[0], out.shape[1]
             K = out.shape[-1] - A
+
+            # --- raw logits: the only patch-INDEPENDENT quantity here -------------------
+            # q_i . k_a does not depend on which patch point i landed in, because the action
+            # keys are one tensor repeat_interleave'd into every patch -- identical k_a
+            # everywhere. The softmax mass is not patch-independent (its denominator is the
+            # patch's own point keys), so a patch that barely attends to the action at all
+            # still hands its points a full unit of mass to divide up. These do not.
+            lg = _inp[0][:, :, A:, :A].float()                  # [P, H, K, A]
+            logit_max = lg.max(dim=-1).values.mean(dim=1)       # [P, K]
+            logit_mean = lg.mean(dim=-1).mean(dim=1)            # [P, K]
+
+            # --- the action stream: what the action tokens are actually built FROM ---------
+            # Each action token's row is a softmax within its patch, but the replicas are
+            # combined by a PLAIN MEAN over patches (model_ca_action.py:143-148), so the
+            # coefficient of point j in action token a is (1/P) * attn_p[a, j] -- one global
+            # linear map, with 1/P a constant that drops out of any ranking. A patch whose
+            # action rows spend their mass on the other action tokens rather than on points
+            # correctly yields small values for all of its points.
+            ap = out[:, :, :A, A:].float().mean(dim=1)          # [P, A, K] mean over heads
+            ap_sum = ap.sum(dim=1)                              # [P, K] over all action tokens
+            ap_max = ap.max(dim=1).values                       # [P, K] peak over tokens
+            ap_state = ap[:, 0, :]                              # [P, K] the gripper-pose token
 
             # Rows = point queries, columns = action keys.
             pah = out[:, :, A:, :A].float()                     # [P, H, K, A]
@@ -140,6 +163,11 @@ def instrument(model):
                    .repeat_interleave(K).to(torch.float32))
 
             rec = {
+                "logit_max": scatter(logit_max.reshape(-1)).cpu().numpy(),
+                "logit_mean": scatter(logit_mean.reshape(-1)).cpu().numpy(),
+                "ap_sum": scatter(ap_sum.reshape(-1)).cpu().numpy(),
+                "ap_max": scatter(ap_max.reshape(-1)).cpu().numpy(),
+                "ap_state": scatter(ap_state.reshape(-1)).cpu().numpy(),
                 "patch": scatter(pid).cpu().numpy(),
                 "layer": _layer,
                 "npoints": n,
@@ -236,7 +264,8 @@ def main() -> None:
               f"{records[0]['npoints']} points, A={records[0]['n_actions']}, "
               f"K={records[0]['patch_size']}, patches={records[0]['n_patches']}")
         for rec in records:
-            for key in ("coord", "total", "state", "steps", "per_head", "patch"):
+            for key in ("coord", "total", "state", "steps", "per_head", "patch",
+                        "logit_max", "logit_mean", "ap_sum", "ap_max", "ap_state"):
                 out[f"f{f}_l{rec['layer']}_{key}"] = rec[key]
             out[f"f{f}_l{rec['layer']}_meta"] = np.array(
                 [rec["npoints"], rec["n_actions"], rec["patch_size"], rec["n_patches"]])
