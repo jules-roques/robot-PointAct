@@ -107,8 +107,14 @@ def instrument(model):
             P, H = out.shape[0], out.shape[1]
             K = out.shape[-1] - A
 
-            # Rows = point queries, columns = action keys. Mean over heads, as EViT does.
-            pa = out[:, :, A:, :A].float().mean(dim=1)          # [P, K, A]
+            # Rows = point queries, columns = action keys.
+            pah = out[:, :, A:, :A].float()                     # [P, H, K, A]
+            # Mean over heads, as EViT does...
+            pa = pah.mean(dim=1)                                # [P, K, A]
+            # ...but keep the heads too. Averaging is exactly what would hide ONE selective
+            # head among H flat ones, and "the map is flat" is not a safe conclusion to draw
+            # from an average alone.
+            tot_h = pah.sum(dim=-1)                             # [P, H, K]
             total = pa.sum(dim=-1)                              # [P, K]
             state = pa[..., 0]                                  # [P, K]  gripper pose token
             steps = pa[..., 1:]                                 # [P, K, T] chunk-step tokens
@@ -134,6 +140,9 @@ def instrument(model):
                 "state": scatter(state.reshape(-1)).cpu().numpy(),
                 # Per chunk step, so "critical at one moment" can be told from "diffusely
                 # relevant" -- the mean over steps cannot distinguish those two.
+                "per_head": np.stack(
+                    [scatter(tot_h[:, h].reshape(-1)).cpu().numpy()
+                     for h in range(H)], axis=-1),
                 "steps": np.stack(
                     [scatter(steps[..., t].reshape(-1)).cpu().numpy()
                      for t in range(steps.shape[-1])], axis=-1),
@@ -216,7 +225,7 @@ def main() -> None:
               f"{records[0]['npoints']} points, A={records[0]['n_actions']}, "
               f"K={records[0]['patch_size']}, patches={records[0]['n_patches']}")
         for rec in records:
-            for key in ("coord", "total", "state", "steps"):
+            for key in ("coord", "total", "state", "steps", "per_head"):
                 out[f"f{f}_l{rec['layer']}_{key}"] = rec[key]
             out[f"f{f}_l{rec['layer']}_meta"] = np.array(
                 [rec["npoints"], rec["n_actions"], rec["patch_size"], rec["n_patches"]])
