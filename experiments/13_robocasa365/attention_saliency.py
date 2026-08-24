@@ -129,7 +129,18 @@ def instrument(model):
                 dst = torch.zeros(n, dtype=flat.dtype, device=flat.device)
                 return dst.scatter_reduce(0, order, flat, reduce="amax", include_self=False)
 
+            # Which patch each point landed in. The action mass carries a per-patch OFFSET --
+            # every row is normalised over its own patch's K point keys, so a patch with
+            # peaky internal attention gives all its points a higher action mass for reasons
+            # that have nothing to do with the task. Serialised patches are spatially
+            # compact, so that offset paints as spatial bands and is easy to mistake for
+            # structure. Store the id so between-patch and within-patch variance can be
+            # separated instead of guessed at.
+            pid = (torch.arange(P, device=out.device)
+                   .repeat_interleave(K).to(torch.float32))
+
             rec = {
+                "patch": scatter(pid).cpu().numpy(),
                 "layer": _layer,
                 "npoints": n,
                 "n_actions": A,
@@ -225,7 +236,7 @@ def main() -> None:
               f"{records[0]['npoints']} points, A={records[0]['n_actions']}, "
               f"K={records[0]['patch_size']}, patches={records[0]['n_patches']}")
         for rec in records:
-            for key in ("coord", "total", "state", "steps", "per_head"):
+            for key in ("coord", "total", "state", "steps", "per_head", "patch"):
                 out[f"f{f}_l{rec['layer']}_{key}"] = rec[key]
             out[f"f{f}_l{rec['layer']}_meta"] = np.array(
                 [rec["npoints"], rec["n_actions"], rec["patch_size"], rec["n_patches"]])
