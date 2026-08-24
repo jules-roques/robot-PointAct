@@ -172,9 +172,15 @@ def main() -> None:
     # The run's own archived data config, so the frames are the ones it trained on.
     data_cfg = yaml.safe_load(open(args.checkpoint.parent / "data_config.yaml"))
     ds_cfg = dict(data_cfg["lerobot_datasets"][0])
-    targs = json.load(open(args.checkpoint / "training_args.json")) \
-        if (args.checkpoint / "training_args.json").exists() else {}
-    chunk = targs.get("chunk_size", 16)
+    # From the model config, never from a guessed default: the checkpoint ships
+    # training_args.BIN, not .json, so an `if exists()` fallback silently takes over and
+    # feeds the state encoder the wrong width (max_state_dim is 64 here, not 32 -- the
+    # mismatch surfaces as a bmm shape error deep in the action head).
+    chunk = model.config.action_chunk_size
+    max_action_dim = model.config.max_action_dim
+    max_state_dim = model.config.max_state_dim
+    print(f"config: chunk={chunk} max_action_dim={max_action_dim} "
+          f"max_state_dim={max_state_dim} -> A = 1 + {chunk} action tokens")
     ds = load_single_lerobot_dataset(0, [LerobotConfig(**ds_cfg)], chunk_size=chunk)
     print(f"dataset: {ds.num_frames} frames; sampling {args.frames}")
 
@@ -188,8 +194,7 @@ def main() -> None:
     out: dict[str, np.ndarray] = {}
     for f, idx in enumerate(idxs):
         records.clear()
-        batch = build_batch(ds, idx, targs.get("max_action_dim", 32),
-                            targs.get("max_state_dim", 32), "cuda")
+        batch = build_batch(ds, idx, max_action_dim, max_state_dim, "cuda")
         with torch.no_grad():
             model.compute_action(
                 points=batch["points"], npoints_in_batch=batch["npoints_in_batch"],
