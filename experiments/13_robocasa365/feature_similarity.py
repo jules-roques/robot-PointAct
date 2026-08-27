@@ -72,7 +72,7 @@ from lerobot.constants import OBS_STATE  # noqa: E402
 from pointact.data.robot.multi_data import load_single_lerobot_dataset  # noqa: E402
 from pointact.data.schema import LerobotConfig  # noqa: E402
 
-from attention_saliency import build_batch  # noqa: E402
+from attention_saliency import align_labels, build_batch  # noqa: E402
 
 HANDLE_LABEL = 4
 PANEL_LABEL = 3
@@ -110,27 +110,6 @@ def instrument(model):
     for name, mod in taps:
         mod.register_forward_hook(make_hook(name))
     return [name for name, _ in taps], feats
-
-
-def align_labels(cropped_xyz, cropped_labels, model_xyz, center):
-    """Map the model's (subsampled, centred) cloud back onto the labelled one.
-
-    augment_point_cloud draws int(len * U(0.8, 1.0)) points and does not report which, and
-    centre subtraction is applied afterwards. With rotation augmentation off, xyz is otherwise
-    untouched, so undoing the centre and matching nearest neighbours recovers the mapping
-    exactly -- and the assertion below is what makes "exactly" a checked claim rather than an
-    assumption. The cloud is voxelised at 1 cm, so a correct match is at machine precision and
-    a wrong one is >= 1 cm away; there is no ambiguous middle to worry about.
-    """
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(cropped_xyz)
-    dist, idx = tree.query(model_xyz + center, k=1)
-    if dist.max() > 1e-4:
-        raise SystemExit(
-            f"label alignment failed: max nearest-neighbour distance {dist.max():.2e} m. "
-            "Is augment_pc_rot really 0?")
-    return cropped_labels[idx]
 
 
 def pick_queries(cloud_xyz, labels, eef, rng, n_random=3):

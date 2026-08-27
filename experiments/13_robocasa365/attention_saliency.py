@@ -75,6 +75,27 @@ from pointact.data.robot.multi_data import load_single_lerobot_dataset  # noqa: 
 from pointact.data.schema import LerobotConfig  # noqa: E402
 
 
+def align_labels(cropped_xyz, cropped_labels, model_xyz, center):
+    """Map the model's (subsampled, centred) cloud back onto the labelled one.
+
+    augment_point_cloud draws int(len * U(0.8, 1.0)) points and does not report which, and
+    centre subtraction is applied afterwards. With rotation augmentation off, xyz is otherwise
+    untouched, so undoing the centre and matching nearest neighbours recovers the mapping
+    exactly -- and the assertion below is what makes "exactly" a checked claim rather than an
+    assumption. The cloud is voxelised at 1 cm, so a correct match is at machine precision and
+    a wrong one is >= 1 cm away; there is no ambiguous middle to worry about.
+    """
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(cropped_xyz)
+    dist, idx = tree.query(model_xyz + center, k=1)
+    if dist.max() > 1e-4:
+        raise SystemExit(
+            f"label alignment failed: max nearest-neighbour distance {dist.max():.2e} m. "
+            "Is augment_pc_rot really 0?")
+    return cropped_labels[idx]
+
+
 def instrument(model):
     """Record point->action attention mass at every serialized-attention layer.
 
@@ -261,6 +282,13 @@ def main() -> None:
     ap.add_argument("--frames", type=int, default=8)
     ap.add_argument("--out", type=Path, default=Path("saliency.npz"))
     ap.add_argument("--seed", type=int, default=0)
+    # Off by default: the arm being read here never opens the label LMDB during training,
+    # and switching it on forces augment_pc_rot to 0 (see align_labels), which is a change to
+    # the model's input -- small, and arguably the cleaner reading, but a change all the same.
+    ap.add_argument("--labels", default=None,
+                    help="label LMDB dirname under root, e.g. points_3views_labels. Adds "
+                         "per-point ground truth so the saliency can be scored against the "
+                         "target instead of only described.")
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -275,6 +303,9 @@ def main() -> None:
     # The run's own archived data config, so the frames are the ones it trained on.
     data_cfg = yaml.safe_load(open(args.checkpoint.parent / "data_config.yaml"))
     ds_cfg = dict(data_cfg["lerobot_datasets"][0])
+    if args.labels:
+        ds_cfg["oracle_label_dirname"] = args.labels
+        ds_cfg["augment_pc_rot"] = 0
     # From the model config, never from a guessed default: the checkpoint ships
     # training_args.BIN, not .json, so an `if exists()` fallback silently takes over and
     # feeds the state encoder the wrong width (max_state_dim is 64 here, not 32 -- the
@@ -297,6 +328,12 @@ def main() -> None:
     out: dict[str, np.ndarray] = {}
     for f, idx in enumerate(idxs):
         records.clear()
+        row = ds.hf_dataset[idx]
+        ep, fr = int(row["episode_index"]), int(row["frame_index"])
+        labelled = None
+        if args.labels:
+            labelled = ds.filter_point_cloud_by_workspace(
+                ds.load_point_cloud(ep, fr), ds.load_point_labels(ep, fr))
         batch = build_batch(ds, idx, max_action_dim, max_state_dim, "cuda")
         with torch.no_grad():
             model.compute_action(
@@ -313,6 +350,22 @@ def main() -> None:
                 out[f"f{f}_l{rec['layer']}_{key}"] = rec[key]
             out[f"f{f}_l{rec['layer']}_meta"] = np.array(
                 [rec["npoints"], rec["n_actions"], rec["patch_size"], rec["n_patches"]])
+        if labelled is not None:
+            cropped, cropped_labels = labelled
+            centre = np.asarray(batch["point_center"], dtype=np.float64)
+            base = align_labels(cropped[:, :3].astype(np.float64), cropped_labels,
+                                records[0]["coord"].astype(np.float64), centre)
+            out[f"f{f}_l0_labels"] = base.astype(np.uint8)
+            # Stages 1-4 are pooled, so their points have no label of their own. Take the
+            # nearest full-resolution point's -- a pooled point IS the centroid of a small
+            # cell of stage-0 points, so its nearest labelled neighbour is one of the points
+            # it was built from, not an unrelated guess. Only stage 0 is ground truth; the
+            # rest is stated as inherited so it is not read as more than it is.
+            from scipy.spatial import cKDTree
+            tree = cKDTree(records[0]["coord"].astype(np.float64))
+            for rec in records[1:]:
+                out[f"f{f}_l{rec['layer']}_labels"] = base[
+                    tree.query(rec["coord"].astype(np.float64), k=1)[1]].astype(np.uint8)
         out[f"f{f}_state"] = batch["raw_state"]
         out[f"f{f}_center"] = batch["point_center"]
         out[f"f{f}_idx"] = np.array([idx])

@@ -56,7 +56,13 @@ for path in "$CKPT/config.json" "$CKPT/../data_config.yaml" "$POINTACT_ENV/.venv
     [ -e "$path" ] || { echo "missing: $path" >&2; exit 1; }
 done
 
+# Optional: LABELS=points_3views_labels adds per-point ground truth to the dump, which is
+# what lets the saliency be scored against the target rather than only described. It forces
+# rotation augmentation off (the labels are stored unrotated), so set it deliberately.
+LABEL_ARG=""
+if [ -n "${LABELS:-}" ]; then LABEL_ARG="--labels $LABELS"; fi
+
 uv run --project "$POINTACT_ENV" --no-sync \
     python experiments/13_robocasa365/attention_saliency.py "$CKPT" \
-        --frames "$FRAMES" --out "$OUT"
+        --frames "$FRAMES" $LABEL_ARG --out "$OUT"
 echo "OUT=$OUT"
