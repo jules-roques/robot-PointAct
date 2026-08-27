@@ -12,13 +12,27 @@ patch attends over `[A actions | K points]` as a SINGLE softmax. A point token's
 spends a fraction of its probability mass on the action keys, and that fraction is a per-point
 scalar in [0, 1]: "how much this point cares about the action".
 
-EViT reads the opposite direction -- the class token's row over patches -- because a ViT has
-one CLS token and one global softmax, so those values are comparable across all tokens. That
-does not transfer here: the action tokens are REPLICATED per patch
-(`action_qkv.repeat_interleave(repeat_size)`), so action->point is a different softmax in every
-patch, over a different key set. Point->action is individually normalised per point and is the
-comparable direction. It is still not perfect -- each point's denominator includes its own
-patch's K points -- so patch-relative rank is reported alongside the raw mass.
+EViT reads the opposite direction -- the class token's row over patches -- and that direction
+IS available here, contrary to what an earlier version of this file claimed. The action tokens
+are replicated per patch (`action_qkv.repeat_interleave(repeat_size)`), so action->point is a
+separate softmax in each patch; but the replicas are recombined by a PLAIN MEAN
+(model_ca_action.py:143-148), which makes point j's coefficient in action token a exactly
+(1/P) * attn_p[a, j] -- one global linear map with a constant factor, hence comparable across
+the whole cloud. Both directions are therefore dumped, in two forms each:
+
+  * softmax mass (`ap_*` for action->point, `total`/`state`/`steps` for point->action).
+    Point->action carries a per-patch OFFSET, because each point's denominator includes its
+    own patch's K point keys; serialised patches are spatially compact, so that offset paints
+    as spatial bands that are easy to mistake for structure. `patch` is stored so between- and
+    within-patch variance can be separated rather than guessed at.
+  * raw logits (`a2p_*` for action->point, `logit_*` for point->action), which have no
+    denominator at all and so no offset. a2p is the cleanest of the four: q_a is literally the
+    same vector in every patch, so q_a . k_i depends on nothing but point i.
+
+One asymmetry survives in every logit here and is worth naming: RoPE rotates the POINT q/k by
+coordinate (`self.rope(q, k, rope_coord)`) and the action qkv never passes through it, so a
+positional phase gradient rides along with whatever semantic signal exists. Correlate any map
+against the coordinate axes before calling it task structure.
 
 The A action tokens are NOT interchangeable, which is why they are never summed blindly:
   * index 0 is the STATE embedding (the gripper pose) -- genuinely frame-dependent;
@@ -130,6 +144,31 @@ def instrument(model):
             ap_max = ap.max(dim=1).values                       # [P, K] peak over tokens
             ap_state = ap[:, 0, :]                              # [P, K] the gripper-pose token
 
+            # --- action -> point, RAW LOGITS ------------------------------------------
+            # The mirror of `lg` above, and the block the action is literally assembled
+            # from: row a, column i is q_a . k_i * scale, one row per action token and one
+            # column per point. It is patch-independent for a stronger reason than the
+            # point->action logits are: the action QUERIES are one tensor
+            # repeat_interleave'd into every patch, so q_a is the same vector everywhere,
+            # and k_i is point i's own key. Point i's value therefore does not depend on
+            # which patch it landed in at all -- no per-patch softmax denominator, no
+            # band artefact, nothing to renormalise away afterwards.
+            #
+            # Taking the MAX over action tokens rather than the sum asks "is this point
+            # important to ANY moment of the chunk", which is the question a warp cares
+            # about; a point that matters only at the instant of contact would be averaged
+            # into the floor by a mean over 17 tokens.
+            a2p = _inp[0][:, :, :A, A:].float()                 # [P, H, A, K]
+            a2p_max = a2p.max(dim=2).values.mean(dim=1)         # [P, K] max over actions
+            a2p_mean = a2p.mean(dim=2).mean(dim=1)              # [P, K]
+            # Mean-over-heads is exactly what hides ONE selective head among H flat ones,
+            # so keep the head-wise peak too rather than concluding "flat" from an average.
+            a2p_max_head = a2p.amax(dim=(1, 2))                 # [P, K] max over H and A
+            # Which action token peaks. 0 is the state (gripper-pose) embedding, 1..T are
+            # the chunk steps -- a map that is all token 0 is the eef prior rediscovered,
+            # not a new signal, and that has to be visible rather than assumed.
+            a2p_argmax = a2p.mean(dim=1).argmax(dim=1).to(torch.float32)   # [P, K]
+
             # Rows = point queries, columns = action keys.
             pah = out[:, :, A:, :A].float()                     # [P, H, K, A]
             # Mean over heads, as EViT does...
@@ -168,6 +207,10 @@ def instrument(model):
                 "ap_sum": scatter(ap_sum.reshape(-1)).cpu().numpy(),
                 "ap_max": scatter(ap_max.reshape(-1)).cpu().numpy(),
                 "ap_state": scatter(ap_state.reshape(-1)).cpu().numpy(),
+                "a2p_max": scatter(a2p_max.reshape(-1)).cpu().numpy(),
+                "a2p_mean": scatter(a2p_mean.reshape(-1)).cpu().numpy(),
+                "a2p_max_head": scatter(a2p_max_head.reshape(-1)).cpu().numpy(),
+                "a2p_argmax": scatter(a2p_argmax.reshape(-1)).cpu().numpy(),
                 "patch": scatter(pid).cpu().numpy(),
                 "layer": _layer,
                 "npoints": n,
@@ -265,7 +308,8 @@ def main() -> None:
               f"K={records[0]['patch_size']}, patches={records[0]['n_patches']}")
         for rec in records:
             for key in ("coord", "total", "state", "steps", "per_head", "patch",
-                        "logit_max", "logit_mean", "ap_sum", "ap_max", "ap_state"):
+                        "logit_max", "logit_mean", "ap_sum", "ap_max", "ap_state",
+                        "a2p_max", "a2p_mean", "a2p_max_head", "a2p_argmax"):
                 out[f"f{f}_l{rec['layer']}_{key}"] = rec[key]
             out[f"f{f}_l{rec['layer']}_meta"] = np.array(
                 [rec["npoints"], rec["n_actions"], rec["patch_size"], rec["n_patches"]])
