@@ -1,48 +1,50 @@
-"""Dump per-point feature cosine similarity at full resolution, before any downsampling.
+"""Dump point-feature cosine similarity at every resolution the encoder passes through.
 
-The companion question to attention_saliency.py. That script asks "does the action attend
-more to some points than others" and answers no. This one asks the prior question: does the
-network's *representation* of the cloud distinguish anything at all at the resolution a warp
-would operate on? A warp -- or any learned sampler placed at the input -- can only merge or
-keep points on the basis of the features available where it sits, which is stage 0 of the PTv3
-encoder, before the first GridPooling drops the cloud to a quarter of its size.
+The companion question to attention_saliency.py. That script asks "does the action attend more
+to some points than to others". This one asks the prior question: does the network's
+*representation* distinguish anything a sampler could act on? Pick a query point, colour every
+other point by cosine similarity to it, and look.
 
-So: pick a handful of query points, and colour every other point by cosine similarity to the
-query's feature. If the drawer handle's neighbourhood lights up and the floor does not, there
-is structure to exploit even where the attention map is flat. If the handle looks like the
-floor, there is nothing for the sampler to read.
+WHICH TAPS, AND WHY THESE ONES
+------------------------------
+The encoder is five stages, `enc_depths = (3, 3, 3, 12, 3)`, with a GridPooling at stride 2
+opening each stage after the first. The interesting moment is the state of the cloud
+*immediately before each pooling* -- that is the representation any merge-or-keep decision
+would have to be made from, at each of the resolutions where such a decision exists. So the
+taps are the outputs of `enc0` .. `enc4`: four "about to be halved" snapshots and the encoder's
+final output, which is never pooled again.
 
-WHICH TAPS
-----------
-`enc_channels[0] = 54`, `enc_depths[0] = 3`, and stage 0 is the only stage at full resolution
-(`enc1` starts with a GridPoolingWithAction at stride 2). Every full-resolution tap is dumped:
+    embed    the linear stem alone -- a 6->54 projection of (x, y, z, r, g, b), no context of
+             any kind. The control: whatever it shows is available from raw colour and
+             position, so anything the real taps do not add is not learned structure.
+    stage 0  ~19K points, before the first pooling. Where an input-stage warp would act.
+    stage 1  ~5.8K   stage 2  ~1.7K   stage 3  ~470   stage 4  ~136, the encoder's output.
 
-    embed              the linear stem alone -- xyz+rgb projected, no context of any kind.
-                       The control: whatever this map shows is available from raw colour and
-                       position, so anything the later taps do NOT add is not learned structure.
-    enc0.block0..2     serialized self-attention + MLP, the point stream only.
-    enc0.ca_block0..2  cross-attention to the language context. This is where task identity
-                       can first reach a point feature, so a handle that only becomes special
-                       after a ca_block is special *because of the instruction*, which is a
-                       different and much more interesting claim than a colour blob.
+LABELS THROUGH THE POOLING CHAIN
+--------------------------------
+Ground truth exists only at full resolution. GridPooling keeps `pooling_inverse` -- the cluster
+index of every parent point -- so the labels are carried down *exactly* rather than matched to
+a nearest neighbour. A pooled point is a voxel cell holding several stage-0 points and has no
+single label, so both readings are kept: the majority class, for a display colour, and "does
+this cell contain any handle point at all", which is the positive set a sampler would have to
+keep and the only one that stays meaningful when a stage-4 cell is far bigger than the handle.
 
-Point order is preserved throughout: the stem is per-point, and the attention blocks restore
-input order with `feat[inverse]` before returning. So row i of every tap is point i of the
-cloud the model was handed, and of the label array aligned to it.
+Query points are carried down the same chain, so the "handle" query at stage 4 is the cell that
+literally contains the stage-0 handle point, not the nearest thing to where it used to be.
 
 QUERY POINTS
 ------------
   * eef -- the gripper, from the frame's own state. The trivially-available prior.
-  * handle -- label 4 in the points_3views_labels LMDB (falling back to label 3, the drawer
-    panel, when the handle is occluded), the same ground truth the oracle sampling arm uses.
-  * three uniformly random points, as the null: if a random floor point's similarity map looks
-    like the handle's, the map is measuring the encoder's global geometry, not the task.
+  * handle -- label 4 (falling back to label 3, the drawer panel, when the handle is occluded),
+    the same ground truth the oracle sampling arm uses.
+  * three uniformly random points, as the null: if a random floor point's map looks like the
+    handle's, the map is measuring the encoder's global geometry, not the task.
 
 `augment_pc_rot` is forced to 0 so the labels, which are stored against the unrotated cloud,
 stay aligned with what the model sees. The random 0-20% dropout in augment_point_cloud is NOT
-disabled -- it is what training actually feeds the model -- so the returned cloud is a subset
-of the labelled one, recovered by nearest-neighbour matching with an assertion that every
-match is exact to 0.1 mm.
+disabled -- it is what training actually feeds the model -- so the returned cloud is a subset of
+the labelled one, recovered by nearest-neighbour matching with an assertion that every match is
+exact to 0.1 mm.
 
     python experiments/13_robocasa365/feature_similarity.py \
         $SCRATCH/PointAct_exprs/robocasa365/ablation/od-none-s0/checkpoint-final-50000 \
@@ -72,7 +74,8 @@ from lerobot.constants import OBS_STATE  # noqa: E402
 from pointact.data.robot.multi_data import load_single_lerobot_dataset  # noqa: E402
 from pointact.data.schema import LerobotConfig  # noqa: E402
 
-from attention_saliency import align_labels, build_batch  # noqa: E402
+from attention_saliency import (align_labels, build_batch, propagate_labels,  # noqa: E402
+                                track_pooling)
 
 HANDLE_LABEL = 4
 PANEL_LABEL = 3
@@ -87,35 +90,35 @@ def find_ptv3(model):
 
 
 def instrument(model):
-    """Capture point.feat at every full-resolution tap of encoder stage 0."""
+    """Capture point.feat and point.coord immediately before each pooling, plus the stem."""
     ptv3 = find_ptv3(model)
-    taps: list[tuple[str, torch.nn.Module]] = [("embed", ptv3.embedding)]
-    # Stage 0 has no `down` child (GridPooling is added only for s > 0), so every child here
-    # runs at full resolution. Taking them in declaration order keeps the dump in depth order.
-    for name, child in ptv3.enc.enc0.named_children():
-        taps.append((f"enc0.{name}", child))
+    taps: list[tuple[str, int, torch.nn.Module]] = [("embed", 0, ptv3.embedding)]
+    for name, child in ptv3.enc.named_children():
+        # enc{s}'s output is the cloud as it stands just before enc{s+1}'s GridPooling --
+        # and for the last stage, the encoder's own output.
+        taps.append((f"stage{name[3:]}", int(name[3:]), child))
 
-    feats: dict[str, torch.Tensor] = {}
+    grabbed: dict[str, dict] = {}
 
     def make_hook(name):
         def hook(_module, _inp, out):
-            # These modules take and return the same Point object, mutating it in place, but
-            # every block REASSIGNS point.feat rather than writing into it, so the tensor
-            # captured here is not overwritten by the next block. Detach anyway; float32
-            # because the model runs in bf16 and cosine similarity in bf16 quantises to
-            # about 3 decimal digits, which is coarser than the differences being measured.
-            feats[name] = out.feat.detach().float()
+            # These modules mutate one Point in place, but every block REASSIGNS point.feat,
+            # and GridPooling builds a fresh Point rather than editing its parent -- so what is
+            # captured here survives the stages that follow. float32 because the model runs in
+            # bf16, which quantises cosine similarity to about three decimal digits, coarser
+            # than the differences being measured.
+            grabbed[name] = dict(feat=out.feat.detach().float(),
+                                 coord=out.coord.detach().float().cpu().numpy())
         return hook
 
-    for name, mod in taps:
+    for name, _, mod in taps:
         mod.register_forward_hook(make_hook(name))
-    return [name for name, _ in taps], feats
+    return [(n, s) for n, s, _ in taps], grabbed
 
 
 def pick_queries(cloud_xyz, labels, eef, rng, n_random=3):
-    """(name, point index) for each query point, in a fixed order."""
+    """(name, point index) for each query point at full resolution, in a fixed order."""
     queries: list[tuple[str, int]] = []
-
     queries.append(("eef", int(np.argmin(np.linalg.norm(cloud_xyz - eef, axis=1)))))
 
     for label, name in ((HANDLE_LABEL, "handle"), (PANEL_LABEL, "panel")):
@@ -147,8 +150,7 @@ def pairwise_summary(feat, rng, n=2000):
     idx = rng.choice(feat.shape[0], size=min(n, feat.shape[0]), replace=False)
     sub = torch.nn.functional.normalize(feat[idx], dim=-1)
     sim = (sub @ sub.T).cpu().numpy()
-    iu = np.triu_indices(len(idx), k=1)
-    vals = sim[iu]
+    vals = sim[np.triu_indices(len(idx), k=1)]
     return np.percentile(vals, [1, 5, 25, 50, 75, 95, 99]).astype(np.float32)
 
 
@@ -177,7 +179,6 @@ def main() -> None:
     # sampler). Naming the directory is enough: it is opened lazily by load_point_labels and
     # changes nothing else about the dataset.
     ds_cfg["oracle_label_dirname"] = args.label_dirname
-    # See align_labels: the labels are stored against the unrotated cloud.
     ds_cfg["augment_pc_rot"] = 0
 
     chunk = model.config.action_chunk_size
@@ -197,20 +198,19 @@ def main() -> None:
 
     ds.normalize_state_action = wrapped_norm
 
-    tap_names, feats = instrument(model)
-    print(f"taps ({len(tap_names)}): {', '.join(tap_names)}")
+    taps, grabbed = instrument(model)
+    inverses = track_pooling(model)
+    print(f"taps ({len(taps)}): {', '.join(n for n, _ in taps)}")
 
     rng = np.random.default_rng(args.seed)
     idxs = rng.choice(ds.num_frames, size=min(args.frames, ds.num_frames),
                       replace=False).tolist()
 
     out: dict[str, np.ndarray] = {}
-    all_names: list[str] = []
     for f, idx in enumerate(idxs):
-        feats.clear()
+        grabbed.clear(); inverses.clear()
         item = ds.hf_dataset[idx]
         ep, fr = int(item["episode_index"]), int(item["frame_index"])
-        # The labelled cloud, cropped exactly as the dataset crops it.
         cropped, cropped_labels = ds.filter_point_cloud_by_workspace(
             ds.load_point_cloud(ep, fr), ds.load_point_labels(ep, fr))
 
@@ -223,51 +223,50 @@ def main() -> None:
 
         cloud = batch["points"].detach().float().cpu().numpy()
         xyz, rgb = cloud[:, :3].astype(np.float64), cloud[:, 3:6]
-        center = np.asarray(batch["point_center"], dtype=np.float64)
-        labels = align_labels(cropped[:, :3].astype(np.float64), cropped_labels, xyz, center)
+        centre = np.asarray(batch["point_center"], dtype=np.float64)
+        base = align_labels(cropped[:, :3].astype(np.float64), cropped_labels, xyz, centre)
+        counts = propagate_labels(base, inverses, len(LABEL_NAMES))
         eef = ds._viz_eef
 
-        queries = pick_queries(xyz, labels, eef, rng)
-        counts = {LABEL_NAMES[k] if k < len(LABEL_NAMES) else str(k): int((labels == k).sum())
-                  for k in np.unique(labels)}
-        print(f"  frame {f} (idx {idx}, ep {ep} fr {fr}): {len(xyz)} points, labels {counts}")
-        print(f"    queries: " + ", ".join(
-            f"{n}@{i}({LABEL_NAMES[labels[i]]})" for n, i in queries))
+        queries = pick_queries(xyz, base, eef, rng)
+        qidx0 = [i for _, i in queries]
+        # Carry the queries down the same chain the labels take, so "the handle" at stage 4 is
+        # the cell that actually contains the stage-0 handle point.
+        qidx = [qidx0]
+        for inv in inverses:
+            qidx.append([int(inv[i]) for i in qidx[-1]])
 
-        out[f"f{f}_coord"] = xyz.astype(np.float32)
+        cls = {LABEL_NAMES[k]: int((base == k).sum()) for k in np.unique(base)}
+        print(f"  frame {f} (idx {idx}, ep {ep} fr {fr}): {len(xyz)} points, labels {cls}")
+        print("    queries: " + ", ".join(
+            f"{n}@{i}({LABEL_NAMES[base[i]]})" for n, i in queries))
+        print("    sizes: " + ", ".join(f"{n}={len(grabbed[n]['coord'])}" for n, _ in taps))
+
         out[f"f{f}_rgb"] = rgb.astype(np.float32)
-        out[f"f{f}_labels"] = labels.astype(np.uint8)
         out[f"f{f}_eef"] = eef.astype(np.float32)
-        out[f"f{f}_center"] = center.astype(np.float32)
+        out[f"f{f}_center"] = centre.astype(np.float32)
         out[f"f{f}_idx"] = np.array([idx, ep, fr])
-        out[f"f{f}_query_idx"] = np.array([i for _, i in queries])
-        # Per frame, not global: the second query is "handle" when the handle is visible and
-        # "panel" when it is not, and a viewer that assumed one name for all frames would
-        # silently mislabel the fallback frames.
         out[f"f{f}_query_names"] = np.array([n for n, _ in queries])
-        all_names = [n for n, _ in queries]
 
-        for tap in tap_names:
-            feat = feats[tap]
-            if feat.shape[0] != len(xyz):
-                raise SystemExit(f"tap {tap} has {feat.shape[0]} rows for {len(xyz)} points "
-                                 "-- that tap is not at full resolution")
-            unit = torch.nn.functional.normalize(feat, dim=-1)
-            qi = torch.tensor([i for _, i in queries], device=unit.device)
-            # [N, Q] cosine similarity of every point to every query point.
-            sims = (unit @ unit[qi].T).cpu().numpy().astype(np.float16)
-            out[f"f{f}_{tap}_sim"] = sims
-            out[f"f{f}_{tap}_pairwise"] = pairwise_summary(feat, rng)
-            # Per-class mean similarity to each query: the number behind the picture.
-            per_class = np.full((len(LABEL_NAMES), len(queries)), np.nan, dtype=np.float32)
-            for k in range(len(LABEL_NAMES)):
-                mask = labels == k
-                if mask.any():
-                    per_class[k] = sims[mask].astype(np.float32).mean(axis=0)
-            out[f"f{f}_{tap}_per_class"] = per_class
+        for tap, stage in taps:
+            g = grabbed[tap]
+            cnt = counts[stage]
+            if len(cnt) != len(g["coord"]):
+                raise SystemExit(f"label chain gives {len(cnt)} points at {tap}, "
+                                 f"the tap has {len(g['coord'])}")
+            qi = qidx[stage]
+            unit = torch.nn.functional.normalize(g["feat"], dim=-1)
+            sims = (unit @ unit[torch.tensor(qi, device=unit.device)].T).cpu().numpy()
+            out[f"f{f}_{tap}_coord"] = g["coord"].astype(np.float32)
+            out[f"f{f}_{tap}_label"] = cnt.argmax(axis=1).astype(np.uint8)
+            out[f"f{f}_{tap}_has_handle"] = (cnt[:, HANDLE_LABEL] > 0).astype(np.uint8)
+            out[f"f{f}_{tap}_has_robot"] = (cnt[:, 1] > 0).astype(np.uint8)
+            out[f"f{f}_{tap}_qidx"] = np.array(qi)
+            out[f"f{f}_{tap}_sim"] = sims.astype(np.float16)
+            out[f"f{f}_{tap}_pairwise"] = pairwise_summary(g["feat"], rng)
 
-    out["taps"] = np.array(tap_names)
-    out["query_names"] = np.array(all_names)
+    out["taps"] = np.array([n for n, _ in taps])
+    out["tap_stage"] = np.array([s for _, s in taps])
     out["label_names"] = np.array(LABEL_NAMES)
     out["n_frames"] = np.array([len(idxs)])
     np.savez_compressed(args.out, **out)

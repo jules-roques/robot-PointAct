@@ -96,6 +96,45 @@ def align_labels(cropped_xyz, cropped_labels, model_xyz, center):
     return cropped_labels[idx]
 
 
+def track_pooling(model):
+    """Record each GridPooling's parent->child map, so labels can be carried down exactly.
+
+    `pooling_inverse` is the `cluster` tensor torch.unique returns when the stage builds its
+    voxel grid: entry i is the index of the pooled point that stage-0 point i was merged into.
+    Chaining the four of them gives an exact ancestry for every point at every stage -- strictly
+    better than matching a pooled centroid to its nearest labelled neighbour, which is a guess
+    that gets worse at each stage as the cells grow.
+    """
+    inverses: list = []
+    mods = [m for m in model.modules() if type(m).__name__ == "GridPoolingWithAction"]
+    if len(mods) != 4:
+        raise SystemExit(f"expected 4 pooling stages, found {len(mods)}")
+    for mod in mods:
+        mod.register_forward_hook(
+            lambda _m, _i, out: inverses.append(out.pooling_inverse.detach().cpu().numpy()))
+    return inverses
+
+
+def propagate_labels(base, inverses, n_classes=5):
+    """Per-stage label counts, from stage-0 ground truth down through the pooling chain.
+
+    Returns one [n_points, n_classes] count matrix per stage, stage 0 first. A pooled point is
+    a voxel cell holding several stage-0 points, so it has no single label: keep the counts and
+    let the caller decide. `argmax` is the honest choice for a display colour; `counts[:, 4] > 0`
+    -- does this cell contain any handle point at all -- is the honest positive set for scoring,
+    because that is exactly the set a sampler would have to keep.
+    """
+    counts = np.zeros((len(base), n_classes), dtype=np.int64)
+    counts[np.arange(len(base)), base.astype(int)] = 1
+    out = [counts]
+    for inv in inverses:
+        m = int(inv.max()) + 1
+        counts = np.stack([np.bincount(inv, weights=counts[:, c], minlength=m)
+                           for c in range(n_classes)], axis=1).astype(np.int64)
+        out.append(counts)
+    return out
+
+
 def instrument(model):
     """Record point->action attention mass at every serialized-attention layer.
 
@@ -319,6 +358,8 @@ def main() -> None:
     print(f"dataset: {ds.num_frames} frames; sampling {args.frames}")
 
     records, mods = instrument(model)
+    inverses = track_pooling(model) if args.labels else []
+    stage_of = sum([[s] * d for s, d in enumerate(model.config.ptv3_enc_depths)], [])
     print(f"instrumented {len(mods)} attention layers (flash disabled)")
 
     rng = np.random.default_rng(args.seed)
@@ -328,6 +369,7 @@ def main() -> None:
     out: dict[str, np.ndarray] = {}
     for f, idx in enumerate(idxs):
         records.clear()
+        inverses.clear()
         row = ds.hf_dataset[idx]
         ep, fr = int(row["episode_index"]), int(row["frame_index"])
         labelled = None
@@ -355,17 +397,17 @@ def main() -> None:
             centre = np.asarray(batch["point_center"], dtype=np.float64)
             base = align_labels(cropped[:, :3].astype(np.float64), cropped_labels,
                                 records[0]["coord"].astype(np.float64), centre)
-            out[f"f{f}_l0_labels"] = base.astype(np.uint8)
-            # Stages 1-4 are pooled, so their points have no label of their own. Take the
-            # nearest full-resolution point's -- a pooled point IS the centroid of a small
-            # cell of stage-0 points, so its nearest labelled neighbour is one of the points
-            # it was built from, not an unrelated guess. Only stage 0 is ground truth; the
-            # rest is stated as inherited so it is not read as more than it is.
-            from scipy.spatial import cKDTree
-            tree = cKDTree(records[0]["coord"].astype(np.float64))
-            for rec in records[1:]:
-                out[f"f{f}_l{rec['layer']}_labels"] = base[
-                    tree.query(rec["coord"].astype(np.float64), k=1)[1]].astype(np.uint8)
+            per_stage = propagate_labels(base, inverses)
+            for rec in records:
+                cnt = per_stage[stage_of[rec["layer"]]]
+                if len(cnt) != rec["npoints"]:
+                    raise SystemExit(f"label chain gives {len(cnt)} points at layer "
+                                     f"{rec['layer']}, attention saw {rec['npoints']}")
+                out[f"f{f}_l{rec['layer']}_labels"] = cnt.argmax(axis=1).astype(np.uint8)
+                # "this cell contains at least one handle point" -- the set a sampler would
+                # have to keep, and the only positive set that stays meaningful once a stage-4
+                # point covers a cell far larger than the handle itself.
+                out[f"f{f}_l{rec['layer']}_has_handle"] = (cnt[:, 4] > 0).astype(np.uint8)
         out[f"f{f}_state"] = batch["raw_state"]
         out[f"f{f}_center"] = batch["point_center"]
         out[f"f{f}_idx"] = np.array([idx])
