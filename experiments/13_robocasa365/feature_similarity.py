@@ -140,6 +140,31 @@ def pick_queries(cloud_xyz, labels, eef, rng, n_random=3):
     return queries
 
 
+def counterfactual_contexts(ds, true_task: str, swap_task: str | None):
+    """(label, embeds) for each alternative instruction to re-run the same frame under.
+
+    Two of them, deliberately different in kind. The NEAR one is the other instruction in this
+    task's own cache -- on OpenDrawer that is "Open the left drawer." against "Open the right
+    drawer.", the minimal semantic change the policy must actually resolve, and the one whose
+    answer decides whether a sampler could ever be steered. The FAR one is another task's
+    instruction entirely, which bounds the effect from above: if even that does not move the
+    point features, nothing will.
+    """
+    alts = []
+    others = sorted(k for k in ds.text_context if k != true_task)
+    if others:
+        alts.append(("near: " + others[0], ds.text_context[others[0]]))
+    if swap_task:
+        path = Path(ds.root).parent / swap_task / "text_context" / "qwen2.5-vl-3b.pt"
+        if path.exists():
+            d = torch.load(path, map_location="cpu", weights_only=True)
+            k = sorted(d)[0]
+            alts.append(("far: " + k, d[k]))
+        else:
+            print(f"  (no swap cache at {path}; far counterfactual skipped)")
+    return alts
+
+
 def pairwise_summary(feat, rng, n=2000):
     """Percentiles of the cosine similarity between random point PAIRS.
 
@@ -162,6 +187,11 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("featsim.npz"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--label-dirname", default="points_3views_labels")
+    # The decisive test of whether the instruction reaches the point features at all: re-run
+    # the identical cloud under a different instruction and see whether the features move.
+    ap.add_argument("--swap-task", default="TurnOnMicrowave",
+                    help="sibling dataset whose instruction is used as the far counterfactual; "
+                         "the near one is always the other instruction in this task's own cache")
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -197,6 +227,17 @@ def main() -> None:
         return _o(item)
 
     ds.normalize_state_action = wrapped_norm
+
+    # The frame's instruction string, needed to know which OTHER instruction is the
+    # counterfactual. It is resolved inside __getitem__ by select_task_text and never returned,
+    # so take it where it is used.
+    original_lookup = ds.lookup_text_context
+
+    def wrapped_lookup(task, _o=original_lookup):
+        ds._viz_task = task
+        return _o(task)
+
+    ds.lookup_text_context = wrapped_lookup
 
     taps, grabbed = instrument(model)
     inverses = track_pooling(model)
@@ -240,6 +281,7 @@ def main() -> None:
         print(f"  frame {f} (idx {idx}, ep {ep} fr {fr}): {len(xyz)} points, labels {cls}")
         print("    queries: " + ", ".join(
             f"{n}@{i}({LABEL_NAMES[base[i]]})" for n, i in queries))
+        print(f"    task: {ds._viz_task!r}")
         print("    sizes: " + ", ".join(f"{n}={len(grabbed[n]['coord'])}" for n, _ in taps))
 
         out[f"f{f}_rgb"] = rgb.astype(np.float32)
@@ -264,6 +306,29 @@ def main() -> None:
             out[f"f{f}_{tap}_qidx"] = np.array(qi)
             out[f"f{f}_{tap}_sim"] = sims.astype(np.float16)
             out[f"f{f}_{tap}_pairwise"] = pairwise_summary(g["feat"], rng)
+
+        # --- counterfactual instructions, same cloud ---------------------------------
+        true_feat = {tap: grabbed[tap]["feat"] for tap, _ in taps}
+        alts = counterfactual_contexts(ds, ds._viz_task, args.swap_task)
+        for a, (alabel, aembed) in enumerate(alts):
+            grabbed.clear()
+            with torch.no_grad():
+                model.compute_action(
+                    points=batch["points"], npoints_in_batch=batch["npoints_in_batch"],
+                    ctx_embeds=aembed.unsqueeze(0).to("cuda"),
+                    ctx_lens=torch.LongTensor([len(aembed)]).to("cuda"),
+                    states=batch["states"])
+            out[f"f{f}_cf{a}_label"] = np.array(alabel)
+            for tap, _ in taps:
+                # Per-point cosine between the two runs' features. 1.0 to the last bit means
+                # the instruction never reached this tap; anything less is the size of the
+                # channel, measured rather than argued about.
+                cs = torch.nn.functional.cosine_similarity(
+                    true_feat[tap], grabbed[tap]["feat"], dim=-1).cpu().numpy()
+                out[f"f{f}_cf{a}_{tap}_cos"] = cs.astype(np.float32)
+            print(f"    counterfactual [{alabel}]: " + "  ".join(
+                f"{tap} {out[f'f{f}_cf{a}_{tap}_cos'].mean():.4f}" for tap, _ in taps))
+        out[f"f{f}_n_cf"] = np.array([len(alts)])
 
     out["taps"] = np.array([n for n, _ in taps])
     out["tap_stage"] = np.array([s for _, s in taps])
