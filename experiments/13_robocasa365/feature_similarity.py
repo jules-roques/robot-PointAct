@@ -150,7 +150,11 @@ def counterfactual_contexts(ds, true_task: str, swap_task: str | None):
     instruction entirely, which bounds the effect from above: if even that does not move the
     point features, nothing will.
     """
-    alts = []
+    # The control comes first and is the frame's OWN instruction, re-run unchanged. Two
+    # forwards of the same input must agree bit for bit in eval mode, so anything below 1.0000
+    # here is nondeterminism, and every other number in this block would be measuring that
+    # instead of the instruction.
+    alts = [("control: " + true_task, ds.text_context[true_task])]
     others = sorted(k for k in ds.text_context if k != true_task)
     if others:
         alts.append(("near: " + others[0], ds.text_context[others[0]]))
