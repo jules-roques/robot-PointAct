@@ -193,6 +193,12 @@ def main() -> None:
     ap.add_argument("--label-dirname", default="points_3views_labels")
     # The decisive test of whether the instruction reaches the point features at all: re-run
     # the identical cloud under a different instruction and see whether the features move.
+    ap.add_argument("--repeats", type=int, default=4,
+                    help="how many times to re-run each instruction. Seeding does NOT make "
+                         "this model's forward deterministic -- the control comes back at "
+                         "~0.98 cosine, not 1.0 -- so the only way to say whether a "
+                         "counterfactual did anything is to compare its spread against the "
+                         "control's spread rather than against 1.")
     ap.add_argument("--swap-task", default="TurnOnMicrowave",
                     help="sibling dataset whose instruction is used as the far counterfactual; "
                          "the near one is always the other instruction in this task's own cache")
@@ -329,19 +335,24 @@ def main() -> None:
         true_feat = {tap: grabbed[tap]["feat"] for tap, _ in taps}
         alts = counterfactual_contexts(ds, ds._viz_task, args.swap_task)
         for a, (alabel, aembed) in enumerate(alts):
-            grabbed.clear()
-            forward(aembed)
             out[f"f{f}_cf{a}_label"] = np.array(alabel)
-            for tap, _ in taps:
-                # Per-point cosine between the two runs' features. 1.0 to the last bit means
-                # the instruction never reached this tap; anything less is the size of the
-                # channel, measured rather than argued about.
-                cs = torch.nn.functional.cosine_similarity(
-                    true_feat[tap], grabbed[tap]["feat"], dim=-1).cpu().numpy()
-                out[f"f{f}_cf{a}_{tap}_cos"] = cs.astype(np.float32)
-            print(f"    counterfactual [{alabel}]: " + "  ".join(
-                f"{tap} {out[f'f{f}_cf{a}_{tap}_cos'].mean():.4f}" for tap, _ in taps))
+            means = np.zeros((args.repeats, len(taps)), dtype=np.float64)
+            for r in range(args.repeats):
+                grabbed.clear()
+                forward(aembed)
+                for t, (tap, _) in enumerate(taps):
+                    # Per-point cosine between the two runs' features.
+                    cs = torch.nn.functional.cosine_similarity(
+                        true_feat[tap], grabbed[tap]["feat"], dim=-1).cpu().numpy()
+                    means[r, t] = cs.mean()
+                    if r == 0:      # keep one full map per instruction; the rest are summaries
+                        out[f"f{f}_cf{a}_{tap}_cos"] = cs.astype(np.float32)
+            out[f"f{f}_cf{a}_means"] = means.astype(np.float32)
+            print(f"    [{alabel}] x{args.repeats}: " + "  ".join(
+                f"{tap} {means[:, t].mean():.4f}±{means[:, t].std():.4f}"
+                for t, (tap, _) in enumerate(taps)))
         out[f"f{f}_n_cf"] = np.array([len(alts)])
+        out["repeats"] = np.array([args.repeats])
 
     out["taps"] = np.array([n for n, _ in taps])
     out["tap_stage"] = np.array([s for _, s in taps])
