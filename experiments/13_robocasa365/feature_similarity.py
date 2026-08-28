@@ -260,11 +260,25 @@ def main() -> None:
             ds.load_point_cloud(ep, fr), ds.load_point_labels(ep, fr))
 
         batch = build_batch(ds, idx, max_action_dim, max_state_dim, "cuda")
-        with torch.no_grad():
-            model.compute_action(
-                points=batch["points"], npoints_in_batch=batch["npoints_in_batch"],
-                ctx_embeds=batch["ctx_embeds"], ctx_lens=batch["ctx_lens"],
-                states=batch["states"])
+
+        def forward(ctx_embeds, _b=batch):
+            # Seed immediately before every forward. Point.serialization picks its
+            # space-filling curve with torch.randperm when shuffle_orders is on, so two runs
+            # of the identical input land in different patches and produce features ~0.97
+            # cosine apart -- larger than the effect being measured. Seeding pins the
+            # permutation without changing the computation, so the control run comes back at
+            # exactly 1.0 and anything below it is the instruction.
+            torch.manual_seed(args.seed)
+            with torch.no_grad():
+                model.compute_action(
+                    points=_b["points"], npoints_in_batch=_b["npoints_in_batch"],
+                    ctx_embeds=ctx_embeds.unsqueeze(0).to("cuda") if ctx_embeds.dim() == 2
+                               else ctx_embeds,
+                    ctx_lens=torch.LongTensor([len(ctx_embeds)]).to("cuda")
+                             if ctx_embeds.dim() == 2 else _b["ctx_lens"],
+                    states=_b["states"])
+
+        forward(batch["ctx_embeds"])
 
         cloud = batch["points"].detach().float().cpu().numpy()
         xyz, rgb = cloud[:, :3].astype(np.float64), cloud[:, 3:6]
@@ -316,12 +330,7 @@ def main() -> None:
         alts = counterfactual_contexts(ds, ds._viz_task, args.swap_task)
         for a, (alabel, aembed) in enumerate(alts):
             grabbed.clear()
-            with torch.no_grad():
-                model.compute_action(
-                    points=batch["points"], npoints_in_batch=batch["npoints_in_batch"],
-                    ctx_embeds=aembed.unsqueeze(0).to("cuda"),
-                    ctx_lens=torch.LongTensor([len(aembed)]).to("cuda"),
-                    states=batch["states"])
+            forward(aembed)
             out[f"f{f}_cf{a}_label"] = np.array(alabel)
             for tap, _ in taps:
                 # Per-point cosine between the two runs' features. 1.0 to the last bit means
