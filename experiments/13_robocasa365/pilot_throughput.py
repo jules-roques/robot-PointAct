@@ -31,7 +31,7 @@ import yaml
 
 
 def build_pilot_config(base: Path, out_dir: Path, run_root: Path, context: str, npoints: int,
-                       steps: int) -> Path:
+                       steps: int, point_ca: bool = False) -> Path:
     """A run yaml for one pilot point: no checkpoints, no W&B, a handful of steps."""
     document = {
         "extends": str(base.resolve()),
@@ -52,7 +52,12 @@ def build_pilot_config(base: Path, out_dir: Path, run_root: Path, context: str, 
             # On $SCRATCH, never the node's /tmp: train.py always writes a final checkpoint,
             # and a vlm-arm checkpoint is ~7GB, which fills /tmp and kills the run at the very
             # end -- after all the timed work is done.
-            "output_dir": str(run_root / f"{context}-n{npoints}-s{steps}"),
+            "output_dir": str(run_root / f"{context}-n{npoints}-ca{int(point_ca)}-s{steps}"),
+            # The point branch of every CABlock. Off in every arm so far, so the
+            # cross-attention weights the checkpoints carry are trained by the 17 action
+            # tokens alone; turning it on routes the whole cloud through those same
+            # q/kv/proj and adds a norm + 4x MLP per block.
+            "ptv3_apply_point_ca": bool(point_ca),
         },
         "data": {"lerobot_datasets": [{"max_npoints": npoints}]},
     }
@@ -61,7 +66,7 @@ def build_pilot_config(base: Path, out_dir: Path, run_root: Path, context: str, 
         # cost being measured. Clearing text_context_file re-enables both.
         document["data"]["lerobot_datasets"][0]["text_context_file"] = None
 
-    path = out_dir / f"pilot-{context}-n{npoints}-s{steps}.yaml"
+    path = out_dir / f"pilot-{context}-n{npoints}-ca{int(point_ca)}-s{steps}.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False))
     return path
 
@@ -132,6 +137,9 @@ def main() -> None:
                         default=Path("experiments/13_robocasa365/runs/_base.yaml"))
     parser.add_argument("--contexts", nargs="+", default=["text_cache", "vlm"])
     parser.add_argument("--npoints", nargs="+", type=int, default=[2048, 4096, 8192])
+    parser.add_argument("--point-ca", nargs="+", default=["false"],
+                        choices=["false", "true"],
+                        help="values of ptv3_apply_point_ca to sweep (default: false only)")
     # Wide enough that the difference clears run-to-run startup noise. At 20/60 the
     # cheapest cell (n2048) produced a *negative* delta -- ~20s of node-to-node
     # variation swamped 40 steps of a sub-0.5s/step configuration.
@@ -155,15 +163,21 @@ def main() -> None:
     run_root = args.out.parent / "pilot_runs"
     with tempfile.TemporaryDirectory(prefix="pilot-") as tmp:
         tmp_dir = Path(tmp)
+        cas = [c == "true" for c in args.point_ca]
         for context in args.contexts:
             for npoints in args.npoints:
+              for point_ca in cas:
+                # Keep the historical label shape when the CA axis is not being swept, so a
+                # single-setting run stays comparable with the earlier pilot JSONs.
                 label = f"{context}/n{npoints}"
+                if len(cas) > 1:
+                    label += f"/ca={str(point_ca).lower()}"
                 print(f"[{label}]", flush=True)
                 try:
                     timings = {}
                     for steps in (args.short_steps, args.long_steps):
                         config = build_pilot_config(
-                            args.base, tmp_dir, run_root, context, npoints, steps
+                            args.base, tmp_dir, run_root, context, npoints, steps, point_ca
                         )
                         timings[steps] = run_one(
                             config, args.gpus, args.per_device_batch, accum, repo, log_dir
@@ -214,6 +228,14 @@ def report(results: dict, args) -> str:
         if vlm and cached:
             lines.append(f"  dropping the VLM at n={npoints}: {vlm / cached:.1f}x faster "
                          f"(the budget assumed 3x)")
+
+    for npoints in args.npoints:
+        for context in args.contexts:
+            off = hours.get(f"{context}/n{npoints}/ca=false")
+            on = hours.get(f"{context}/n{npoints}/ca=true")
+            if off and on:
+                lines.append(f"  ptv3_apply_point_ca at {context}/n={npoints}: "
+                             f"{on / off:.2f}x  (+{100 * (on / off - 1):.0f}% wall clock)")
 
     base = hours.get("text_cache/n4096")
     if base:
