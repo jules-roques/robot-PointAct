@@ -20,7 +20,10 @@
 # ca=true cell OOMs at 16, that is itself the answer -- a second pass at 8 then gives the
 # ratio at a batch both settings fit in.
 #
-# dev QoS: ~35 minutes of work, and dev turns around far faster than t3.
+# 40 and 200 steps, not 20 and 80: the difference is what gets divided, so a short window
+# makes every source of jitter a large fraction of the answer.
+#
+# dev QoS: ~30 minutes of work, and dev turns around far faster than t3.
 #
 #SBATCH --job-name=s7-ca-cost
 #SBATCH --account=rgx@h100
@@ -98,7 +101,7 @@ uv run --project "$POINTACT_ENV" --no-sync \
         --contexts text_cache --npoints 32768 \
         --point-ca false true \
         --per-device-batch 16 --effective-batch 128 \
-        --short-steps 20 --long-steps 80 \
+        --short-steps 40 --long-steps 200 \
         --out "$OUT/ca16.json" || true
 
 # Did the ca=true cell survive? Only fall back to a smaller batch if it did not -- the
@@ -112,7 +115,7 @@ if grep -q '"error"' "$OUT/ca16.json" 2>/dev/null || [ ! -s "$OUT/ca16.json" ]; 
             --contexts text_cache --npoints 32768 \
             --point-ca false true \
             --per-device-batch 8 --effective-batch 128 \
-            --short-steps 20 --long-steps 80 \
+            --short-steps 40 --long-steps 200 \
             --out "$OUT/ca8.json" || true
 fi
 

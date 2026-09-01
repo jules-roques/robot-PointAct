@@ -8,9 +8,17 @@ Method: each configuration is timed at two step counts and the *marginal* rate i
 
     steps/s = (n_long - n_short) / (runtime_long - runtime_short)
 
-which cancels process startup, model loading, dataloader warm-up and CUDA autotuning. The
-aggregate rate HF prints would fold all of that into a short run and flatter the cheap
-configurations.
+which cancels dataloader warm-up and CUDA autotuning. The aggregate rate HF prints would fold
+all of that into a short run and flatter the cheap configurations.
+
+`runtime` here is HF's `train_runtime` -- its own timer around the training loop -- not the
+process wall clock, which is what this script used until 2026-09-01. Wall clock also carries
+model loading and the final checkpoint write, and those are NOT stable enough to subtract: two
+runs of the same configuration on the same H100 node differed by ~20 s, a third of the 60-step
+window being measured. That made a strictly-more-expensive configuration finish its short run
+FASTER than a cheaper one, and reported a 1.4x cost ratio as 2.0x. Wall clock is kept as a
+fallback and printed alongside; a gap between the two columns means startup noise, and the
+train_runtime column is the one to read.
 
     bash experiments/13_robocasa365/pilot_throughput.sh          # via the SLURM wrapper
     python experiments/13_robocasa365/pilot_throughput.py --help
@@ -19,6 +27,7 @@ configurations.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -95,15 +104,24 @@ def first_error(blob: str, context: int = 12) -> str:
     return "\n".join(lines[-context:]) or "(no output)"
 
 
+TRAIN_RUNTIME = re.compile(r"train_runtime[\"']?\s*:\s*[\"']?([0-9.]+)")
+
+
 def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Path,
             log_dir: Path) -> dict:
-    """Launch one pilot run; return its wall-clock time.
+    """Launch one pilot run; return its wall-clock time AND HF's own training-loop time.
 
-    Timed end to end rather than scraped from HF's train_* metrics: those are logged through
-    the callback stack and simply do not appear on stdout under `report_to: []`, which is how
-    an earlier version of this script recorded six successful runs as failures. Wall clock is
-    also the honest quantity -- the marginal subtraction across two step counts removes
-    startup, model loading and the final checkpoint write, whatever HF chooses to print.
+    Both, because the marginal subtraction across two step counts only cancels startup if
+    startup is stable, and measured on H100 it is not: two cells of the SAME configuration
+    differed by ~20 s of model loading and CUDA autotuning, which is a third of the 60-step
+    difference being measured. That noise once made a strictly-more-expensive configuration
+    look CHEAPER at 20 steps than a cheaper one, and inflated a 1.4x ratio to 2.0x.
+
+    `train_runtime` is HF's own timer around the training loop, so it excludes startup, model
+    loading and the final checkpoint write by construction rather than by subtraction. It does
+    reach the log file under `report_to: []` -- an earlier version of this script looked for it
+    on stdout, did not find it, and concluded it was unavailable. Prefer it; keep wall clock as
+    the fallback and report both so a disagreement is visible rather than silent.
     """
     command = ["accelerate", "launch"]
     command += ["--multi_gpu", f"--num_processes={gpus}", "--num_machines=1", "--machine_rank=0"] \
@@ -125,10 +143,11 @@ def run_one(config: Path, gpus: int, per_device_batch: int, accum: int, repo: Pa
         result = subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, text=True)
     elapsed = time.monotonic() - started
 
+    blob = log_path.read_text(errors="replace")
     if result.returncode != 0:
-        blob = log_path.read_text(errors="replace")
         raise RuntimeError(f"{config.name} exited {result.returncode}:\n{first_error(blob)}")
-    return {"runtime": elapsed}
+    hits = TRAIN_RUNTIME.findall(blob)
+    return {"runtime": elapsed, "train_runtime": float(hits[-1]) if hits else None}
 
 
 def main() -> None:
@@ -181,15 +200,24 @@ def main() -> None:
                         )
                         timings[steps] = run_one(
                             config, args.gpus, args.per_device_batch, accum, repo, log_dir
-                        )["runtime"]
+                        )
                     delta_steps = args.long_steps - args.short_steps
-                    delta_time = timings[args.long_steps] - timings[args.short_steps]
+                    wall = {k: v["runtime"] for k, v in timings.items()}
+                    loop = {k: v["train_runtime"] for k, v in timings.items()}
+                    delta_wall = wall[args.long_steps] - wall[args.short_steps]
+                    have_loop = all(v is not None for v in loop.values())
+                    delta_time = (loop[args.long_steps] - loop[args.short_steps]
+                                  if have_loop else delta_wall)
+                    source = "train_runtime" if have_loop else "wall_clock"
                     if delta_time <= 0:
                         raise RuntimeError(f"non-positive time delta ({delta_time:.2f}s)")
                     results[label] = {
                         "steps_per_second": delta_steps / delta_time,
                         "seconds_per_step": delta_time / delta_steps,
-                        "runtimes": timings,
+                        "source": source,
+                        "seconds_per_step_wall": delta_wall / delta_steps,
+                        "runtimes": wall,
+                        "train_runtimes": loop,
                     }
                     print(f"    -> {results[label]['seconds_per_step']:.3f} s/step\n", flush=True)
                 except Exception as exc:  # noqa: BLE001 - one bad cell must not lose the rest
@@ -207,20 +235,27 @@ def main() -> None:
 def report(results: dict, args) -> str:
     """Seconds per step, projected 50K-step wall clock, and the two ratios that matter."""
     lines = ["", "=" * 74, "Throughput pilot (marginal rate, startup and warm-up excluded)", "=" * 74]
-    lines.append(f"{'config':>18s} | {'s/step':>8s} | {'50K steps':>10s} | {'GPU-hours':>10s}")
+    lines.append(f"{'config':>26s} | {'s/step':>8s} | {'wall':>8s} | {'50K steps':>10s} | {'GPU-h':>8s}")
     lines.append("-" * 74)
 
     hours = {}
     for label, entry in results.items():
         if "error" in entry:
-            lines.append(f"{label:>18s} | {'FAILED':>8s} | {'--':>10s} | {'--':>10s}")
+            lines.append(f"{label:>26s} | {'FAILED':>8s} | {'--':>8s} | {'--':>10s} | {'--':>8s}")
             continue
         wall_h = entry["seconds_per_step"] * 50_000 / 3600
         hours[label] = wall_h
+        w = entry.get("seconds_per_step_wall", entry["seconds_per_step"])
         lines.append(
-            f"{label:>18s} | {entry['seconds_per_step']:8.3f} | {wall_h:9.1f}h | "
-            f"{wall_h * args.gpus:9.1f}h"
+            f"{label:>26s} | {entry['seconds_per_step']:8.3f} | {w:8.3f} | {wall_h:9.1f}h | "
+            f"{wall_h * args.gpus:7.1f}h"
         )
+        # A large gap means startup noise is comparable to the quantity being measured; the
+        # train_runtime column is the one to trust, but the reader should know it happened.
+        if abs(w - entry["seconds_per_step"]) > 0.15 * entry["seconds_per_step"]:
+            lines.append(f"{'':>26s}   ^ wall-clock marginal disagrees by "
+                         f"{100 * (w / entry['seconds_per_step'] - 1):+.0f}% "
+                         f"(startup noise; using {entry.get('source', 'train_runtime')})")
 
     lines.append("")
     for npoints in args.npoints:
