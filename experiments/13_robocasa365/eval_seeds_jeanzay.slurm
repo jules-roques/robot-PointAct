@@ -19,8 +19,8 @@
 # historical default and is kept so stage-5 numbers can be compared against earlier stages at
 # that seed alone if that is ever wanted.
 #
-# A100 (rgx@a100, gpu_p5, qos_gpu_a100-t3): PTv3 uses FlashAttention so V100 is out, and
-# RoboCasa365 does not render correctly on H100.
+# A100 (rgx@a100, gpu_p5, qos_gpu_a100-t3): PTv3 uses FlashAttention so V100 is out. H100 runs
+# the sim identically (measured, see docs/clusters/cleps.md) and is a live option.
 #
 #SBATCH --job-name=evalseeds
 #SBATCH --account=rgx@a100

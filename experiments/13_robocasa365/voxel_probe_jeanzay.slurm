@@ -19,8 +19,8 @@
 # voxel_probe_report.py counts points near the eef and the run dirs can then be deleted.
 # Not a dataset build -- do not point convert.slurm at these.
 #
-# V100 like data_prep_replay_jeanzay.slurm: MuJoCo/EGL rendering, no model inference, and
-# RoboCasa365 sim misbehaves on H100. Rendering dominates, so runtime is ~independent of the
+# V100 like data_prep_replay_jeanzay.slurm: MuJoCo/EGL rendering, no model inference, and V100
+# has the shortest queue. Rendering dominates, so runtime is ~independent of the
 # voxel size; 5 episodes with --point-labels is ~2 h against the 4 h asked for here.
 #
 #SBATCH --job-name=voxelprobe

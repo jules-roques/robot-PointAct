@@ -15,8 +15,9 @@
 # duration curves are directly comparable point-to-point instead of changing precision
 # halfway along. Fixed at 100 from here on.
 #
-# A100, not V100: PTv3 uses FlashAttention (Ampere+) and V100 has no bf16. Not H100 either --
-# RoboCasa365 does not render correctly there. Available on both clusters; on Jean Zay use
+# A100, not V100: PTv3 uses FlashAttention (Ampere+) and V100 has no bf16. H100 is equally
+# valid for the sim (measured, see docs/clusters/cleps.md); A100 is kept here only because it
+# is what the campaign was run on. Available on both clusters; on Jean Zay use
 # eval_grid_jeanzay.slurm, whose account/QoS differ (rgx@a100, qos_gpu_a100-t3; note there is
 # no t4 QoS for a100).
 #

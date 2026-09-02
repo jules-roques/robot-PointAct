@@ -4,8 +4,9 @@
 #
 #   sbatch --export=ALL,RUN=od-eef-n4096-s0 experiments/13_robocasa365/eval_grid_jeanzay.slurm
 #
-# A100 (rgx@a100, gpu_p5, qos_gpu_a100-t3): PTv3 uses FlashAttention so V100 is out, and
-# RoboCasa365 does not render correctly on H100. Note there is no qos_gpu_a100-t4 -- a100 only
+# A100 (rgx@a100, gpu_p5, qos_gpu_a100-t3): PTv3 uses FlashAttention so V100 is out. H100 runs
+# the sim identically (measured, see docs/clusters/cleps.md) and its partition is far less
+# contended, so it is a live option. Note there is no qos_gpu_a100-t4 -- a100 only
 # has dev and t3, which is the likeliest cause of the "Invalid account/partition" once recorded
 # in docs/clusters/jean-zay.md.
 #

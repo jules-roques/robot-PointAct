@@ -15,8 +15,8 @@
 # SAME LMDB and serialises on its single write lock. Give each element its own
 # OUT_DIRNAME if you use it.
 #
-# H100 is fine here and A100 is not needed: this is pure torch inference with no MuJoCo, so
-# the "RoboCasa365 misbehaves on H100" constraint does not apply (docs/clusters/jean-zay.md).
+# H100 is fine here and A100 is not needed: this is pure torch inference with no MuJoCo.
+# (H100 is fine for the sim too -- measured, see docs/clusters/cleps.md.)
 #
 #SBATCH --job-name=molmocache
 #SBATCH --account=rgx@h100

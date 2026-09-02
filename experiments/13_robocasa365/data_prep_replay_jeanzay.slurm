@@ -4,8 +4,8 @@
 #   sbatch --export=ALL,TASK=TurnOnMicrowave experiments/13_robocasa365/data_prep_replay_jeanzay.slurm
 #
 # V100, deliberately: this stage does MuJoCo/EGL rendering and no model inference, so it needs
-# no Ampere features -- and RoboCasa365 sim misbehaves on H100 anyway. V100 is also the Jean Zay
-# tier with the shortest queue.
+# no Ampere features, and V100 is the Jean Zay tier with the shortest queue. (H100 renders the
+# sim identically -- measured, see docs/clusters/cleps.md -- so it is a valid fallback.)
 #
 # Sharded 8 ways as an array. ~500 episodes in a single 20h job is uncomfortably tight, and
 # the cache is one .npz + one .npy per episode (replay.py:episode_cache_path), so array tasks
