@@ -25,10 +25,11 @@
 #SBATCH --partition=gpu_p5
 #SBATCH --constraint=a100
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-# 32 = 4 concurrent pairs x the 8 cpus a single eval job asks for. Both node types have room
-# (A100 64 physical cores, H100 96).
-#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:8
+# A whole node's physical cores (gpu_p5 has 64, gpu_p6 96). The first sweep asked for 32 and
+# so hit its own CPU ceiling at K=4 while the GPU sat at 42% and 22 GB of 80 -- the allocation
+# was the limit, not the hardware.
+#SBATCH --cpus-per-task=64
 #SBATCH --hint=nomultithread
 #SBATCH --qos=qos_gpu_a100-dev
 #SBATCH --time=02:00:00
@@ -53,7 +54,7 @@ cd "$REPO"
 RUN="${RUN:-od-eef-n4096-s0}"
 CKPT_STEP="${CKPT_STEP:-50000}"
 TRIALS="${TRIALS:-8}"
-CONCURRENCY="${CONCURRENCY:-1 2 3 4}"
+CONCURRENCY="${CONCURRENCY:-1 2 4 8 16}"
 # Bounds the class of failure that cost this probe two 2 h jobs: the server dies on a config
 # error, the client then blocks forever on a port nobody is listening to, and `wait` hangs
 # until walltime. A pair that exceeds this is killed and the phase fails loudly.
@@ -100,11 +101,13 @@ fi
 
 echo "host=$(hostname) partition=${SLURM_JOB_PARTITION:-?} run=$RUN ckpt=$CKPT_STEP env=$ENV_NAME trials=$TRIALS"
 echo "text_context_file=${TEXT_CONTEXT_FILE:-<none>}"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+NGPU=$(nvidia-smi -L | wc -l)
+echo "gpus_on_node=$NGPU  cpus=${SLURM_CPUS_PER_TASK:-?}  (pairs are spread round-robin over them)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
 echo
 
 SUMMARY="$BENCH/summary.tsv"
-printf "K\tsec_per_trial\ttrials_per_h\tspeedup_vs_K1\twall_s\tpeak_mem_MiB\tmean_util_pct\n" > "$SUMMARY"
+printf "K\tper_gpu\tsec_per_trial\ttrials_per_h\tspeedup_vs_K1\twall_s\tpeak_mem_MiB\tmean_util_pct\n" > "$SUMMARY"
 BASE=""
 
 for K in $CONCURRENCY; do
@@ -122,6 +125,9 @@ for K in $CONCURRENCY; do
     # awk stamps each line with an epoch second; --args.verbose is what emits one line per
     # completed trial, and those stamps are the actual measurement.
     (
+      # Round-robin over the node's GPUs. Server and client inherit this, and they must share
+      # a GPU -- the client renders through EGL on the same device the policy runs on.
+      export CUDA_VISIBLE_DEVICES=$(( (i - 1) % NGPU ))
       SEED=7 NUM_TRIALS="$TRIALS" SAVE_SUFFIX="-k${K}-i${i}" \
         timeout "$PAIR_TIMEOUT" bash experiments/13_robocasa365/eval_robocasa365.sh \
           "$ENV_NAME" "$BENCH" "$CKPT_STEP" rot6d " --args.verbose" 2>&1 \
@@ -145,8 +151,13 @@ for K in $CONCURRENCY; do
 
   # Steady-state: median gap between consecutive completed trials, pooled over the K
   # instances. Excludes model load by construction -- only gaps between completions are used.
-  spt=$(cat "$BENCH"/k${K}_i*.log 2>/dev/null | awk -F'\t' '
-      $2 ~ /^\[[0-9]+\] success=/ { if (p) print $1-p; p=$1 }' | sort -n | \
+  # Two things this must get right, both learned the hard way:
+  #  - the match cannot be anchored: tqdm writes the progress bar to the same line, so a
+  #    completion reads "25%|##| 2/8 [01:03<03:01, 30.29s/it][3] success=True ...".
+  #  - deltas must be computed PER FILE. Concatenating the K logs makes the gap across a file
+  #    boundary the difference between two instances' clocks, which comes out negative.
+  spt=$(awk -F'\t' 'FNR==1{p=0} $2 ~ /\] success=/ { if (p) print $1-p; p=$1 }' \
+      "$BENCH"/k${K}_i*.log 2>/dev/null | sort -n | \
       awk '{a[NR]=$1} END{ if(NR==0){print 0; exit} print (NR%2)? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2 }')
 
   wall=$((t1 - t0))
@@ -156,7 +167,7 @@ for K in $CONCURRENCY; do
   mem=$(awk -F, 'NF>=2{gsub(/ /,"",$1); if($1+0>m) m=$1+0} END{print m+0}' "$SAMPLE" 2>/dev/null)
   utl=$(awk -F, 'NF>=2{gsub(/ /,"",$2); s+=$2; n++} END{printf "%.0f", (n>0)? s/n : 0}' "$SAMPLE" 2>/dev/null)
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$K" "$spt" "$tph" "$spd" "$wall" "$mem" "$utl" >> "$SUMMARY"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$K" "$(awk -v k=$K -v g=$NGPU 'BEGIN{printf "%.2f", k/g}')" "$spt" "$tph" "$spd" "$wall" "$mem" "$utl" >> "$SUMMARY"
   echo "  K=$K ok=$ok/$K  ${spt}s/trial/instance  ${tph} trials/h  ${spd}x  wall=${wall}s  mem=${mem}MiB  util=${utl}%"
   echo
 done
