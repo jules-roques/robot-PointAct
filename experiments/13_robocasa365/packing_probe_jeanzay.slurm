@@ -103,7 +103,9 @@ echo "host=$(hostname) partition=${SLURM_JOB_PARTITION:-?} run=$RUN ckpt=$CKPT_S
 echo "text_context_file=${TEXT_CONTEXT_FILE:-<none>}"
 NGPU=$(nvidia-smi -L | wc -l)
 echo "gpus_on_node=$NGPU  cpus=${SLURM_CPUS_PER_TASK:-?}  (pairs are spread round-robin over them)"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
+# -i 0 rather than `| head -1`: under `set -o pipefail` head closes the pipe, nvidia-smi takes
+# SIGPIPE, and the pipeline returns 141, which `set -e` turns into an instant job death.
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader -i 0
 echo
 
 SUMMARY="$BENCH/summary.tsv"
