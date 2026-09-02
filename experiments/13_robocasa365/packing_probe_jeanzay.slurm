@@ -34,6 +34,10 @@
 set -euo pipefail
 
 # arch module follows the partition, so one file serves both GPU tiers.
+# Unload first: --export=ALL carries whatever arch the submitting shell had, and loading a
+# second arch fails with "cannot be loaded due to a conflict" rather than replacing it. Do not
+# `module purge` -- ffmpeg's libav* must stay resolvable for torchcodec.
+module unload arch 2>/dev/null || true
 case "${SLURM_JOB_PARTITION:-}" in
   gpu_p6) module load arch/h100 ;;
   gpu_p5) module load arch/a100 ;;
@@ -52,9 +56,18 @@ SRC="${EXPRS_DIR:-$SCRATCH/PointAct_exprs/robocasa365/ablation}/$RUN"
 
 # Throwaway ckpt_dir: the eval script derives save_dir from it, and we must not write into the
 # real run's results/. Symlink rather than copy -- checkpoints are large.
+# Mirror every entry of the real run except results/, which must be a REAL directory here so
+# the probe's output cannot land in the run's own results (log_eval_to_wandb.py globs
+# results/checkpoint-*). data_config.yaml and training_args.json have to be present: the eval
+# script reads them to infer the point-sampling mode and aborts without them.
 BENCH="$SCRATCH/tmp/packprobe/$SLURM_JOB_ID/$RUN"
-mkdir -p "$BENCH"
-ln -sfn "$SRC/checkpoint-$CKPT_STEP" "$BENCH/checkpoint-$CKPT_STEP"
+mkdir -p "$BENCH/results"
+for entry in "$SRC"/*; do
+  name=$(basename "$entry")
+  [ "$name" = "results" ] && continue
+  ln -sfn "$entry" "$BENCH/$name"
+done
+test -e "$BENCH/checkpoint-$CKPT_STEP" || { echo "no checkpoint-$CKPT_STEP in $SRC"; exit 1; }
 
 echo "host=$(hostname) partition=${SLURM_JOB_PARTITION:-?} run=$RUN ckpt=$CKPT_STEP trials=$TRIALS"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -88,6 +101,13 @@ for K in $CONCURRENCY; do
   for p in "${pids[@]}"; do
     if wait "$p"; then ok=$((ok+1)); else echo "  [warn] one pair exited non-zero"; fi
   done
+  # A phase where nothing ran is a broken probe, not a measurement of zero throughput.
+  if [ "$ok" -eq 0 ]; then
+    echo "  [fatal] every pair failed at K=$K; first log follows:" >&2
+    tail -20 "$BENCH/k${K}_i1.log" >&2 || true
+    kill "$SMI_PID" 2>/dev/null || true
+    exit 1
+  fi
   t1=$(date +%s)
   kill "$SMI_PID" 2>/dev/null || true
 
