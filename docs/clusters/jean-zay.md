@@ -127,6 +127,26 @@ directly rather than going through `uv run`, which would look for a `.venv` in t
 directory. Pin heavyweight dependencies (torch) to the root env's exact version too — left
 to float, uv resolves the newest CUDA-13 build, which is both untested here and larger.
 
+## A fresh worktree has no `robot_data`, and eval needs it
+
+Dataset roots in a run's `data_config.yaml` are repo-relative
+(`robot_data/robocasa365/lerobot_point_lmdb`), and resolve through a `robot_data` symlink at
+the top of the checkout:
+
+```
+$WORK/code/robot-PointAct/robot_data -> $SCRATCH/datasets/robot_data
+```
+
+That symlink is gitignored, so `git worktree add` does not reproduce it. Any eval run from a
+fresh worktree — `eval_grid_jeanzay.slurm`, `eval_seeds_jeanzay.slurm`,
+`packing_probe_jeanzay.slurm` — resolves the text-context cache to a path that does not exist
+and dies in `torch.load` with a bare `FileNotFoundError`, minutes into the job and well after
+the checkpoint has loaded. Create it once per worktree:
+
+```bash
+ln -s $SCRATCH/datasets/robot_data <worktree>/robot_data
+```
+
 ## Storage lifetime
 
 `$SCRATCH` is purged after roughly 30 days without access. Training is the expensive,

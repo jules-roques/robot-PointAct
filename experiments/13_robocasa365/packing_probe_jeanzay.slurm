@@ -86,6 +86,18 @@ print(ds['repo_id'],
 EOF
 export TEXT_CONTEXT_FILE="$TEXT_CTX"
 
+# data_config roots are repo-relative ("robot_data/robocasa365/...") and resolve through a
+# `robot_data` symlink at the top of the checkout. That symlink is gitignored, so it exists in
+# the main checkout and is ABSENT in every fresh worktree -- which fails here as a
+# FileNotFoundError from torch.load, several minutes into the job. Check it up front instead.
+if [ -n "${TEXT_CONTEXT_FILE:-}" ] && [ ! -f "$TEXT_CONTEXT_FILE" ]; then
+  echo "ERROR: text context cache not found:" >&2
+  echo "  $TEXT_CONTEXT_FILE" >&2
+  echo "This checkout is missing the gitignored robot_data symlink. Create it with:" >&2
+  echo "  ln -s \$SCRATCH/datasets/robot_data $REPO/robot_data" >&2
+  exit 1
+fi
+
 echo "host=$(hostname) partition=${SLURM_JOB_PARTITION:-?} run=$RUN ckpt=$CKPT_STEP env=$ENV_NAME trials=$TRIALS"
 echo "text_context_file=${TEXT_CONTEXT_FILE:-<none>}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
