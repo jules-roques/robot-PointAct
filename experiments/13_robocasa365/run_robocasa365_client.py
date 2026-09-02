@@ -42,6 +42,16 @@ from pointact.utils.torch_utils import set_seed
 @dataclasses.dataclass
 class ClientArgs:
     seed: int = 7
+    # Draw each episode's scene from hash(seed, episode_idx) instead of letting one RNG
+    # stream run forward across resets. Two reasons, see the reset() call below:
+    #  - pairing: with a single stream, scene k depends on how many draws happened before
+    #    it, which depends on episode lengths, which depend on the policy. Two arms at the
+    #    same seed therefore diverge after trial 1 and are NOT evaluated on the same
+    #    scenes, so scene difficulty lands in the error bars instead of cancelling.
+    #  - shardability: scene i is then a pure function of (seed, i), so a run can be split
+    #    across jobs by trial index without shards silently replaying each other.
+    # Set False to reproduce a pre-2026-09-02 run exactly.
+    seed_per_episode: bool = True
     env_name: str = "OpenDrawer"  # any RoboCasa365 task in TASK_SET_REGISTRY["all_tasks"]
     split: str = "target"  # pretrain, target
     num_trials: int = 50  # rollouts (each with a freshly randomised scene)
@@ -329,6 +339,9 @@ def main(args: ClientArgs) -> None:
         with open(out, "w") as f:
             json.dump({
                 "seed": int(args.seed),
+                # Scene-selection regime. A pooled summary must not mix the two: at the
+                # same seed they are different scene sets.
+                "seed_per_episode": bool(args.seed_per_episode),
                 "env_name": args.env_name,
                 "num_trials": int(total_episodes),
                 "successes": int(total_successes),
@@ -351,9 +364,17 @@ def main(args: ClientArgs) -> None:
     import collections
 
     for episode_idx in tqdm.tqdm(range(args.num_trials)):
-        # Each reset re-randomises the scene. TODO(verify): reseeding per trial for
-        # reproducible-yet-varied scenes may need explicit env support.
-        obs, _ = env.reset()
+        # RoboCasa365Env.reset(seed=...) reseeds the scene RNG (environments.py), so the scene
+        # is a pure function of (args.seed, episode_idx) rather than of everything the stream
+        # drew before it. SeedSequence hashes the pair: a plain args.seed + episode_idx would
+        # make shards collide -- eval_seeds_jeanzay.slurm pools seeds 7/11/13/17/19 at 100
+        # trials each, so additive seeds would overlap on ~113 distinct scenes instead of 500.
+        episode_seed = (
+            int(np.random.SeedSequence([args.seed, episode_idx]).generate_state(1)[0])
+            if args.seed_per_episode
+            else None
+        )
+        obs, _ = env.reset(seed=episode_seed)
         # Geom ids do not survive a scene re-randomisation, so re-resolve them every trial.
         if geom_targets is not None:
             geom_targets.reset(env)
