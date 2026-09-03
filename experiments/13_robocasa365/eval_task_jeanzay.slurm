@@ -85,7 +85,7 @@ cd "$REPO"
 
 RUNS="${RUNS:?set RUNS=\"run-a run-b ...\" (all on the SAME task) via --export}"
 EXPRS_DIR="${EXPRS_DIR:-$SCRATCH/PointAct_exprs/robocasa365/stage5}"
-read -r -a STEPS <<< "${EVAL_STEPS:-10000 20000 30000 40000 50000}"
+read -r -a STEPS <<< "${EVAL_STEPS:-5000 10000 15000 20000 25000 30000}"
 read -r -a SEEDS <<< "${EVAL_SEEDS:-7 11 13 17 19}"
 NUM_TRIALS="${NUM_TRIALS:-100}"
 CONCURRENCY="${CONCURRENCY:-16}"
@@ -97,6 +97,23 @@ EST_PAIR_S=$(( NUM_TRIALS * SEC_PER_TRIAL ))
 # Bounds the failure that cost the packing probe two full jobs: the server dies on a config
 # error and the client then blocks forever on a port nobody listens to.
 PAIR_TIMEOUT="${PAIR_TIMEOUT:-$(( EST_PAIR_S * 2 ))}"
+
+# SAVE_SUFFIX redirects results to <ckpt_dir>/results/checkpoint-<step><SUFFIX>/ instead of the
+# canonical directory. This is THE way to smoke-test the harness against real checkpoints: both
+# pooling consumers take the trailing "-"-separated token of the directory name and skip the
+# directory unless it is all digits (log_eval_to_wandb.py's int() raises; summarize_stage_a.py's
+# isdigit() is false), so `-smoke` output cannot reach a real success rate.
+#
+# Which makes a numeric suffix actively dangerous: SAVE_SUFFIX=-2 yields "checkpoint-30000-2",
+# whose trailing token IS a digit, so it gets pooled -- as step 2. Refuse that outright.
+SAVE_SUFFIX="${SAVE_SUFFIX:-}"
+if [ -n "$SAVE_SUFFIX" ] && [ "${SAVE_SUFFIX##*-}" -eq "${SAVE_SUFFIX##*-}" ] 2>/dev/null; then
+  echo "ERROR: SAVE_SUFFIX='$SAVE_SUFFIX' ends in a number, so results/checkpoint-<step>$SAVE_SUFFIX" >&2
+  echo "  would be pooled as if it were checkpoint <the trailing number>. Use a suffix whose" >&2
+  echo "  last '-'-separated token is not a digit, e.g. -smoke." >&2
+  exit 1
+fi
+export SAVE_SUFFIX
 
 LOGDIR="$SCRATCH/logs/robocasa365/evaltask-${SLURM_JOB_ID:-manual}"
 mkdir -p "$LOGDIR"
@@ -112,6 +129,7 @@ GPUNAME=$(nvidia-smi --query-gpu=name --format=csv,noheader -i 0)
 echo "host=$(hostname) partition=${SLURM_JOB_PARTITION:-?} gpus=$NGPU ($GPUNAME) cpus=${SLURM_CPUS_PER_TASK:-?}"
 echo "runs=$RUNS"
 echo "steps=${STEPS[*]}  seeds=${SEEDS[*]}  trials=$NUM_TRIALS  concurrency=$CONCURRENCY"
+[ -n "$SAVE_SUFFIX" ] && echo "save_suffix=$SAVE_SUFFIX  (results land beside, and OUT of, the real ones)"
 echo "logs=$LOGDIR"
 echo
 
@@ -179,7 +197,7 @@ EOF
       # Idempotency, and the reason a timed-out job can simply be resubmitted. The check globs
       # _n*.json rather than _n$NUM_TRIALS.json because episodes the simulator could not
       # present are skipped, so the final count can legitimately be below num_trials.
-      if compgen -G "$ckpt_dir/results/checkpoint-$step/per_trial_seed${seed}_n*.json" > /dev/null; then
+      if compgen -G "$ckpt_dir/results/checkpoint-${step}${SAVE_SUFFIX}/per_trial_seed${seed}_n*.json" > /dev/null; then
         n_skip_done=$(( n_skip_done + 1 ))
         continue
       fi
@@ -255,7 +273,7 @@ worker() {
 
     # Judged by the ARTIFACT, not the exit code: a pair can exit 0 having written nothing
     # poolable, and that is precisely the failure an array's exit codes would have hidden.
-    if compgen -G "$ckpt_dir/results/checkpoint-$step/per_trial_seed${seed}_n*.json" > /dev/null; then
+    if compgen -G "$ckpt_dir/results/checkpoint-${step}${SAVE_SUFFIX}/per_trial_seed${seed}_n*.json" > /dev/null; then
       printf 'OK\t%s\trc=%s\n' "$tag" "$rc" >> "$STATUS"
       echo "[w$w] done  $tag (rc=$rc)"
     else
