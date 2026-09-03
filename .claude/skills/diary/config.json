@@ -1,0 +1,6 @@
+{
+  "_comment": "doc_id is filled in on first use of /diary <url>. No secrets here -- the service account key stays in ~/.config/gspread/.",
+  "doc_id": "1oQQezn-xERHMTyTGVgYuGwgJhFe1dqyIZB-0Mt4-zkA",
+  "sheet": "1-o0Eboh7hDgSIIgSin1l2ymLxuWBrGhk-m41gmtKbdA",
+  "tab": "PointACT"
+}

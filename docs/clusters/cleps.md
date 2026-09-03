@@ -56,6 +56,34 @@ rendering failure.
 Scope: the sim/rendering path (replay and, by the same code, rollouts), on CLEPS with the
 current env.
 
+## RoboCasa365 across GPU generations
+
+**The simulator produces identical output on H100 and V100** (measured 2026-08-17), so
+GPU generation is not a constraint on sim work — pick on availability and cost.
+
+The test replayed OpenDrawer episodes 0–2 at `--seed 7` on an H100 NVL (`gpu016`,
+job 5189524) and on a V100 as control (`gpu001`, job 5189525), same `envs/robocasa365`
+env and `MUJOCO_GL=egl`, then diffed the caches:
+
+| Quantity | H100 vs V100 |
+|---|---|
+| `observation_state`, `action`, `next_reward` | bit-identical (max abs diff 0) |
+| Episode lengths, success flags | identical (319/220/211, all success) |
+| Point-cloud `xyz`, all 14.2M points | bit-identical (max abs diff 0) |
+| Point-cloud `rgb` | ≤ 1/255 on a few points |
+| Camera images | ≤ 1 grey level on ≤ 0.012% of pixels |
+
+The residual is 8-bit rasterisation rounding, not a simulation difference. H100 was also
+**24% faster** (2m33s vs 3m22s for the three episodes).
+
+One thing that looks alarming and is not: MuJoCo's EGL context throws
+`OpenGL.raw.EGL._errors.EGLError` from `Renderer.__del__` at interpreter shutdown. It is
+noisy but harmless and appears on every GPU type — a PyOpenGL teardown quirk, not a
+rendering failure.
+
+Scope: the sim/rendering path (replay and, by the same code, rollouts), on CLEPS with the
+current env.
+
 ## Migrating from Jean Zay
 
 Code arrives via `git clone`. Datasets, LMDB caches and model weights do not — they live

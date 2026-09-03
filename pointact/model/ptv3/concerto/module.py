@@ -20,11 +20,11 @@ Please cite our work if the code is helpful to you.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import sys
-import torch.nn as nn
-import spconv.pytorch as spconv
 from collections import OrderedDict
+
+import spconv.pytorch as spconv
+import torch.nn as nn
 
 from .structure import Point
 
@@ -96,9 +96,7 @@ class PointSequential(PointModule):
                 if isinstance(input, Point):
                     input.feat = module(input.feat)
                     if "sparse_conv_feat" in input.keys():
-                        input.sparse_conv_feat = input.sparse_conv_feat.replace_feature(
-                            input.feat
-                        )
+                        input.sparse_conv_feat = input.sparse_conv_feat.replace_feature(input.feat)
                 elif isinstance(input, spconv.SparseConvTensor):
                     if input.indices.shape[0] != 0:
                         input = input.replace_feature(module(input.features))
