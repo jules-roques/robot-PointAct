@@ -329,6 +329,23 @@ access**, so anything worth keeping must be copied off it:
 - **Intermediate checkpoints** stay on SCRATCH; they exist for resume and are regenerable, so
   let the purge reclaim them.
 
+## Analysis and pre-flight helpers
+
+Small scripts that belong to the campaign rather than to any one stage. The two pre-flight
+checks exist because both failures they guard against actually happened, and both cost a
+node-day before anyone noticed.
+
+| Script | What it does |
+|---|---|
+| `pool_eval_results.py` | Pools `per_trial_seed*_n*.json` per arm under a root, with Wilson CIs, as JSON. Raises on a duplicate seed or a mixed `env_name` inside one arm. |
+| `summarize_stage_a.py` | Renders the stage-A point-count × sampling table for the gate mail. Name-parsed, fixed task list — use `pool_eval_results.py` for anything else. |
+| `verify_arm_derivation.sh` | **Pre-flight.** Replays the eval's arm-identity derivation over archived `data_config.yaml`s offline, so an arm about to be scored as the *wrong* arm is caught in a second. |
+| `check_oracle_gt.py` | **Pre-flight.** Confirms each oracle arm's geom key exists in `target_positions.npz`. A missing key otherwise fails per-sample inside the dataloader pool, with a traceback naming the pickle machinery. |
+| `submit_stage1_reeval.sh` | Re-scores existing checkpoints with a given seed set (no training), setting legacy result files aside so protocols cannot silently pool. |
+
+Never re-run a seed an arm already has — the scene stream is seed-deterministic, so it replays
+the same kitchens and buys no information. To raise `n`, add *new* seeds and pool.
+
 ## Decisions (resolved)
 
 - **`is_delta_action` = False (absolute eef)** — baked into the checkpoint
