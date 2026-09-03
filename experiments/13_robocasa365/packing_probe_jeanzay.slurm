@@ -9,7 +9,11 @@
 # Submit (from a login shell, so `module` and $DSDIR exist -- see docs/clusters/jean-zay.md):
 #   A100:  sbatch experiments/13_robocasa365/packing_probe_jeanzay.slurm
 #   H100:  sbatch --account=rgx@h100 --partition=gpu_p6 --constraint=h100 \
-#            --qos=qos_gpu_h100-dev experiments/13_robocasa365/packing_probe_jeanzay.slurm
+#            --gres=gpu:4 --cpus-per-task=96 --qos=qos_gpu_h100-dev \
+#            experiments/13_robocasa365/packing_probe_jeanzay.slurm
+#
+# The gres/cpu overrides are not optional: a gpu_p6 node is 4 GPUs and 96 cores against
+# gpu_p5's 8 and 64, and the SBATCH defaults in this file are the gpu_p5 shape.
 #
 # The headline metric is STEADY-STATE seconds per trial, taken from timestamps on the client's
 # own per-trial lines, not from end-to-end wall. Model load is a fixed ~1-2 min that a short

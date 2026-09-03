@@ -310,6 +310,63 @@ alone (the single `left` VLM view), which starves the PTv3 backbone and collapse
 The server already applies `pred_rot_type` and the absolute-position offset, so the client
 steps the returned 13-D action directly.
 
+### One node-job per task, not one job per (checkpoint, seed)
+
+`eval_grid_jeanzay.slurm` (array over checkpoints) and `eval_seeds_jeanzay.slurm` (array over
+seeds) each run **one** eval pair per 1-GPU job, so a 5-checkpoint x 5-seed grid is 25 jobs
+that queue independently for ~1 h of work each. Eval is simulator-bound rather than GPU-bound,
+so that leaves almost a whole node idle per job. Measured on a full node
+(`packing_probe_jeanzay.slurm`, 2026-09-02):
+
+| K concurrent pairs | A100 node (8 GPU, 64 cores) | H100 node (4 GPU, 96 cores) |
+|---|---|---|
+| 1 | 28 s/trial, 1.00x | 29 s/trial, 1.00x |
+| 4 | 30 s, 3.73x | 30 s, 3.87x |
+| 8 | 31 s, 7.22x | 33 s, 7.03x |
+| 16 | 36 s, **12.44x**, 1600 trials/h | 35 s, **13.26x**, 1646 trials/h |
+
+Nothing was saturated at K=16 (11-23 GB of 80 per GPU, 14-36% utilisation); the ceiling is
+above 16 and was never found. Node throughput is the same on both tiers because the bottleneck
+is CPU/MuJoCo/EGL, so **pick the tier on queue depth, not throughput** — which is why the packed
+harness defaults to `gpu_p6`. It also means `--cpus-per-task=8` per eval, as the array scripts
+ask for, is over-provisioned 2-4x.
+
+`eval_task_jeanzay.slurm` packs one task's whole grid into a single node-job:
+
+```bash
+# One task, every arm x every checkpoint x every seed, 16 pairs at a time:
+sbatch --export=ALL,RUNS="od-uniform-n8192-s0 od-eef-n8192-s0" \
+       experiments/13_robocasa365/eval_task_jeanzay.slurm
+
+# Smoke it first (2 trials, 2 pairs, dev QoS) -- always do this for a new grid:
+sbatch --qos=qos_gpu_h100-dev --time=00:30:00 \
+       --export=ALL,RUNS=od-eef-n8192-s0,EVAL_STEPS=50000,EVAL_SEEDS=7,NUM_TRIALS=2,CONCURRENCY=1 \
+       experiments/13_robocasa365/eval_task_jeanzay.slurm
+```
+
+**One job per task, enforced.** All `RUNS` must train on the same task or the job refuses to
+start. Wall-clock is dominated by episode *length* (OpenDrawer ~1h00-1h12 per 100 trials,
+TurnOnMicrowave ~42 min), so only a per-task job has a runtime anyone can size; a mixed job also
+puts the whole campaign in one walltime's blast radius.
+
+Packing does not mix up the outputs, because none of them are keyed by job: ports self-negotiate,
+results stay content-addressed at `<ckpt_dir>/results/checkpoint-<step>/per_trial_seed<S>_n<N>.json`
+(the glob `summarize_stage_a.py` and `log_eval_to_wandb.py` already pool over), and each pair's
+stdout goes to its own file under `$SCRATCH/logs/robocasa365/evaltask-<jobid>/`.
+
+What it has to replace, versus an array:
+
+- **Per-element exit codes.** The end-of-job report judges each pair by whether its final JSON
+  *exists*, not by its exit code — a pair can exit 0 having written nothing, which is exactly the
+  failure an array's exit codes hide.
+- **All-or-nothing walltime.** A pair that cannot finish in the time left is not started (a
+  killed client's partial dump is deliberately named outside the pooling glob, so it would
+  contribute nothing), and any pair that already has its final JSON is skipped. The job is
+  therefore **idempotent**: resubmit the identical command to finish a grid that ran out of time.
+
+MolmoPoint arms are rejected up front — the arm was dropped, and its third process is not sized
+for here.
+
 ## Storing results
 
 Run outputs live on `$SCRATCH` (fast, large) but SCRATCH is **purged after ~30 days of no

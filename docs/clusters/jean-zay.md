@@ -25,6 +25,29 @@ Note there is **no `t4` QoS on a100**, unlike h100 — asking for one is the lik
 of the earlier `Invalid account/partition` rejection recorded here. Always pass an explicit
 `--qos` from the list above.
 
+## Node shapes, and asking for a whole one
+
+| Partition | GPUs per node | Physical cores per node | Full-node request |
+|---|---|---|---|
+| `gpu_p5` (A100) | 8 | 64 | `--gres=gpu:8 --cpus-per-task=64` |
+| `gpu_p6` (H100) | 4 | 96 | `--gres=gpu:4 --cpus-per-task=96` |
+
+The two shapes differ in both dimensions, so a script written for one partition is the *wrong*
+request on the other — moving a job from `gpu_p5` to `gpu_p6` needs `--gres` and
+`--cpus-per-task` overridden, not just the account/partition/QoS trio.
+
+Ask for the cores. A packing sweep that requested 32 cores on a 64-core node hit its own CPU
+ceiling at 4 concurrent processes while the GPUs sat at 42% and 22 GB of 80 — the allocation was
+the limit, not the hardware. Add `--hint=nomultithread` so the count means physical cores.
+
+**Simulator work packs, and a whole node is worth having for it.** RoboCasa365 eval is
+CPU/MuJoCo/EGL-bound, not GPU-bound: 16 concurrent policy-server + sim-client pairs on one node
+run at 12.4x (A100) / 13.3x (H100) the throughput of a single pair, ~1600 trials/h either way,
+with GPU memory at 11-23 GB of 80 and utilisation at 14-36%. Node throughput being equal across
+the two tiers means **the tier is a queue-depth decision, not a throughput one** — and `gpu_p6`
+is far less contended (~0.9:1 pending:running over 364 nodes, against `gpu_p5`'s ~3.4:1 over
+~52). Measured 2026-09-02; see `experiments/13_robocasa365/packing_probe_jeanzay.slurm`.
+
 ## Which GPU for which job
 
 The constraints pull in opposite directions, so this is worth stating explicitly:
