@@ -154,6 +154,79 @@ hard-to-reproduce half, so final checkpoints (weights + config + normalization s
 get tarred to `$STORE` by `experiments/13_robocasa365/archive_run.sh`. Evaluation
 results are deliberately not archived — they are cheap to regenerate.
 
+## Filesystems: inodes are the binding constraint, not bytes
+
+Measured 2026-08-12 with `idr_quota_user`:
+
+| | storage | inodes |
+|---|---|---|
+| `$HOME` | 3 GiB — tiny | 150k |
+| `$WORK` | 5 TiB, ~7% used | **500k, and it fills long before the bytes do** |
+| `$SCRATCH` | effectively unlimited, purged | no quota |
+| `$STORE` | 50 TiB | 100k — tarballs only |
+
+`$WORK` reached 98.9% of its inode quota at 7% of its storage quota. Anything that costs
+*files* rather than *bytes* — package caches, unpacked wheels, asset trees, compiled
+kernel caches — does not belong there. The rule that follows:
+
+- **Regenerable and file-heavy → `$SCRATCH`.** `UV_CACHE_DIR` alone was 206,665 files
+  (41% of the whole `$WORK` budget) for 37 G. Also `PIP_CACHE_DIR`, `TRITON_CACHE_DIR`,
+  `WANDB_CACHE_DIR`, `HF_DATASETS_CACHE`.
+- **Unrebuildable from a compute node → `$WORK`.** Model weights (`HF_HOME`, `TORCH_HOME`)
+  are a handful of files for many gigabytes, and a compute node has no internet to
+  refetch them. Same for `UV_PYTHON_INSTALL_DIR`: every venv's `pyvenv.cfg` points into
+  it, so a purge there breaks every environment with a confusing error.
+- **Per-job scratch space → `$JOBSCRATCH`**, node-local and deleted at job end. The right
+  home for a compile cache in a multi-node run, at the price of a cold compile per job.
+
+These live in `~/.config/jz_env.sh`, sourced from **both** `~/.bashrc` and `~/.zshrc`.
+Putting them in `.zshrc` alone silently fails: a `#!/bin/bash` batch script reads no rc
+file at all and inherits its environment from whatever shell ran `sbatch`, so anything
+submitted over `ssh <host> '...'` got no cache variables and fell back to `$HOME/.cache`
+— which then hit the 3 GiB quota and killed jobs with `Disk quota exceeded` from `uv`.
+
+## Venvs: hardlinks, and how to move one
+
+`uv` populates a venv by **hardlinking out of its cache when both sit on the same
+filesystem** — 45k of the PointAct venv's 52k files had `nlink=2`. Quota counts inodes,
+not directory entries, so a venv next to its cache is nearly free. Two consequences:
+
+- Moving `UV_CACHE_DIR` alone, leaving the venv behind, is a pessimisation: uv falls back
+  to copying and the venv grows its own tens of thousands of inodes. Move both or neither.
+- Deleting a cache does not free inodes still hardlinked from a venv elsewhere. Retire the
+  venv first, then the cache. Miss one and its files simply drop to `nlink=1` and stay
+  charged — the space is not lost, but the deletion buys nothing until that venv moves too.
+
+Find *every* venv before touching the cache. This repo has two, and the second one sits
+four levels down, so the obvious `find -maxdepth 3 -name pyvenv.cfg` misses it:
+
+```sh
+find $WORK -name pyvenv.cfg -not -path '*/lib/*'
+```
+
+To relocate a venv, **copy it and leave a symlink behind** rather than rebuilding it:
+
+```sh
+cp -a $WORK/code/robot-PointAct/.venv $SCRATCH/venvs/robot-PointAct
+rm -rf $WORK/code/robot-PointAct/.venv
+ln -s $SCRATCH/venvs/robot-PointAct $WORK/code/robot-PointAct/.venv
+```
+
+The absolute shebangs baked into `bin/` still resolve through the symlink, and `uv run
+--project` accepts a symlinked `.venv` and leaves it in place. Rebuilding with `uv sync`
+instead is the risky option: the PointAct env carries `spconv-cu120` without the rest of
+the `cuda` extra, so a clean sync does *not* reproduce it.
+
+A venv on `$SCRATCH` is purgeable, so tar it to `$STORE` — one inode, and restoring it
+needs no internet.
+
+The same copy-and-symlink works for the conda base at `$WORK/miniforge3` (27,899 entries,
+over half of it the `pkgs/` package cache). Note that its `envs/` is **empty on Jean Zay**:
+the `$HOME/miniforge3/envs/ffmpeg-libs/lib` that `train.slurm`, `data_prep_*.slurm` and
+`eval_robocasa365.sh` prepend to `LD_LIBRARY_PATH` is a CLEPS-ism (see `docs/clusters/cleps.md`
+— no ffmpeg module there). A missing `LD_LIBRARY_PATH` entry is silently ignored, so those
+lines are dead here rather than broken.
+
 ## Camera calibration (RoboCasa datasets)
 
 Intrinsics and extrinsics are **not stored in the dataset**. Recover them from a
