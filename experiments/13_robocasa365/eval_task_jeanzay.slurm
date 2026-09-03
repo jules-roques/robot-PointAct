@@ -50,6 +50,14 @@
 # beat the eef-centred Gaussian) and it carries a third process on a second port, which this
 # harness neither sizes walltime nor packing for.
 #
+# SMOKE-TESTED 2026-09-03, job 1710372 on gpu_p6 (4 H100, 96 cores): 4 pairs (2 arms x 2 seeds)
+# x 2 trials on s5-od-*-n8192-s0 at checkpoint-30000, 4 ok / 0 failed in 2 min 33 s wall.
+# Verified afterwards that every result landed in results/checkpoint-30000-smoke/, that the
+# canonical checkpoint-30000/ files were untouched (still their August mtimes), that the pooling
+# skips the -smoke directory while still reporting the real 371/500 and 358/500, and that the
+# written records carry seed_per_episode=true. Do this before every new grid -- it is 3 minutes
+# on the dev QoS against the 5 failed submissions and two burned 2 h jobs it would have caught.
+#
 #SBATCH --job-name=evaltask
 #SBATCH --account=rgx@h100
 #SBATCH --partition=gpu_p6
@@ -114,6 +122,12 @@ if [ -n "$SAVE_SUFFIX" ] && [ "${SAVE_SUFFIX##*-}" -eq "${SAVE_SUFFIX##*-}" ] 2>
   exit 1
 fi
 export SAVE_SUFFIX
+
+# --args.verbose by default: it makes the client print one line per completed trial, which is
+# the only way to see progress inside a pair's log during a multi-hour packed job, and the
+# timestamps on those lines are what the packing probe measured throughput from. Override OPTS
+# to change it; it costs a line per trial.
+OPTS="${OPTS:- --args.verbose}"
 
 LOGDIR="$SCRATCH/logs/robocasa365/evaltask-${SLURM_JOB_ID:-manual}"
 mkdir -p "$LOGDIR"
