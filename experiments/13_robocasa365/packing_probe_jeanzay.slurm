@@ -20,6 +20,24 @@
 # Results go under $SCRATCH/tmp/packprobe, NOT the run's own results/: log_eval_to_wandb.py
 # globs results/checkpoint-*, so a probe writing there would be pooled into real success rates.
 #
+# MEASURED 2026-09-02 (od-eef-n4096-s0, OpenDrawer, checkpoint-50000, 8 trials/phase):
+#
+#   K   A100 node (8 GPU, 64 cores)      H100 node (4 GPU, 96 cores)
+#   1   28 s/trial   1.00x               29 s/trial   1.00x
+#   4   30 s         3.73x               30 s         3.87x
+#   8   31 s         7.22x               33 s         7.03x
+#   16  36 s        12.44x  1600 tr/h    35 s        13.26x  1646 tr/h
+#
+# At K=16 that is 2 pairs per A100 GPU and 4 per H100 GPU, and nothing was saturated: 11 GB
+# and 22.7 GB of 80 per GPU, utilisation 14% and 36%. The ceiling is above 16 on both and was
+# never found. Node throughput is the same on both tiers because the work is CPU/simulator-
+# bound, not GPU-bound -- so pick the tier on queue depth, not on throughput.
+#
+# Consequence: `--cpus-per-task=8` per eval is over-provisioned 2-4x (at K=16 each pair had 4
+# cores on A100, 6 on H100, and scaling was still near-linear), and stage 5's whole grid --
+# 5 checkpoints x 5 seeds x 100 trials = 2500 rollouts, today 25 separately queued array jobs
+# of ~1 h -- is ~1.5 h in ONE node-job, inside the 2 h qos_gpu_h100-dev ceiling.
+#
 #SBATCH --job-name=packprobe
 #SBATCH --account=rgx@a100
 #SBATCH --partition=gpu_p5
