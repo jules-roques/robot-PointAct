@@ -1,0 +1,42 @@
+# OpenDrawer / eef / 16384 points, 50K steps -- stage 7.
+# EEF-density sampling: a Gaussian-with-floor density centred on the frame's own
+# end-effector position. No cache and no privileged information -- the deployable arm.
+#
+# Stage 7 re-runs the point-budget axis on Utonia. Stage 1 measured it on Concerto, which
+# pretrains at a 2 cm grid against the 1 cm this pipeline voxelises and feeds, so its
+# numbers are not the ones to quote for "how many points does a point policy need?".
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: eef
+  npoints: 16384
+  context: text_cache
+  seed: 0
+  stage: "Stage 7: Point budget x sampler (Utonia)"
+
+train:
+  max_steps: 50000
+  # run_name is derived from `meta` alone, so without these two the stage-1 arms at 2048 /
+  # 4096 / 8192 would resolve to the SAME deterministic output_dir as their stage-7
+  # counterparts -- and the trainer resumes from whatever checkpoints it finds there, so a
+  # fresh Utonia arm would silently continue a finished Concerto run and report success.
+  # Stated explicitly rather than hoping the coordinates differ.
+  run_name: s7-od-eef-n16384-s0
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage7
+
+  # ~16K stage-0 tokens per sample at this budget; 32 does not fit in 80 GB. effective_batch
+  # stays 128 (gradient accumulation absorbs the change), which is what makes this arm
+  # comparable to the rest of the grid. If it still OOMs, resubmit at 8 -- the run
+  # auto-resumes from output_dir.
+  per_device_train_batch_size: 16
+
+data:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 16384
+      eef_sampling: true
+      eef_sampling_sigma: 0.08
+      eef_sampling_floor: 0.05
