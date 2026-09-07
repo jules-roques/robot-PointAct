@@ -26,8 +26,9 @@ git submodule update --init envs/robocasa365/robocasa
 ```
 
 The pinned revision (`robocasa365_release` branch) is enforced by the submodule; the working
-copy must not drift from it. `pointact/robot_envs/robocasa365_utils/environments.py` depends
-on the release-branch registry API. Move the pointer deliberately:
+copy must not drift from it, **except for the patches in `patches/`, which are required** — see
+step 5. `pointact/robot_envs/robocasa365_utils/environments.py` depends on the release-branch
+registry API. Move the pointer deliberately:
 
 ```bash
 git -C envs/robocasa365/robocasa fetch
@@ -72,6 +73,22 @@ The `objaverse`, `aigen_objs`, textures and generative-texture packs come from t
 `robocasa/robocasa-assets` repo. The two `lightwheel` packs point at NVIDIA repos and 404 on
 the release branch (renamed/unavailable upstream); they are skipped and are not needed unless
 a task uses lightwheel assets.
+
+### 5. Apply the required patches
+
+```bash
+envs/robocasa365/patches/apply.sh          # add --check to also run the regression tests
+```
+
+Two upstream bugs in `sample_kitchen_object_helper` raise
+`ValueError: Probabilities contain NaN` at a *random* trial, so a 500-rollout eval can get 400
+trials in and lose the whole job. One is triggered by how the `aigen_objs` pack extracts, the
+other by `split="target"`, which every eval here uses. `patches/README.md` has the detail.
+
+The script is idempotent, but the patches are **not** carried by git — the submodule is pinned,
+so they live as patch files. Re-run it after every `git submodule update`, after a fresh clone,
+and **in every new worktree**: a worktree gets its own submodule working copy, so an unpatched
+one crashes exactly where a patched checkout does not.
 
 ## Datasets
 

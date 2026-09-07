@@ -1,0 +1,112 @@
+diff --git a/robocasa/models/objects/kitchen_object_utils.py b/robocasa/models/objects/kitchen_object_utils.py
+index a4b09e0..d37add2 100644
+--- a/robocasa/models/objects/kitchen_object_utils.py
++++ b/robocasa/models/objects/kitchen_object_utils.py
+@@ -297,6 +297,9 @@ def sample_kitchen_object(
+     return mjcf_kwargs, info
+ 
+ 
++_EMPTY_CATEGORIES_REPORTED = set()
++
++
+ def sample_kitchen_object_helper(
+     groups,
+     exclude_groups=None,
+@@ -406,8 +409,19 @@ def sample_kitchen_object_helper(
+                     continue
+ 
+                 # don't include if category not represented in any registry
++                # NOTE(jr): the original test asked only whether the registry KEY exists, not
++                # whether it holds any models. On this install aigen_objs extracted as a bare
++                # directory skeleton -- 152 categories, 0 model.xml, 20 MB against objaverse's
++                # 1.4 GB -- so 60 categories pass this guard with an empty mjcf_paths list and
++                # reach the `p=counts/sum(counts)` below with sum == 0. That yields
++                # `ValueError: Probabilities contain NaN` at a random trial, killing the whole
++                # eval. Testing for actual models is what the comment above already intends.
+                 cat_in_any_reg = np.any(
+-                    [reg in OBJ_CATEGORIES[cat] for reg in obj_registries]
++                    [
++                        reg in OBJ_CATEGORIES[cat]
++                        and len(OBJ_CATEGORIES[cat][reg].mjcf_paths) > 0
++                        for reg in obj_registries
++                    ]
+                 )
+                 if not cat_in_any_reg:
+                     continue
+@@ -437,28 +451,58 @@ def sample_kitchen_object_helper(
+ 
+                 valid_categories.append(cat)
+ 
+-        cat = rng.choice(valid_categories)
++        # NOTE(jr): draw a category, then CHECK it actually yields candidates, re-drawing if
++        # not. Filtering the category list up front is not enough, because a category can
++        # survive every up-front guard and still be emptied HERE by the split filter below:
++        # split_th = max(len - 5, ceil(len / 2)) sends a single-model category to
++        # reg_choices[1:], i.e. nothing, under split="target". The count then reaches
++        # `p = counts / sum(counts)` with sum == 0 and numpy raises
++        # `ValueError: Probabilities contain NaN`, at a random trial, killing the whole run.
++        # Checking the built list covers every way a category can come out empty rather than
++        # enumerating them.
++        remaining = list(valid_categories)
++        while True:
++            if len(remaining) == 0:
++                raise ValueError(
++                    f"no category in groups={groups} yields a usable model for "
++                    f"registries={obj_registries}, split={split}"
++                )
++            cat = rng.choice(remaining)
+ 
+-        choices = {reg: [] for reg in obj_registries}
++            choices = {reg: [] for reg in obj_registries}
+ 
+-        for reg in obj_registries:
+-            if reg not in OBJ_CATEGORIES[cat]:
+-                choices[reg] = []
+-                continue
+-            reg_choices = deepcopy(OBJ_CATEGORIES[cat][reg].mjcf_paths)
++            for reg in obj_registries:
++                if reg not in OBJ_CATEGORIES[cat]:
++                    choices[reg] = []
++                    continue
++                reg_choices = deepcopy(OBJ_CATEGORIES[cat][reg].mjcf_paths)
++
++                # exclude out objects based on split
++                if split is not None:
++                    split_th = max(
++                        len(reg_choices) - 5, int(math.ceil(len(reg_choices) / 2))
++                    )
++                    if split == "pretrain":
++                        reg_choices = reg_choices[:split_th]
++                    elif split == "target":
++                        reg_choices = reg_choices[split_th:]
++                    else:
++                        raise ValueError
++                choices[reg] = reg_choices
++
++            if sum(len(choices[reg]) for reg in obj_registries) > 0:
++                break
+ 
+-            # exclude out objects based on split
+-            if split is not None:
+-                split_th = max(
+-                    len(reg_choices) - 5, int(math.ceil(len(reg_choices) / 2))
++            # Say it once per category: a silently-skipped category is how a broken asset
++            # install stays invisible.
++            if cat not in _EMPTY_CATEGORIES_REPORTED:
++                _EMPTY_CATEGORIES_REPORTED.add(cat)
++                print(
++                    f"[robocasa] no usable model for category {cat!r} "
++                    f"(registries={obj_registries}, split={split}); skipping it",
++                    flush=True,
+                 )
+-                if split == "pretrain":
+-                    reg_choices = reg_choices[:split_th]
+-                elif split == "target":
+-                    reg_choices = reg_choices[split_th:]
+-                else:
+-                    raise ValueError
+-            choices[reg] = reg_choices
++            remaining = [c for c in remaining if c != cat]
+ 
+         chosen_reg = rng.choice(
+             obj_registries,
