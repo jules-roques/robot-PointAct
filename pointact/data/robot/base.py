@@ -1,5 +1,6 @@
 import bisect
 import json
+import logging
 import random
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,9 @@ from lerobot.datasets.utils import hf_transform_to_torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
 
 from pointact.utils.rotation import convert_rotation
+
+
+logger = logging.getLogger(__name__)
 
 
 # Suppose rotation is quaternion (4D)
@@ -101,6 +105,45 @@ class LeRobotDatasetMixin(BaseLeRobotDataset):
 
         # remove unused features for efficiency
         self.set_feature_keys(select_video_keys, select_state_keys, select_action_keys, **kwargs)
+
+    def get_episodes_file_paths(self) -> list[str]:
+        """Which local files LeRobot must find before it will treat the dataset as present.
+
+        LeRobot asserts every path here `is_file()`; on any miss it falls through to a Hub
+        revision lookup, which under `HF_HUB_OFFLINE=1` dies with "Cannot reach
+        huggingface.co/api/datasets/<repo_id>/refs" -- an error that names the network and
+        the repo id, and never mentions the local file that was actually absent.
+
+        A subclass that will not decode video sets `_require_video_files = False` before
+        calling up, and the mp4 paths are dropped from the requirement. That is not a
+        loosened check, it is the correct one: such a run never opens a frame (see
+        `LeRobotPointCloudDataset.add_video_frames`, which returns early under a cached text
+        context), so requiring the videos makes the run depend on files it will not read.
+
+        This is load-bearing on Jean Zay rather than hypothetical. The $SCRATCH purge is
+        access-time based, so a text-context dataset's videos are precisely the files it
+        deletes first: OpenDrawer lost 1,485 of its 1,488 mp4s on 2026-09-06 while all 496
+        parquet shards and the 60 GB point LMDB survived, because those are read every step.
+        The three survivors are episodes 0-2, which the rollout-visualisation jobs touch.
+        """
+        fpaths = super().get_episodes_file_paths()
+        if getattr(self, "_require_video_files", True):
+            return fpaths
+
+        kept = [p for p in fpaths if not str(p).startswith("videos/")]
+        dropped = [p for p in fpaths if str(p).startswith("videos/")]
+        absent = sum(1 for p in dropped if not (self.root / p).is_file())
+        if absent:
+            # Say it once, loudly. A run reading this line is training on exactly the data it
+            # always did -- but anything that DOES want frames (a with-VLM arm, a rollout
+            # video) needs the dataset re-converted, and that should not be discovered later.
+            logger.warning(
+                "%s: %d of %d video files are missing under %s. This run does not decode "
+                "video (cached text context), so they are not required and training is "
+                "unaffected -- but a with-VLM arm on this dataset would need them restored.",
+                self.repo_id, absent, len(dropped), self.root,
+            )
+        return kept
 
     def set_feature_keys(self, video_keys=None, state_keys=None, action_keys=None, **kwargs):
         raise NotImplementedError("set_feature_keys must be implemented by subclasses to specify selected features.")

@@ -121,6 +121,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         oracle_gt_set: str | None = None,      # geom set name; defaults to geom_gt.ORACLE_TARGET
         **kwargs,
     ):
+        # Set BEFORE calling up: LeRobotDataset.__init__ asserts every path
+        # get_episodes_file_paths() returns exists, and that runs inside the super() call
+        # below -- so the flag has to be on the instance already. A cached-text-context run
+        # never decodes a frame (add_video_frames returns early), so it must not be made to
+        # depend on the mp4s. See LeRobotDatasetMixin.get_episodes_file_paths.
+        self._require_video_files = text_context_file is None
         super().__init__(
             repo_id=repo_id,
             root=root,
