@@ -233,9 +233,60 @@ sampler gaps were 3–8 pp, so the headline comparison needs the pooling and the
 Never re-run a seed to raise n — the same seed replays the same episode stream; run a new one
 and pool (`pool_eval_results.py`).
 
-**Cost.** ~380 H100-h of training (the 16384 arms dominate at ~11 h each on 4×H100; 512 is
-~3 h), and ~17 node-hours of eval for ~26,600 rollouts at the measured ~1600 trials/h/node.
-Eval is a rounding error against training, which is why the trial counts are generous.
+**Cost — measured 2026-09-08, job 1880350, and it is ~2x what the stage-1 table implies.**
+~795 H100-h of training, plus ~17 node-hours of eval for ~26,600 rollouts at the measured
+~1600 trials/h/node. Eval is a rounding error against training, which is why the trial counts
+are generous.
+
+Marginal s/step on 4×H100 at effective batch 128 (`pilot_throughput.py`, 40→200 step window),
+and what each arm costs over 50K steps:
+
+| budget | s/step | 50K wall | GPU-h |
+|---|---|---|---|
+| 1024 | 0.725 | 10.1 h | 40.3 |
+| 2048 | 0.704 | 9.8 h | 39.1 |
+| 4096 | 0.835 | 11.6 h | 46.4 |
+| 8192 | 0.798 | 11.1 h | 44.3 |
+| 16384 | 0.985 | 13.7 h | 54.7 |
+
+Every arm fits the 20 h `qos_gpu_h100-t3` cap, so none needs t4. **The rate is ~2.7x the
+stage-1 pilot's** (0.259/0.469/0.550 s/step at 2048/4096/8192) and the reason is the backbone,
+not the point count: `_base.yaml` runs Utonia at `enc_depths [3,3,3,12,3]` — 24 blocks —
+against the `[2,2,2,6,2]` (14 blocks) the pipeline defaults to. Utonia's *widths* are narrower
+than Concerto's, so the cost is in the depth. **Do not budget a Utonia grid off a stage-1
+number.** Note also that this measurement pins per-device batch at 16 with accumulation 2,
+while the ≤8192 arms actually train at 32 with accumulation 1, which should run slightly
+faster than the table.
+
+The pilot column is **not monotonic** (2048 < 1024, 8192 < 4096). That is the differencing
+method's noise, ~±0.05 s/step here, not a real inversion — read it for absolute wall-clock and
+read the profiler below for the shape.
+
+#### What a step is actually spent on (`profile_point_cost.py`, 1 GPU, batch 16, 30 reps)
+
+| budget | points fed | dataload | forward | backward | step total | peak GPU |
+|---|---|---|---|---|---|---|
+| 1,024 | 1,024 | 1.67 ± 0.68 ms | — | — | 316.5 ± 8.1 ms | — |
+| 2,048 | 2,048 | 1.61 ± 0.81 ms | 171.4 ± 3.6 ms | 178.7 ± 4.2 ms | 366.2 ± 6.5 ms | 8.4 GB |
+| 4,096 | 4,096 | 1.95 ± 0.87 ms | 231.8 ± 20.4 ms | 228.1 ± 19.6 ms | 479.3 ± 35.0 ms | 10.0 GB |
+| 8,192 | 8,190 | 1.99 ± 0.89 ms | 237.6 ± 23.4 ms | 253.3 ± 17.6 ms | 510.2 ± 39.6 ms | 11.9 GB |
+| 16,384 | 16,058 | 2.23 ± 0.99 ms | 278.9 ± 52.4 ms | 310.2 ± 23.1 ms | 612.5 ± 55.9 ms | 14.5 GB |
+
+Three things this settles, and they are the actual content of "point policies are expensive":
+
+- **16x the points costs 1.94x the step.** Strongly sublinear, for the reason the voxel-probe
+  table gives: only PTv3's first stages see more tokens, the deep stages are limited by
+  occupied 1 cm *voxels* rather than by points, and attention is windowed at `patch_size`.
+- **Data loading is 0.3–0.5% of a step and essentially flat** — 1.67 ms at 1024 against 2.23 ms
+  at 16384, for 16x the points. The budget is drawn *after* the full cloud is read from LMDB
+  and cropped, so the arms differ only in the tail of `__getitem__`. Whatever makes a point
+  policy expensive, it is not the dataloader.
+- **The expense is the network, split evenly between forward and backward**, with the optimiser
+  a flat ~13–18 ms. Memory is not a constraint at these budgets: 14.5 GB of 80 at the top.
+
+At 16384 the points actually fed are 16,058, not 16,384 — the `U(0.8, 1.0)` dropout binds
+before the budget does, which is the same measurement that says 16384 is the convergence end
+of the axis rather than a larger budget.
 
 #### Cost profiling: `profile_point_cost.py`
 
