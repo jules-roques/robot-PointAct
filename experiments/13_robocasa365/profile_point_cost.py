@@ -50,6 +50,18 @@ from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# Load the dataset inline instead of through MultiLeRobotDataset's worker Pool.
+#
+# Two reasons, one of which cost a 1h45 walltime. (a) The pool exists to parallelise across
+# SEVERAL datasets; this profiler always has one, so it buys nothing and adds a pickle
+# round-trip of the built dataset back to the parent. (b) Unlike scripts/train.py, this script
+# runs as a plain single process rather than under `accelerate launch`, and forking the pool
+# after the model has been constructed in the parent hangs -- job 1876820 sat at
+# "load 1 lerobot datasets with 8 processes ..." until SLURM killed it, having produced no
+# output at all. Setting this to 1 takes the `num_processes <= 1` branch, which never forks.
+os.environ.setdefault("DATASET_NUM_PROCESSES", "1")
+# Nothing here tokenizes in a loop, and the fork warning it emits is noise in a timing log.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
@@ -210,13 +222,19 @@ def main() -> None:
     recipe = resolve_recipe(training_args.model_class)
     compute_dtype = _compute_dtype(training_args)
 
+    # Progress markers, because every step below is slow enough that silence is ambiguous:
+    # the first version of this script hung for 1h45 inside create_data_module and the log
+    # gave no way to tell that from "still loading the model".
+    print("[1/3] building model ...", flush=True)
     model = build_model(recipe, training_args, compute_dtype)
     processor = load_processor(recipe, training_args)
     ensure_text_context(training_args)
 
+    print("[2/3] building data module ...", flush=True)
     create_data_module = _import_object(recipe.data_module_fn)
     data_module = create_data_module(processor=processor, args=training_args)
     configure_processor(processor, data_module["train_dataset"], training_args)
+    print("[3/3] ready; timing", flush=True)
 
     model.config.use_cache = False
     model.to(device)

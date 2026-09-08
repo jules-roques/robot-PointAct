@@ -87,14 +87,14 @@ echo "###############  1. step cost, decomposed (1 GPU)  ###############"
 # One GPU on purpose: the decomposition is a per-process quantity, and DDP would fold an
 # all-reduce into the backward column.
 CUDA_VISIBLE_DEVICES=0 uv run --project "$POINTACT_ENV" --no-sync \
-    python experiments/13_robocasa365/profile_point_cost.py "$RUN" \
+    python -u experiments/13_robocasa365/profile_point_cost.py "$RUN" \
         --npoints $BUDGETS --reps 30 --warmup 10 --batch-size 16 \
         --out "$OUT/point_cost.json"
 
 echo
 echo "###############  2. end-to-end marginal s/step (4 GPU)  ###############"
 uv run --project "$POINTACT_ENV" --no-sync \
-    python experiments/13_robocasa365/pilot_throughput.py \
+    python -u experiments/13_robocasa365/pilot_throughput.py \
         --contexts text_cache --npoints $BUDGETS \
         --per-device-batch 16 --effective-batch 128 \
         --short-steps 40 --long-steps 200 \
