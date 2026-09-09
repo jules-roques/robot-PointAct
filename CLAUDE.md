@@ -41,6 +41,11 @@ picking the wrong one produces confusing failures rather than clean errors.
   Camera calibration is not stored in the RoboCasa datasets; it is recovered from a
   simulator reset.
 
+## Responses
+
+Keep responses concise; avoid exceeding 500 output tokens unless explicitly asked for
+long-form work. Prefer bullet summaries over prose walls.
+
 ## Experiments
 
 Each `experiments/NN_name/` directory is self-contained: a README describing the
