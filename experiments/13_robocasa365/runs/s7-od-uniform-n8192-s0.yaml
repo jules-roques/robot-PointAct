@@ -1,4 +1,4 @@
-# OpenDrawer / uniform / 8192 points, 50K steps -- stage 7.
+# OpenDrawer / uniform / 8192 points, 30K steps -- stage 7.
 # Uniform point subsample: the baseline draw, and the control the other two arms
 # in this grid are read against.
 #
@@ -16,7 +16,7 @@ meta:
   stage: "Stage 7: Point budget x sampler (Utonia)"
 
 train:
-  max_steps: 50000
+  max_steps: 30000
   # run_name is derived from `meta` alone, so without these two the stage-1 arms at 2048 /
   # 4096 / 8192 would resolve to the SAME deterministic output_dir as their stage-7
   # counterparts -- and the trainer resumes from whatever checkpoints it finds there, so a

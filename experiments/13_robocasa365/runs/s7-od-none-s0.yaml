@@ -1,0 +1,39 @@
+# OpenDrawer / no input sampler / whole 1 cm cloud, 30K steps -- stage 7.
+# The top of the budget axis: no sampler at all, so the network sees every occupied voxel
+# (~22.5K points median, p95 26.7K). Read against the 16384 arms it says whether the last
+# ~27% of the cloud carries anything, and against 512 it bounds what the whole axis is worth.
+#
+# Trained fresh rather than reusing stage 6's od-none-s0, which is the same recipe at 50K.
+# That arm's checkpoint-30000 sits mid-cosine at ~36% of peak LR -- a snapshot of a 50K run,
+# not a 30K-annealed policy -- and its 50K endpoint has seen 1.67x the optimiser steps of
+# everything here. Neither is a fair no-sampler point on a curve of 30K-annealed arms.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: none
+  # No npoints coordinate on purpose: exp_npoints is the *configured budget*, and this arm has
+  # none. max_npoints below is a cap set above the cloud size so that nothing binds; recording
+  # 32768 would label an arm that trains on ~22K points as a 32768-point arm.
+  context: text_cache
+  seed: 0
+  stage: "Stage 7: Point budget x sampler (Utonia)"
+
+train:
+  max_steps: 30000
+  run_name: s7-od-none-s0
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage7
+
+  # ~22.5K points per sample; 32 OOMs at this budget (measured in stage 6). effective_batch
+  # stays 128, which is the quantity that has to match across the grid.
+  per_device_train_batch_size: 16
+
+data:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      # A cap, not a target: augment_point_cloud() draws int(len(cloud) * U(0.8, 1.0))
+      # regardless, so the 0-20% dropout every other arm has is preserved. Setting the cap
+      # above the cloud size removes only the budget.
+      max_npoints: 32768

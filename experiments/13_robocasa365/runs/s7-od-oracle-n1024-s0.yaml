@@ -1,4 +1,4 @@
-# OpenDrawer / oracle / 1024 points, 50K steps -- stage 7.
+# OpenDrawer / oracle / 1024 points, 30K steps -- stage 7.
 # GT-oracle sampling: the same density centred on where the simulator says the
 # target actually is. Privileged; an upper bound on what any sampler could buy,
 # not a deployable policy.
@@ -17,7 +17,7 @@ meta:
   stage: "Stage 7: Point budget x sampler (Utonia)"
 
 train:
-  max_steps: 50000
+  max_steps: 30000
   # run_name is derived from `meta` alone, so without these two the stage-1 arms at 2048 /
   # 4096 / 8192 would resolve to the SAME deterministic output_dir as their stage-7
   # counterparts -- and the trainer resumes from whatever checkpoints it finds there, so a

@@ -59,6 +59,7 @@ DEFAULT_RUNS=(
     s7-od-uniform-n4096-s0   s7-od-eef-n4096-s0   s7-od-oracle-n4096-s0
     s7-od-uniform-n8192-s0   s7-od-eef-n8192-s0   s7-od-oracle-n8192-s0
     s7-od-uniform-n16384-s0  s7-od-eef-n16384-s0  s7-od-oracle-n16384-s0
+    s7-od-none-s0
 )
 read -r -a RUN_LIST <<< "${RUNS:-${DEFAULT_RUNS[*]}}"
 
@@ -77,28 +78,26 @@ cat <<'NEXT'
 Eval is two packed node-jobs. Both are idempotent (a pair whose final JSON exists is
 skipped), so resubmit the identical command to finish a grid that ran out of walltime.
 
+All 19 arms live under the same output tree, so one EXPRS_DIR covers the grid.
+
+   ALL="$(echo s7-od-{uniform,eef,oracle}-n{512,1024,2048,4096,8192,16384}-s0) s7-od-none-s0"
+
 1. The duration curve: 100 trials at every 5K checkpoint, one seed.
 
    sbatch --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
-EVAL_STEPS="5000 10000 15000 20000 25000 30000 35000 40000 45000 50000",\
-EVAL_SEEDS="7",NUM_TRIALS=100,\
-RUNS="$(echo s7-od-{uniform,eef,oracle}-n{512,1024,2048,4096,8192,16384}-s0)" \
+EVAL_STEPS="5000 10000 15000 20000 25000 30000",\
+EVAL_SEEDS="7",NUM_TRIALS=100,RUNS="$ALL" \
      experiments/13_robocasa365/eval_task_jeanzay.slurm
 
-2. The headline table: four more seeds at 50K only, pooled with seed 7 above to n=500.
+2. The headline table: four more seeds at 30K only, pooled with seed 7 above to n=500.
 
    sbatch --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
-EVAL_STEPS="50000",EVAL_SEEDS="11 13 17 19",NUM_TRIALS=100,\
-RUNS="<the same 18>" \
+EVAL_STEPS="30000",EVAL_SEEDS="11 13 17 19",NUM_TRIALS=100,RUNS="$ALL" \
      experiments/13_robocasa365/eval_task_jeanzay.slurm
 
-3. The no-sampler end of the axis lives in a DIFFERENT output tree (it is the reused stage-6
-   arm), so it needs its own submission with EXPRS_DIR pointing at `ablation`:
-
-   sbatch --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/ablation,\
-EVAL_STEPS="5000 10000 15000 20000 25000 30000 35000 40000 45000 50000",\
-EVAL_SEEDS="7",NUM_TRIALS=100,RUNS="od-none-s0" \
-     experiments/13_robocasa365/eval_task_jeanzay.slurm
+Read the intermediate checkpoints as "where a 30K run was at step N", not as "a policy
+trained for N steps" -- under cosine-to-30K the LR is still ~97% of peak at 5K and ~50% at
+15K, so the early points understate their own budget. Only the 30K column is annealed.
 
 Rehearse any new grid with SAVE_SUFFIX=-smoke first: both pooling consumers skip a results
 directory whose trailing "-" token is not all digits, so smoke output is invisible to every
