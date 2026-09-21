@@ -67,6 +67,6 @@ srun uv run --project "$POINTACT_ENV" --no-sync \
   data_prep/robocasa365_to_lerobot/convert.py \
   --cache-dir "$BASE/replay_cache" \
   --output-dir "$OUT" \
-  --repo-id OpenDrawer \
+  --repo-id "$TASK" \
   --overwrite \
   ${EPISODES:+--episodes $EPISODES}
