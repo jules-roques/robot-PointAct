@@ -39,16 +39,28 @@ def download_group(repo_id: str, prefix: str, dest: Path, files: list[str], over
     dest.mkdir(parents=True, exist_ok=True)
     group = sorted(f for f in files if f.startswith(prefix + "/") and f.endswith(".zip"))
     print(f"[{prefix}] {len(group)} archives -> {dest}")
+    refetched = 0
     for i, fname in enumerate(group, 1):
         item = Path(fname).stem
         marker = dest / item
-        if marker.exists() and not overwrite:
+        # An existing directory is not an extracted asset. These live on $SCRATCH (the
+        # assets/ subdirectories are symlinks to large storage), and its access-time purge
+        # deletes the .obj/.mtl files while leaving every directory standing -- on
+        # 2026-09-21, 643 of 922 lightwheel item dirs were empty shells. MuJoCo then fails
+        # at scene load with "Error opening file ...FlowerVase012.obj", one asset at a time,
+        # halfway into a replay. Test for a file, not for the directory.
+        if not overwrite and marker.is_dir() and any(marker.rglob("*.obj")):
             print(f"  ({i}/{len(group)}) skip {item} (present)")
             continue
+        if marker.is_dir():
+            refetched += 1
         print(f"  ({i}/{len(group)}) {item}")
         zip_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=fname)
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(path=dest)
+    if refetched:
+        print(f"[{prefix}] refetched {refetched} item(s) whose directory existed but was "
+              f"empty -- the signature of the $SCRATCH purge, not of a partial download.")
 
 
 def main() -> None:
