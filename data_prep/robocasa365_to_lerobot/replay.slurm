@@ -4,8 +4,14 @@
 #
 # Submit (full OpenDrawer run):
 #   sbatch data_prep/robocasa365_to_lerobot/replay.slurm
+# Submit (another task — TASK and DATE select the source dump):
+#   sbatch --export=ALL,TASK=CloseBlenderLid,DATE=20250816 \
+#          data_prep/robocasa365_to_lerobot/replay.slurm
 # Submit (quick validation on a few episodes, short dev QoS):
 #   sbatch --qos=qos_gpu-dev --time=00:30:00 --export=ALL,EPISODES="0 1 2" \
+#          data_prep/robocasa365_to_lerobot/replay.slurm
+# Submit (sharded — 8 parallel chunks; per-episode caches are disjoint so this is safe):
+#   sbatch --array=0-7 --export=ALL,TASK=CloseBlenderLid \
 #          data_prep/robocasa365_to_lerobot/replay.slurm
 #
 # Targets the V100 partition because this stage only renders (no model inference), so the
@@ -37,7 +43,25 @@ export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
 
 REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
-BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/OpenDrawer/20250816"
+
+# TASK/DATE are overridable because the grid is no longer one task: stage 7 runs three, and
+# the 2026-09-21 $SCRATCH purge means all of them may have to be re-prepped at once. DATE is
+# the source dump's directory and is NOT the same for every task -- check what
+# download_demos.py actually laid down rather than assuming OpenDrawer's.
+TASK="${TASK:-OpenDrawer}"
+DATE="${DATE:-20250816}"
+BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/$TASK/$DATE"
+
+if [ ! -d "$BASE/lerobot" ]; then
+    echo "ERROR: no source demos at $BASE/lerobot" >&2
+    echo "  Download them first (login node, needs a gated-dataset HF login):" >&2
+    echo "    uv run --project envs/robocasa365 \\" >&2
+    echo "      data_prep/robocasa365_to_lerobot/download_demos.py --tasks $TASK" >&2
+    echo "  Existing dumps for this task:" >&2
+    ls -1 "$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/$TASK" 2>/dev/null >&2 \
+        || echo "    (none)" >&2
+    exit 1
+fi
 
 cd "$REPO"
 

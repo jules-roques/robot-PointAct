@@ -243,6 +243,36 @@ the `cuda` extra, so a clean sync does *not* reproduce it.
 A venv on `$SCRATCH` is purgeable, so tar it to `$STORE` — one inode, and restoring it
 needs no internet.
 
+## The `$SCRATCH` purge is per-file and by access time
+
+This has now destroyed three different things, and the pattern is always the same, so it is
+worth stating once. `$SCRATCH` is purged **file by file on access time**, not directory by
+directory and not by age of the tree. Whatever nothing has *read* goes, while its neighbours
+and its directory structure stay — which is why every symptom looks like corruption rather
+than deletion.
+
+What it has taken so far:
+
+| date | what | how it presented |
+|---|---|---|
+| 2026-09-08 | 1,481 of 1,488 OpenDrawer `.mp4` | `OfflineModeIsEnabled: Cannot reach huggingface.co/api/datasets/OpenDrawer/refs` |
+| 2026-09-21 | the training venv, 8,178 files left of 57,732 | `ModuleNotFoundError: No module named 'lerobot.constants'` + `_virtualenv.pth` noise |
+| 2026-09-21 | every task's per-episode parquet, **1 of ~500 left** | `AssertionError` in `lerobot_dataset.py`, then the same offline-mode error |
+
+Three things follow.
+
+- **A short smoke run protects only what it reads.** The one parquet that survived in every
+  dataset is `episode_000000.parquet` — the single episode a 30-step smoke touched. A smoke
+  is not a keep-alive.
+- **Partial survival is the signature.** Directories remain, big recently-read files remain
+  (the 60–97 GB point LMDBs all survived), loose untouched files vanish. Diagnose with a file
+  count against what should be there, not by checking that the path exists:
+  `find $SCRATCH/<tree> -type f | wc -l`.
+- **Anything on `$SCRATCH` that cannot be regenerated from a compute node needs a `$STORE`
+  tar.** Venvs and checkpoints have one. **The converted datasets did not**, which is why
+  their loss costs a gated re-download plus a full sim replay rather than an extraction.
+  Re-tar after any rebuild: `tar -cf $STORE/datasets/<task>-<date>.tar -C <parent> <task>`.
+
 The same copy-and-symlink works for the conda base at `$WORK/miniforge3` (27,899 entries,
 over half of it the `pkgs/` package cache). Note that its `envs/` is **empty on Jean Zay**:
 the `$HOME/miniforge3/envs/ffmpeg-libs/lib` that `train.slurm`, `data_prep_*.slurm` and

@@ -4,6 +4,14 @@
 #
 # Submit:
 #   sbatch data_prep/robocasa365_to_lerobot/convert.slurm
+# Submit (another task — must match the TASK/DATE the replay stage used):
+#   sbatch --export=ALL,TASK=CloseBlenderLid,DATE=20250816 \
+#          data_prep/robocasa365_to_lerobot/convert.slurm
+#
+# This REWRITES $OUT, including the point LMDB. After the 2026-09-21 purge the old LMDBs
+# survived while their parquet did not; they are not reusable as a shortcut, because the
+# dataset's episode numbering is assigned here and must match the LMDB keys
+# (see episode_index_map.py). Convert the whole task, not a subset, unless you know why.
 #
 #SBATCH --job-name=convert
 #SBATCH --account=rgx@cpu
@@ -32,8 +40,18 @@ export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
 
 REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
-BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/OpenDrawer/20250816"
-OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer"
+
+# TASK/DATE match replay.slurm's; see the note there. Pass the SAME pair to both stages or
+# this converts one task's cache into another task's output directory.
+TASK="${TASK:-OpenDrawer}"
+DATE="${DATE:-20250816}"
+BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/$TASK/$DATE"
+OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/$TASK"
+
+if [ ! -d "$BASE/replay_cache" ]; then
+    echo "ERROR: no replay cache at $BASE/replay_cache -- run replay.slurm first" >&2
+    exit 1
+fi
 
 cd "$REPO"
 echo "host=$(hostname) cache=$BASE/replay_cache out=$OUT episodes=${EPISODES:+subset}"
