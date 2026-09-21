@@ -97,6 +97,58 @@ BUDGETS = (512, 1024, 2048, 4096, 8192, 16384)
 #: unsampled (~22K) budget and measured 32 as an OOM there.
 LARGE_BUDGET_BATCH = {16384: 16}
 
+#: Per-task settings for the no-sampler arm, from `probe_cloud_size.py` over 400 sampled
+#: frames of each task's point LMDB (2026-09-21). Measured per task rather than copied from
+#: OpenDrawer, because copying would have been wrong: OpenDrawer tops out at 29,887 points
+#: but CloseBlenderLid reaches 36,418 and PickPlaceCounterToStove 36,114, so OpenDrawer's
+#: 32768 cap would have BOUND on both new tasks and silently turned their no-sampler arm
+#: into a large uniform draw -- the one failure `smoke_stage5.py` calls out for this arm.
+#:
+#: The cap is 65536 everywhere, not each task's max rounded up. `max_npoints` above the cloud
+#: size costs nothing at all (it is a ceiling; `augment_point_cloud` still draws
+#: int(len(cloud) * U(0.8,1.0))), while a cap that binds is a silent experimental error. The
+#: measured maxima come from 400 of ~125-180K frames, so the true maximum is certainly higher
+#: than any of them -- which is also why OpenDrawer's old 32768, only 10% above its sampled
+#: max, was not actually safe either.
+#:
+#: batch stays 16 on all three. Stage 6 measured 32 as an OOM at OpenDrawer's ~21.5K, and at
+#: 16384 points the peak was 14.5 GB of 80, so the ~10% bigger clouds here have ample room.
+NONE_ARM = {
+    "OpenDrawer": {
+        "cap": 65536,
+        "batch": 16,
+        "cloud": "median 21.5K points, p95 25.6K, max 29.9K",
+        "batch_note": "~21.5K points per sample; 32 OOMs at this budget (measured in stage 6).",
+        "reuse_note": (
+            "Trained fresh rather than reusing stage 6's od-none-s0, which is the same recipe\n"
+            "# at 50K. That arm's checkpoint-30000 sits mid-cosine at ~36% of peak LR -- a\n"
+            "# snapshot of a 50K run, not a 30K-annealed policy -- and its 50K endpoint has seen\n"
+            "# 1.67x the optimiser steps of everything here. Neither is a fair no-sampler point\n"
+            "# on a curve of 30K-annealed arms."
+        ),
+    },
+    "CloseBlenderLid": {
+        "cap": 65536,
+        "batch": 16,
+        "cloud": "median 23.1K points, p95 30.5K, max 36.4K",
+        "batch_note": ("~23.1K points per sample, ~7% more than OpenDrawer, where 32 was "
+                       "measured to OOM (stage 6)."),
+        "reuse_note": ("Stage 6 ran OpenDrawer only, so unlike the od arm there was never an\n"
+                       "# existing no-sampler run to reuse here -- this one is fresh by default,\n"
+                       "# not by choice."),
+    },
+    "PickPlaceCounterToStove": {
+        "cap": 65536,
+        "batch": 16,
+        "cloud": "median 24.3K points, p95 33.1K, max 36.1K",
+        "batch_note": ("~24.3K points per sample, the largest cloud in the grid; 32 OOMs even "
+                       "at OpenDrawer's smaller size (stage 6)."),
+        "reuse_note": ("Stage 6 ran OpenDrawer only, so unlike the od arm there was never an\n"
+                       "# existing no-sampler run to reuse here -- this one is fresh by default,\n"
+                       "# not by choice."),
+    },
+}
+
 HEAD = {
     "uniform": "Uniform point subsample: the baseline draw, and the control the other two arms\n"
                "# in this grid are read against.",
