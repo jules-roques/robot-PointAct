@@ -1,4 +1,4 @@
-"""Generate the stage-7 run yamls: one task, three samplers, six point budgets.
+"""Generate the stage-7 run yamls: three tasks, three samplers, six point budgets.
 
 Stage 7 re-derives the point-budget axis that stage 1 measured, on an encoder whose
 pretraining granularity matches what we feed it. Stage 1 initialised PTv3 from **Concerto**,
@@ -14,10 +14,20 @@ should have been measured on. ``runs/_base.yaml`` has carried ``ptv3_backend: ut
 
 Why these coordinates:
 
-* **OpenDrawer only.** One task, deliberately. Stage 5 already showed the sampler ordering is
-  task-dependent (eef wins on four tasks and loses 8.4pp on CoffeeSetupMug), so a point-budget
-  curve pooled over tasks would average two different shapes. Extend to more tasks once the
-  shape on one is known.
+* **Three tasks, kept separate.** OpenDrawer first (2026-09-10), then CloseBlenderLid and
+  PickPlaceCounterToStove added 2026-09-21. Stage 5 showed the sampler ordering is
+  task-dependent (eef wins on four tasks and loses 8.4pp on CoffeeSetupMug), so the curves are
+  read PER TASK and never pooled -- a point-budget curve averaged over tasks would average two
+  different shapes and hide exactly the effect stage 5 found. What the extra tasks buy is
+  whether the *shape* of the budget curve (where the knee sits, where the samplers converge)
+  is a property of point policies or a property of OpenDrawer.
+
+  The two new tasks are the ones that bracket stage 5's sampler spread, which is why they are
+  these two and not the other pair. On PickPlaceCounterToStove the prior decides almost
+  everything -- uniform 4% against eef 51% -- so its curve should show the knee at its most
+  violent. CloseBlenderLid is the flatter, large-target case. CoffeeSetupMug and
+  TurnOnMicrowave are left out to keep the grid at three tasks; mug is the one task where eef
+  LOSES, so it is the obvious fourth if the budget ever allows it.
 * **Six budgets, 512 -> 16384.** The interesting region is the LOW end. At 1 cm the whole
   OpenDrawer cloud is only ~18-22K points and the eef draw already takes 97% of everything
   within one sigma of the gripper at 4096, so 4096 -> 8192 buys about eleven ROI points and
@@ -66,8 +76,15 @@ against. Neither is a fair no-sampler point, so ``s7-od-none-s0`` is trained fre
 import argparse
 from pathlib import Path
 
-TASK = "OpenDrawer"
-ABBREV = "od"
+#: task -> filename abbreviation. The abbreviations are stage 5's, deliberately: the stage-5
+#: arms at 8192 are the replication check for this grid's 8192 column, and sharing the short
+#: name is what makes `s5-ppcs-eef-n8192-s0` and `s7-ppcs-eef-n8192-s0` legible as the pair
+#: they are. Each task's curve is read on its own -- see the module docstring.
+TASKS = {
+    "OpenDrawer": "od",
+    "CloseBlenderLid": "blender",
+    "PickPlaceCounterToStove": "ppcs",
+}
 
 STAGE = "Stage 7: Point budget x sampler (Utonia)"
 
@@ -153,13 +170,10 @@ BATCH_BLOCK = """
 
 NONE_TEMPLATE = """# {task} / no input sampler / whole 1 cm cloud, {steps_k}K steps -- stage 7.
 # The top of the budget axis: no sampler at all, so the network sees every occupied voxel
-# (~22.5K points median, p95 26.7K). Read against the 16384 arms it says whether the last
-# ~27% of the cloud carries anything, and against 512 it bounds what the whole axis is worth.
+# ({cloud}). Read against the 16384 arms it says how much the
+# discarded tail carries, and against 512 it bounds what the whole axis is worth.
 #
-# Trained fresh rather than reusing stage 6's od-none-s0, which is the same recipe at 50K.
-# That arm's checkpoint-30000 sits mid-cosine at ~36% of peak LR -- a snapshot of a 50K run,
-# not a 30K-annealed policy -- and its 50K endpoint has seen 1.67x the optimiser steps of
-# everything here. Neither is a fair no-sampler point on a curve of 30K-annealed arms.
+# {reuse_note}
 extends: _base.yaml
 
 meta:
@@ -177,9 +191,9 @@ train:
   run_name: {name}
   output_base: $SCRATCH/PointAct_exprs/robocasa365/stage7
 
-  # ~22.5K points per sample; 32 OOMs at this budget (measured in stage 6). effective_batch
+  # {batch_note} effective_batch
   # stays 128, which is the quantity that has to match across the grid.
-  per_device_train_batch_size: 16
+  per_device_train_batch_size: {batch}
 
 data:
   lerobot_datasets:
@@ -188,8 +202,9 @@ data:
       text_context_file: text_context/qwen2.5-vl-3b.pt
       # A cap, not a target: augment_point_cloud() draws int(len(cloud) * U(0.8, 1.0))
       # regardless, so the 0-20% dropout every other arm has is preserved. Setting the cap
-      # above the cloud size removes only the budget.
-      max_npoints: 32768
+      # above the cloud size removes only the budget. smoke_stage5.py fails this arm if the
+      # cap ever binds, which would silently turn it back into a large uniform draw.
+      max_npoints: {cap}
 """
 
 
@@ -198,6 +213,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=30000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--budgets", type=int, nargs="+", default=list(BUDGETS))
+    parser.add_argument("--tasks", nargs="+", default=list(TASKS), choices=list(TASKS),
+                        help="Tasks to emit. Default: all three. Narrowing this still "
+                             "DELETES every s7-*.yaml first, so a narrowed run leaves only "
+                             "the tasks it names -- regenerate the full set afterwards.")
     args = parser.parse_args()
 
     # Imported here so --help works outside the pointact env.
@@ -212,29 +231,35 @@ def main() -> None:
         stale.unlink()
 
     written = []
-    for npoints in args.budgets:
-        for sampling in ("uniform", "eef", "oracle"):
-            name = f"s7-{ABBREV}-{sampling}-n{npoints}-s{args.seed}"
-            batch = LARGE_BUDGET_BATCH.get(npoints)
-            batch_block = "" if batch is None else BATCH_BLOCK.format(
-                batch=batch, tokens=f"{npoints // 1000}K")
-            (out_dir / f"{name}.yaml").write_text(TEMPLATE.format(
-                task=TASK, sampling=sampling, npoints=npoints,
-                steps=args.steps, steps_k=args.steps // 1000, seed=args.seed,
-                stage=STAGE, head=HEAD[sampling], name=name, batch_block=batch_block,
-                block=BLOCK[sampling].format(gt_set=ORACLE_TARGET[TASK]),
-            ))
-            written.append(name)
+    for task in args.tasks:
+        abbrev = TASKS[task]
+        for npoints in args.budgets:
+            for sampling in ("uniform", "eef", "oracle"):
+                name = f"s7-{abbrev}-{sampling}-n{npoints}-s{args.seed}"
+                batch = LARGE_BUDGET_BATCH.get(npoints)
+                batch_block = "" if batch is None else BATCH_BLOCK.format(
+                    batch=batch, tokens=f"{npoints // 1000}K")
+                (out_dir / f"{name}.yaml").write_text(TEMPLATE.format(
+                    task=task, sampling=sampling, npoints=npoints,
+                    steps=args.steps, steps_k=args.steps // 1000, seed=args.seed,
+                    stage=STAGE, head=HEAD[sampling], name=name, batch_block=batch_block,
+                    block=BLOCK[sampling].format(gt_set=ORACLE_TARGET[task]),
+                ))
+                written.append(name)
 
-    # The no-sampler end of the axis. Trained fresh rather than reused from stage 6: see the
-    # module docstring -- at a 30K horizon that arm's 30K checkpoint is mid-cosine and its 50K
-    # endpoint has seen 1.67x the optimiser steps, so neither lands on this curve.
-    none_name = f"s7-{ABBREV}-none-s{args.seed}"
-    (out_dir / f"{none_name}.yaml").write_text(NONE_TEMPLATE.format(
-        task=TASK, steps=args.steps, steps_k=args.steps // 1000, seed=args.seed,
-        stage=STAGE, name=none_name,
-    ))
-    written.append(none_name)
+        # The no-sampler end of the axis. Trained fresh rather than reused from stage 6: see
+        # the module docstring -- at a 30K horizon that arm's 30K checkpoint is mid-cosine and
+        # its 50K endpoint has seen 1.67x the optimiser steps, so neither lands on this curve.
+        # (Stage 6 only ever ran OpenDrawer, so for the other two there was nothing to reuse.)
+        arm = NONE_ARM[task]
+        none_name = f"s7-{abbrev}-none-s{args.seed}"
+        (out_dir / f"{none_name}.yaml").write_text(NONE_TEMPLATE.format(
+            task=task, steps=args.steps, steps_k=args.steps // 1000, seed=args.seed,
+            stage=STAGE, name=none_name, cap=arm["cap"], batch=arm["batch"],
+            cloud=arm["cloud"], batch_note=arm["batch_note"],
+            reuse_note=arm["reuse_note"],
+        ))
+        written.append(none_name)
 
     print(f"wrote {len(written)} run configs to {out_dir}:")
     for name in written:

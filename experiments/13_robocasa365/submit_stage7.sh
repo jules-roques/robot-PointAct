@@ -1,9 +1,15 @@
 #!/bin/bash
-# Submit the stage-7 trainings: OpenDrawer x {uniform, eef, oracle} x six point budgets.
+# Submit the stage-7 trainings: {OpenDrawer, CloseBlenderLid, PickPlaceCounterToStove}
+# x {uniform, eef, oracle} x six point budgets, plus one no-sampler arm per task = 57.
 #
 #   DRY_RUN=1 bash experiments/13_robocasa365/submit_stage7.sh   # print what it would submit
-#   bash experiments/13_robocasa365/submit_stage7.sh             # all 18 arms
+#   bash experiments/13_robocasa365/submit_stage7.sh             # all 57 arms
+#   S7_TASKS="blender ppcs" bash .../submit_stage7.sh            # only the two new tasks
 #   RUNS="s7-od-eef-n512-s0 s7-od-oracle-n512-s0" bash .../submit_stage7.sh   # a subset
+#
+# Anything already queued or running under the same job name is SKIPPED, so re-running this
+# after adding a task submits only what is missing. Always DRY_RUN=1 first: at 57 arms a
+# full accidental resubmission is several hundred H100-hours.
 #
 # Unlike submit_stage_a.sh this submits TRAINING ONLY. Evaluation is no longer one array per
 # checkpoint: it is a single packed node-job per task (eval_task_jeanzay.slurm), which runs the
@@ -48,28 +54,59 @@ submit() {
     sbatch --parsable "$@"
 }
 
-# Named explicitly rather than globbed, for the reason submit_stage_a.sh learned the hard way:
-# a glob silently grows the submission when a neighbouring stage drops a file in runs/.
-# Ordered cheapest-first so the low-budget arms -- the ones the curve's knee depends on --
-# clear the queue before the expensive tail.
-DEFAULT_RUNS=(
-    s7-od-uniform-n512-s0    s7-od-eef-n512-s0    s7-od-oracle-n512-s0
-    s7-od-uniform-n1024-s0   s7-od-eef-n1024-s0   s7-od-oracle-n1024-s0
-    s7-od-uniform-n2048-s0   s7-od-eef-n2048-s0   s7-od-oracle-n2048-s0
-    s7-od-uniform-n4096-s0   s7-od-eef-n4096-s0   s7-od-oracle-n4096-s0
-    s7-od-uniform-n8192-s0   s7-od-eef-n8192-s0   s7-od-oracle-n8192-s0
-    s7-od-uniform-n16384-s0  s7-od-eef-n16384-s0  s7-od-oracle-n16384-s0
-    s7-od-none-s0
-)
+# Built from the axes rather than listed one by one, because the grid is now 3 tasks x
+# (3 samplers x 6 budgets + 1 no-sampler) = 57 arms and a hand-kept list of 57 names is a
+# transcription bug waiting to happen. Still NOT a glob over runs/*.yaml, for the reason
+# submit_stage_a.sh learned the hard way: a glob silently grows the submission when a
+# neighbouring stage drops a file in runs/.
+#
+# Ordered cheapest-first ACROSS tasks -- every task's 512 arm goes in before any task's 1024
+# -- so the low-budget arms, which is where the curve's knee lives, all clear the queue
+# before the expensive tail. If the budget runs out partway, what survives is a complete
+# low-end curve on three tasks rather than one finished task and two empty ones.
+S7_TASKS=${S7_TASKS:-"od blender ppcs"}
+S7_BUDGETS=${S7_BUDGETS:-"512 1024 2048 4096 8192 16384"}
+
+DEFAULT_RUNS=()
+for budget in $S7_BUDGETS; do
+    for task in $S7_TASKS; do
+        for sampling in uniform eef oracle; do
+            DEFAULT_RUNS+=("s7-${task}-${sampling}-n${budget}-s0")
+        done
+    done
+done
+# The no-sampler arms last: they are the most expensive per step and the least likely to
+# change the story, so they are the right thing to lose if the budget is cut short.
+for task in $S7_TASKS; do
+    DEFAULT_RUNS+=("s7-${task}-none-s0")
+done
+
 read -r -a RUN_LIST <<< "${RUNS:-${DEFAULT_RUNS[*]}}"
 
+# The grid is submitted in waves now (OpenDrawer 2026-09-10, the other two 2026-09-21), so a
+# rerun of this script would otherwise queue a second copy of everything already waiting.
+# Training auto-resumes from output_dir, so a duplicate is not corrupting -- but two jobs
+# writing one output_dir is a real way to lose a run, and it wastes a 4-GPU allocation.
+QUEUED=$(squeue -u "$USER" -h -o "%j" 2>/dev/null || true)
+
+skipped=0
 for run in "${RUN_LIST[@]}"; do
     config="$RUNS_DIR/$run.yaml"
     [ -f "$config" ] || { echo "no such run config: $config" >&2; exit 1; }
+    if grep -qxF "$run" <<< "$QUEUED"; then
+        echo "skipped $run (already queued or running)"
+        skipped=$((skipped + 1))
+        continue
+    fi
     train_id=$(submit --job-name="$run" $TRAIN_EXTRA \
                       --export=ALL,RUN_CONFIG="$config" "$TRAIN_SLURM")
     echo "submitted $run -> $train_id"
 done
+# `[ ... ] && echo` as the last statement would exit 1 under `set -e` whenever nothing was
+# skipped, which is the normal case -- so this is an if, not a one-liner.
+if [ "$skipped" -gt 0 ]; then
+    echo "($skipped already in the queue, left alone)"
+fi
 
 cat <<'NEXT'
 
@@ -78,22 +115,35 @@ cat <<'NEXT'
 Eval is two packed node-jobs. Both are idempotent (a pair whose final JSON exists is
 skipped), so resubmit the identical command to finish a grid that ran out of walltime.
 
-All 19 arms live under the same output tree, so one EXPRS_DIR covers the grid.
+All 57 arms live under the same output tree, so one EXPRS_DIR covers the grid -- but
+eval_task_jeanzay.slurm REFUSES a mixed-task RUNS list (it checks, and exits), because
+one task per job is what keeps the walltime estimate meaningful. So this is six
+submissions: two per task, not two in total.
 
-   ALL="$(echo s7-od-{uniform,eef,oracle}-n{512,1024,2048,4096,8192,16384}-s0) s7-od-none-s0"
+1. The duration curve: 100 trials at every 5K checkpoint, one seed. Once per task.
 
-1. The duration curve: 100 trials at every 5K checkpoint, one seed.
-
-   sbatch --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
+   for T in od blender ppcs; do
+     ARMS="$(echo s7-$T-{uniform,eef,oracle}-n{512,1024,2048,4096,8192,16384}-s0) s7-$T-none-s0"
+     sbatch --job-name="eval-s7-$T-curve" \
+       --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
 EVAL_STEPS="5000 10000 15000 20000 25000 30000",\
-EVAL_SEEDS="7",NUM_TRIALS=100,RUNS="$ALL" \
-     experiments/13_robocasa365/eval_task_jeanzay.slurm
+EVAL_SEEDS="7",NUM_TRIALS=100,RUNS="$ARMS" \
+       experiments/13_robocasa365/eval_task_jeanzay.slurm
+   done
 
 2. The headline table: four more seeds at 30K only, pooled with seed 7 above to n=500.
 
-   sbatch --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
-EVAL_STEPS="30000",EVAL_SEEDS="11 13 17 19",NUM_TRIALS=100,RUNS="$ALL" \
-     experiments/13_robocasa365/eval_task_jeanzay.slurm
+   for T in od blender ppcs; do
+     ARMS="$(echo s7-$T-{uniform,eef,oracle}-n{512,1024,2048,4096,8192,16384}-s0) s7-$T-none-s0"
+     sbatch --job-name="eval-s7-$T-headline" \
+       --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage7,\
+EVAL_STEPS="30000",EVAL_SEEDS="11 13 17 19",NUM_TRIALS=100,RUNS="$ARMS" \
+       experiments/13_robocasa365/eval_task_jeanzay.slurm
+   done
+
+Never pool across tasks when reading these back. summarize_stage_a.py has a cross-task
+pooling bug on record, and stage 5 showed the sampler ordering differs BY TASK -- a curve
+averaged over the three would hide the one effect this grid was extended to find.
 
 Read the intermediate checkpoints as "where a 30K run was at step N", not as "a policy
 trained for N steps" -- under cosine-to-30K the LR is still ~97% of peak at 5K and ~50% at
