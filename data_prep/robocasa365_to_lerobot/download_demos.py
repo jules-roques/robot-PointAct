@@ -6,9 +6,18 @@ renamed to `nvidia/PhysicalAI-Robotics-Manipulation-Kitchen-Demos`. This wrapper
 robocasa's own registry and destination-path logic and only overrides the repo id, so the
 pinned robocasa submodule stays unmodified.
 
-The dataset is gated: accept the terms at
-https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Manipulation-Kitchen-Demos
-and authenticate (`hf auth login`) first.
+No authentication is needed. This file used to say the dataset was gated and that you had
+to `hf auth login` first; that was checked on 2026-09-21 and is wrong -- the repo reports
+`gated: False` and anonymous access works.
+
+**`--split target` is the 500-demo split and is what every experiment here uses.**
+`pretrain` is the 100-demo split. The default is `target`, so the only way to get this
+wrong is to pass `--split pretrain` and not notice that the dataset came back a fifth of
+the size. Do not "fix" a task with the wrong split.
+
+Note that the source dump's date directory differs per task (OpenDrawer 20250816,
+CloseBlenderLid 20250822, PickPlaceCounterToStove 20250818) -- the registry knows them, so
+take the path from `get_ds_meta` rather than pattern-matching another task's.
 
 Run in the robocasa365 environment, e.g.:
 
@@ -47,9 +56,20 @@ def download_task(task: str, split: str, source: str, repo_id: str, overwrite: b
         return
 
     ds_path = Path(ds_path)
-    if ds_path.exists() and not overwrite:
-        print(f"[skip] already present: {ds_path}")
-        return
+    if not overwrite:
+        # "The directory exists" is NOT "the data is there", and on $SCRATCH that distinction
+        # is the difference between a working dataset and a silent no-op. The purge deletes
+        # files but leaves the directory tree standing, so after it ate these datasets on
+        # 2026-09-21 every task still had data/, meta/, videos/ and extras/ -- and zero files
+        # inside. The old `ds_path.exists()` check skipped all three as "already present",
+        # which is the worst possible answer: it looks like success.
+        n_parquet = sum(1 for _ in ds_path.glob("data/**/*.parquet")) if ds_path.is_dir() else 0
+        if n_parquet:
+            print(f"[skip] already present: {ds_path} ({n_parquet} episodes)")
+            return
+        if ds_path.is_dir():
+            print(f"[warn] {ds_path} exists but holds no episode parquet -- redownloading. "
+                  f"On $SCRATCH this is what the access-time purge leaves behind.")
 
     rel = ds_path.relative_to(_base_datasets_path())
     tar_filename = str(rel.parent / f"{rel.name}.tar")
