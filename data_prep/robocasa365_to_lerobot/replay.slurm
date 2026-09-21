@@ -87,6 +87,21 @@ if [ -z "${EPISODES:-}" ] && [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
   TOTAL=$(python3 -c "import json;print(json.load(open('$BASE/lerobot/meta/info.json'))['total_episodes'])")
   N=${SLURM_ARRAY_TASK_COUNT}
   T=${SLURM_ARRAY_TASK_ID}
+
+  # SLURM_ARRAY_TASK_COUNT is how many tasks THIS submission has, not the index range. So
+  # resubmitting a failed subset as `--array=4-7` gives N=4 with T=4..7, and every chunk
+  # starts past the end of the dataset -- each task prints "chunk empty" and exits 0. Four
+  # jobs COMPLETED in four seconds having replayed nothing, which is the most expensive kind
+  # of success. Refuse it instead: to redo part of an array, resubmit the WHOLE range and let
+  # --resume skip what is cached (it is a per-episode file test, so it costs seconds).
+  if [ "$T" -ge "$N" ]; then
+    echo "ERROR: array index $T >= array size $N. This is a partial-array resubmission" >&2
+    echo "  (e.g. --array=4-7), and the chunk maths needs the original full range to mean" >&2
+    echo "  anything. Resubmit as --array=0-$(( N > T ? N-1 : T ))  (the full range you" >&2
+    echo "  first used); --resume makes the already-finished shards cheap." >&2
+    exit 1
+  fi
+
   CHUNK=$(( (TOTAL + N - 1) / N ))
   START=$(( T * CHUNK ))
   END=$(( START + CHUNK )); [ "$END" -gt "$TOTAL" ] && END=$TOTAL
