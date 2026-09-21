@@ -42,7 +42,19 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
 
-REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
+# REPO is the code that RUNS; SIM_ENV is the checkout that owns envs/robocasa365/.venv.
+# They are separate because a git worktree has the first and not the second: its
+# envs/robocasa365/ has no .venv, and a bare `uv run --project` there would silently build an
+# empty one (docs/envs.md). So point --project at the main checkout and let PYTHONPATH put the
+# worktree's code in front -- the same split train_jeanzay.slurm makes with POINTACT_ENV.
+#
+# This matters for more than tidiness: the branch's replay.py is not the main checkout's. It
+# additionally caches per-point labels and voxel keys, which stage 5's oracle arms need, while
+# computing xyz/rgb identically. Running main's older copy would rebuild the point clouds
+# correctly and quietly omit everything else.
+REPO="${REPO:-/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct}"
+SIM_ENV="${SIM_ENV:-/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct}"
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 # TASK/DATE are overridable because the grid is no longer one task: stage 7 runs three, and
 # the 2026-09-21 $SCRATCH purge means all of them may have to be re-prepped at once. DATE is
@@ -86,7 +98,7 @@ fi
 echo "host=$(hostname) gpu=${CUDA_VISIBLE_DEVICES:-unset} episodes=${EPISODES:-ALL}"
 nvidia-smi -L || true
 
-srun uv run --project envs/robocasa365 --no-sync \
+srun uv run --project "$SIM_ENV/envs/robocasa365" --no-sync \
   data_prep/robocasa365_to_lerobot/replay.py \
   --input-dir "$BASE/lerobot" \
   --cache-dir "$BASE/replay_cache" \

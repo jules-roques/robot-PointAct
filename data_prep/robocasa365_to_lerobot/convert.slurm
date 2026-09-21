@@ -39,7 +39,12 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export UV_OFFLINE=1
 
-REPO=/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct
+# REPO is the code that runs, POINTACT_ENV the checkout owning the root .venv. See the same
+# split in replay.slurm: a worktree has no .venv of its own, and the branch's convert.py is
+# not the main checkout's.
+REPO="${REPO:-/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct}"
+POINTACT_ENV="${POINTACT_ENV:-/lustre/fswork/projects/rech/rgx/unw24jl/code/robot-PointAct}"
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 # TASK/DATE match replay.slurm's; see the note there. Pass the SAME pair to both stages or
 # this converts one task's cache into another task's output directory.
@@ -58,7 +63,7 @@ echo "host=$(hostname) cache=$BASE/replay_cache out=$OUT episodes=${EPISODES:+su
 
 # EPISODES (optional, space-separated) restricts conversion to a subset — e.g. only the
 # successful replays. Unset converts every cached episode.
-srun uv run --no-sync \
+srun uv run --project "$POINTACT_ENV" --no-sync \
   data_prep/robocasa365_to_lerobot/convert.py \
   --cache-dir "$BASE/replay_cache" \
   --output-dir "$OUT" \
