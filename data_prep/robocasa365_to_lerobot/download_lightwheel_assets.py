@@ -42,25 +42,37 @@ def download_group(repo_id: str, prefix: str, dest: Path, files: list[str], over
     refetched = 0
     for i, fname in enumerate(group, 1):
         item = Path(fname).stem
-        marker = dest / item
-        # An existing directory is not an extracted asset. These live on $SCRATCH (the
-        # assets/ subdirectories are symlinks to large storage), and its access-time purge
-        # deletes the .obj/.mtl files while leaving every directory standing -- on
-        # 2026-09-21, 643 of 922 lightwheel item dirs were empty shells. MuJoCo then fails
-        # at scene load with "Error opening file ...FlowerVase012.obj", one asset at a time,
-        # halfway into a replay. Test for a file, not for the directory.
-        if not overwrite and marker.is_dir() and any(marker.rglob("*.obj")):
-            print(f"  ({i}/{len(group)}) skip {item} (present)")
-            continue
-        if marker.is_dir():
-            refetched += 1
-        print(f"  ({i}/{len(group)}) {item}")
+        # Completeness is decided against the ARCHIVE'S OWN member list, not against the
+        # existence of the directory it extracts to, and not against a spot-check inside it.
+        #
+        # Two things force this. These assets live on $SCRATCH (the robocasa assets/
+        # subdirectories are symlinks to it) and its access-time purge deletes files while
+        # leaving every directory standing -- on 2026-09-21, 643 of 922 lightwheel item dirs
+        # were empty shells, so `marker.exists()` called all of them present. But each zip
+        # here is a whole CATEGORY (flower_vase.zip holds FlowerVase001..016), so "does this
+        # category contain any .obj" is also wrong: one surviving vase vouches for fifteen
+        # missing ones. Only a per-member test is right.
+        #
+        # The failure this prevents is slow: MuJoCo reports one missing file at a time, at
+        # scene load, partway into a replay, so a coarse check turns one broken asset tree
+        # into an arbitrarily long sequence of single-file crashes.
         zip_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=fname)
         with zipfile.ZipFile(zip_path) as z:
+            members = [m for m in z.namelist() if not m.endswith("/")]
+            missing = [m for m in members if not (dest / m).is_file()]
+            if not overwrite and not missing:
+                print(f"  ({i}/{len(group)}) skip {item} ({len(members)} files present)")
+                continue
+            if missing and len(missing) < len(members):
+                refetched += 1
+                print(f"  ({i}/{len(group)}) {item} -- {len(missing)}/{len(members)} files "
+                      f"missing, re-extracting")
+            else:
+                print(f"  ({i}/{len(group)}) {item}")
             z.extractall(path=dest)
     if refetched:
-        print(f"[{prefix}] refetched {refetched} item(s) whose directory existed but was "
-              f"empty -- the signature of the $SCRATCH purge, not of a partial download.")
+        print(f"[{prefix}] {refetched} archive(s) were PARTIALLY present -- files gone, "
+              f"directories left behind. That is the $SCRATCH purge, not a partial download.")
 
 
 def main() -> None:
