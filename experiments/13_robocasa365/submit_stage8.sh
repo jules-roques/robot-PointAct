@@ -10,7 +10,9 @@
 # The fine arms need the 2.5 mm dataset, built on V100 + CPU (no H100) by:
 #   sbatch --array=0-7 --export=ALL,VOXEL_SIZE=0.0025,REPO=$PWD data_prep/robocasa365_to_lerobot/replay.slurm
 #   sbatch --export=ALL,VOXEL_SIZE=0.0025,REPO=$PWD data_prep/robocasa365_to_lerobot/convert.slurm
-# then link the 1 cm root's text_context/ and roi_meta/ into it (same 514 episodes, identity
+# then link the 1 cm root's text_context/, roi_meta/ and robot_state_action_stats/ into it, and build
+# meta/source_episode_map.json (python -m data_prep.robocasa365_to_lerobot.episode_index_map
+# --source-dir <src>/lerobot --dataset-dir <root>/OpenDrawer; the geom oracle needs it). Same 514 episodes, identity
 # map -- check meta/source_episode_map.json). This script refuses a fine arm until it exists.
 #
 # Anything already queued under the same job name is skipped. Smoke new arms first:
@@ -51,7 +53,7 @@ for run in "${RUN_LIST[@]}"; do
     config="$RUNS_DIR/$run.yaml"
     [ -f "$config" ] || { echo "no such run config: $config" >&2; exit 1; }
     if grep -q "lerobot_point_lmdb_g2.5mm" "$config"; then
-        for need in points_3views cache_meta.json text_context roi_meta/target_positions.npz; do
+        for need in points_3views cache_meta.json text_context roi_meta/target_positions.npz meta/source_episode_map.json; do
             if [ ! -e "$FINE_ROOT/$need" ]; then
                 echo "refusing $run: $FINE_ROOT/$need missing (build the 2.5 mm dataset first)" >&2
                 exit 1
