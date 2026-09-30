@@ -109,6 +109,7 @@ table filters straight to one stage.
 | 5 | `Stage 5: Five tasks x four samplers` | the twenty `s5-*` | does the sampling result hold across five tasks at one budget? |
 | 6 | `Stage 6: Warp space` | `s6-od-nosampler-s0` | what does the whole cloud, with no input sampler at all, score? |
 | 7 | `Stage 7: Point budget x sampler (Utonia)` | the fifty-seven `s7-{od,blender,ppcs}-*` | **the point-budget axis, re-measured on an encoder whose pretraining granularity matches ours** |
+| 8 | `Stage 8: ROI resolution at fixed budget (Utonia scale)` | the five `s8-od-oracle-n8192-x*` | once the budget saturates the ROI, do more ROI points (a finer grid) help? |
 
 **Stage 3 evals are not interchangeable with the other arms'.** The anchor has to be produced
 live by a MolmoPoint server running beside the policy, so a stage-3 eval needs roughly twice
@@ -343,6 +344,51 @@ predicts wall-clock), while this reports where that time goes and how much it va
 the profiler's `step_total` to sit below pilot_throughput's s/step — it has no gradient
 accumulation, no DDP all-reduce and no checkpoint writes. Ten repetitions is enough for a mean
 and thin for a standard deviation, which is half of what is being reported; 30 is the default.
+
+### Stage 8 — ROI resolution at a fixed budget
+
+Stage 7 left OpenDrawer saturated (30K, n=500): oracle flat at ~76% from 2048 points, eef from
+4096, and the whole unsampled cloud (75.7%) tying the oracle crop. At 1 cm the oracle Gaussian
+already takes 96% of the points within 4 cm of the handle at 4096 and 100% at 8192, so a bigger
+budget has nothing left to draw there. Stage 8 holds the budget at 8192 and adds ROI points the
+only way possible: a finer grid.
+
+**Resolution is changed the way Utonia changes it — scale the cloud, keep `grid_size` at 0.01.**
+Order is scale → voxelize → sample: sampling first would let a later voxel merge shrink the draw
+below the budget by a grid-dependent amount. Two knobs, both saved in the checkpoint's
+`config.json` so eval follows without flags:
+
+| knob | where | what |
+|---|---|---|
+| `point_voxel_size` | data | metric grid the cache is re-voxelized onto **before** sampling (coarsen-only, checked against `cache_meta.json`); `run_server` voxelizes the live cloud onto the same grid |
+| `ptv3_coord_scale` | train | xyz × s at the PTv3 input (coord, RoPE and the stem's xyz channels together) |
+
+Everything upstream of the encoder stays metric, so σ = 8 cm is physical at every scale.
+
+| arm | s | grid | data | network voxel | coarsest level |
+|---|---|---|---|---|---|
+| `s7-od-oracle-n8192-s0` (stage 7) | 1 | 10 mm | 1 cm | 10 mm | 16 cm |
+| `…-x1.41-g7.07mm` | √2 | 7.1 mm | 2.5 mm render | 7.1 mm | 11 cm |
+| `…-x2-g5mm` | 2 | 5 mm | 2.5 mm render | 5 mm | 8 cm |
+| `…-x4-g2.5mm` | 4 | 2.5 mm | 2.5 mm render | 2.5 mm | 4 cm |
+| `…-x2` (control) | 2 | 10 mm | 1 cm | 5 mm | 8 cm |
+| `…-x4` (control) | 4 | 10 mm | 1 cm | 2.5 mm | 4 cm |
+
+**The controls are what make the fine arms readable.** They apply the same rescale to the 1 cm
+data, so they get every side effect of scaling (smaller receptive field, context points s voxels
+apart) and no new points. Fine wins and control does not → resolution helped. Both lose → the
+rescale costs more than the detail buys. Both win → it was the rescale.
+
+**Data.** One 2.5 mm render serves all three fine grids: `VOXEL_SIZE=0.0025` to `replay.slurm`
+and `convert.slurm` writes `replay_cache_g2.5mm` and `lerobot_point_lmdb_g2.5mm/` beside, never
+over, the 1 cm data. Smoke (episodes 0-2): 66-94K points/frame (~4× the 1 cm cloud), ~1 min per
+episode on a V100, ~0.6 GB per episode of cache. Link the 1 cm root's `text_context/` and
+`roi_meta/` into the new root (same 514 episodes, identity map).
+
+`probe_roi_resolution.py` gives the x-axis: points within 2/4/8 cm of the handle, available and
+drawn at 8192, per grid. `generate_stage8.py` writes the arms, `submit_stage8.sh` submits them
+(it refuses a fine arm until the 2.5 mm dataset exists) and prints the eval commands — same
+seeds as stage 7, so s = 1 is stage 7's arm.
 
 ### W&B conventions
 
