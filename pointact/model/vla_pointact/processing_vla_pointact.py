@@ -81,7 +81,6 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
             robot_inputs["actions"] = actions
         return robot_inputs
 
-    @torch.no_grad
     @staticmethod
     def vlm_messages(images: list, task: str) -> list[dict]:
         """The chat the VLM sees for one frame: every camera image, then the instruction.
@@ -109,6 +108,7 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         )
         return inputs.to(device) if device is not None else inputs
 
+    @torch.no_grad
     def _prepare_robot_inputs(self, batch: dict, points_workspace: dict=None, remove_arm: bool=False):
         """Prepare model inputs from raw robot batch"""
         batch_messages = []
