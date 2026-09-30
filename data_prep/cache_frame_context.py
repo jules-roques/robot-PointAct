@@ -238,21 +238,24 @@ def verify(args, processor, model, episodes, video_keys, out_dir: Path) -> None:
         raise SystemExit(f"verify: nothing built yet in {out_dir}")
     picked = rng.sample(built, min(args.verify, len(built)))
     frames = EpisodeFrames(args.dataset_dir, picked, video_keys)
+    per_episode = -(-args.verify // len(picked))  # N frames in total, spread over the episodes
+    samples = []
+    for i in range(len(picked)):
+        ep_idx, task, frame_indices, views = frames[i]
+        for r in rng.sample(range(len(frame_indices)), min(per_episode, len(frame_indices))):
+            samples.append((ep_idx, int(frame_indices[r]),
+                            frame_messages(processor, views, video_keys, task, [r])))
+
     frame_means, frame_bad = [], []
     with env.begin() as txn:
-        for i in range(len(picked)):
-            ep_idx, task, frame_indices, views = frames[i]
-            r = rng.randrange(len(frame_indices))
-            stored = txn.get(f"{ep_idx}-{int(frame_indices[r])}".encode())
+        for ep_idx, frame, messages in samples:
+            stored = txn.get(f"{ep_idx}-{frame}".encode())
             if stored is None:
-                raise KeyError(f"{ep_idx}-{int(frame_indices[r])} missing from {out_dir}")
+                raise KeyError(f"{ep_idx}-{frame} missing from {out_dir}")
             stored = msgpack.unpackb(stored).astype(np.float32)
-            fresh = context_batch(
-                model, processor, frame_messages(processor, views, video_keys, task, [r]),
-                args.device,
-            )[0].astype(np.float32)
+            fresh = context_batch(model, processor, messages, args.device)[0].astype(np.float32)
             if fresh.shape != stored.shape:
-                raise ValueError(f"shape {fresh.shape} != stored {stored.shape} at {ep_idx}-{r}")
+                raise ValueError(f"shape {fresh.shape} != stored {stored.shape} at {ep_idx}-{frame}")
             num = (fresh * stored).sum(-1)
             den = np.linalg.norm(fresh, axis=-1) * np.linalg.norm(stored, axis=-1) + 1e-6
             cos = num / den
