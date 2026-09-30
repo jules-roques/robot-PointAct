@@ -128,8 +128,11 @@ class EpisodeFrames(Dataset):
 
 
 def frame_messages(processor, views: dict, video_keys: list[str], task: str, rows) -> list:
+    # np.asarray: through a DataLoader the arrays arrive as torch tensors (default_convert).
     return [
-        processor.vlm_messages([Image.fromarray(views[key][r]) for key in video_keys], task)
+        processor.vlm_messages(
+            [Image.fromarray(np.asarray(views[key][r])) for key in video_keys], task
+        )
         for r in rows
     ]
 
@@ -258,6 +261,10 @@ def main() -> None:
     parser.add_argument("--map-size-gb", type=int, default=400)
     parser.add_argument("--verify", type=int, default=0,
                         help="Only spot-check N random stored frames against a fresh forward.")
+    parser.add_argument("--processor-dir", default="",
+                        help="With --verify: load the processor a trained checkpoint saved (what "
+                             "eval uses) instead of rebuilding it, closing the last gap between "
+                             "the cache and the live path.")
     parser.add_argument("--limit-episodes", type=int, default=0,
                         help="Smoke test: only the first N episodes (resume completes the rest).")
     parser.add_argument("--device", default="cuda")
@@ -268,7 +275,13 @@ def main() -> None:
     episodes = read_episodes(args.dataset_dir)
     if args.limit_episodes:
         episodes = episodes[: args.limit_episodes]
-    processor = load_processor(args.vlm_path, args.chat_template, args.min_pixels, args.max_pixels)
+    if args.processor_dir:
+        from pointact.model.vla_pointact.processing_vla_pointact import VLAEncDec3DProcessor
+
+        processor = VLAEncDec3DProcessor.from_pretrained(args.processor_dir)
+        print(f"processor from {args.processor_dir}")
+    else:
+        processor = load_processor(args.vlm_path, args.chat_template, args.min_pixels, args.max_pixels)
     model = load_vlm(args.vlm_path, args.attn, args.device)
 
     if args.verify:

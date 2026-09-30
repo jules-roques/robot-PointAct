@@ -55,4 +55,5 @@ uv run --project "$POINTACT_ENV" --no-sync \
         --vlm-path "$VLM" \
         --num-workers 12 \
         ${LIMIT_EPISODES:+--limit-episodes $LIMIT_EPISODES} \
+        ${PROCESSOR_DIR:+--processor-dir $PROCESSOR_DIR} \
         ${VERIFY:+--verify $VERIFY}
