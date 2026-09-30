@@ -141,16 +141,23 @@ def frame_messages(processor, views: dict, video_keys: list[str], task: str, row
 def context_batch(model, processor, batch_messages: list, device) -> list[np.ndarray]:
     """Per-frame (L_i, hidden) fp16 context, via the same calls select_action makes.
 
-    Each frame is PREPROCESSED ALONE -- one `vlm_inputs` call per frame, exactly the batch-1
-    call eval makes -- and only the forward is batched. Measured 2026-09-30 (OpenDrawer, 32
-    frames): passing several multi-image chats to one apply_chat_template call hands some
-    frames the previous frame's image features (batch 4/12/16/24/32 wrong, 2/8 right,
-    same under flash_attention_2 and sdpa), which a cache would then silently train on.
-    Frames of equal token length are stacked for the forward; any other length runs alone.
+    Everything up to the LM runs ONE FRAME AT A TIME, exactly eval's batch-1 calls: the
+    preprocessing (`vlm_inputs`) and the vision tower (`embed_vlm_inputs`). Only the LM
+    forward is batched. Measured 2026-09-30 on OpenDrawer: a batched vision tower moves
+    image features enough that ~16% of context tokens fall below cosine 0.99 against the
+    batch-1 context, while a batched LM over batch-1 embeddings matches it (mean 0.9996).
+    Frames of equal token length are stacked for the LM; any other length runs alone.
     """
-    from pointact.model.vla_pointact.modeling_vla_pointact import encode_vlm_context
+    from pointact.model.vla_pointact.modeling_vla_pointact import (
+        embed_vlm_inputs,
+        encode_vlm_context,
+    )
 
-    per_frame = [processor.vlm_inputs([messages]) for messages in batch_messages]
+    per_frame = [processor.vlm_inputs([messages], device=device) for messages in batch_messages]
+    embeds = [
+        embed_vlm_inputs(model, p["input_ids"], p["pixel_values"], p["image_grid_thw"])
+        for p in per_frame
+    ]
     groups: dict[int, list[int]] = {}
     for i, inputs in enumerate(per_frame):
         groups.setdefault(inputs["input_ids"].shape[1], []).append(i)
@@ -158,15 +165,15 @@ def context_batch(model, processor, batch_messages: list, device) -> list[np.nda
     out: list[np.ndarray | None] = [None] * len(per_frame)
     for idx in groups.values():
         inputs = {
-            key: torch.cat([per_frame[i][key] for i in idx], dim=0).to(device)
-            for key in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw")
+            key: torch.cat([per_frame[i][key] for i in idx], dim=0)
+            for key in ("input_ids", "attention_mask", "image_grid_thw")
         }
         outputs = encode_vlm_context(
             model,
             inputs["input_ids"],
             attention_mask=inputs["attention_mask"].bool(),  # select_action passes it as bool
-            pixel_values=inputs["pixel_values"],
-            image_grid_thw=inputs["image_grid_thw"],
+            image_grid_thw=inputs["image_grid_thw"],  # for the 3D position ids
+            inputs_embeds=torch.cat([embeds[i] for i in idx], dim=0),
             use_cache=False,
         )
         hidden = outputs.last_hidden_state.to(torch.float16).cpu().numpy()

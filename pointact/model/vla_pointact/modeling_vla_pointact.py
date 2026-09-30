@@ -34,6 +34,28 @@ from .configuration_pointact import VLAEncDec3DModelConfig
 logger = logging.get_logger(__name__)
 
 
+def embed_vlm_inputs(vlm_backbone, input_ids, pixel_values=None, image_grid_thw=None):
+    """Token embeddings with the vision tower's image features scattered into the image slots.
+
+    NOT batch-invariant: measured 2026-09-30, running several frames' images through the
+    vision tower in one call moves their features (per-token cosine to the one-frame result
+    as low as 0.5, ~4% of tokens below 0.99), which the LM then amplifies to ~16% of context
+    tokens. The LM itself batches cleanly (0.9996). So data_prep/cache_frame_context.py calls
+    this once per frame -- eval's batch-1 call -- and batches only the LM forward.
+    """
+    inputs_embeds = vlm_backbone.get_input_embeddings()(input_ids)
+    if pixel_values is not None:
+        image_embeds = vlm_backbone.get_image_features(
+            pixel_values, image_grid_thw, return_dict=True
+        ).pooler_output
+        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_mask, _ = vlm_backbone.model.get_placeholder_mask(
+            input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+        )
+        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+    return inputs_embeds
+
+
 def encode_vlm_context(
     vlm_backbone: Qwen2_5_VLForConditionalGeneration,
     input_ids: torch.LongTensor,
@@ -73,16 +95,7 @@ def encode_vlm_context(
         )
 
     if inputs_embeds is None:
-        inputs_embeds = vlm_backbone.get_input_embeddings()(input_ids)
-        if pixel_values is not None:
-            image_embeds = vlm_backbone.get_image_features(
-                pixel_values, image_grid_thw, return_dict=True
-            ).pooler_output
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            image_mask, _ = vlm_backbone.model.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+        inputs_embeds = embed_vlm_inputs(vlm_backbone, input_ids, pixel_values, image_grid_thw)
 
     return vlm_backbone.model(
         position_ids=position_ids,
