@@ -386,7 +386,18 @@ episode on a V100, ~0.6 GB per episode of cache. Link the 1 cm root's `text_cont
 `roi_meta/` into the new root (same 514 episodes, identity map).
 
 `probe_roi_resolution.py` gives the x-axis: points within 2/4/8 cm of the handle, available and
-drawn at 8192, per grid. `generate_stage8.py` writes the arms, `submit_stage8.sh` submits them
+drawn at 8192, per grid. Measured 2026-09-30 (150 frames, medians):
+
+| grid | cloud | ≤4 cm available → drawn | ≤8 cm available → drawn | ROI share of the 8192 |
+|---|---|---|---|---|
+| 1 cm | 21.6K | 60 → **60** (100%) | 275 → 275 | 3% |
+| 7.1 mm | 37.7K | 112 → **108** (96%) | 536 → 516 | 6% |
+| 5 mm | 60.0K | 210 → **179** (85%) | 979 → 811 | 10% |
+| 2.5 mm | 88.5K | 520 → **331** (64%) | 2683 → 1539 | 19% |
+
+The policy's ROI input grows 5.5× across the axis, monotonically — the arm tests what it
+claims. At 2.5 mm the budget stops capturing everything near the handle (the floor keeps
+giving background its share), which is why the plot is against *drawn* points, not grid. `generate_stage8.py` writes the arms, `submit_stage8.sh` submits them
 (it refuses a fine arm until the 2.5 mm dataset exists) and prints the eval commands — same
 seeds as stage 7, so s = 1 is stage 7's arm.
 
