@@ -13,6 +13,8 @@
 # Submit (sharded — 8 parallel chunks; per-episode caches are disjoint so this is safe):
 #   sbatch --array=0-7 --export=ALL,TASK=CloseBlenderLid \
 #          data_prep/robocasa365_to_lerobot/replay.slurm
+# Submit (a finer grid, beside the 1 cm cache -> replay_cache_g2.5mm):
+#   sbatch --array=0-7 --export=ALL,VOXEL_SIZE=0.0025 data_prep/robocasa365_to_lerobot/replay.slurm
 #
 # Targets the V100 partition because this stage only renders (no model inference), so the
 # cheapest available GPU is the right one.
@@ -63,6 +65,14 @@ export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 TASK="${TASK:-OpenDrawer}"
 DATE="${DATE:-20250816}"
 BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/$TASK/$DATE"
+
+# VOXEL_SIZE (m) selects the render grid. Anything but the 1 cm default lands in its own
+# `_g<mm>` cache and dataset root, derived here rather than left to the caller: convert.slurm
+# runs --overwrite, so a finer grid pointed at the default paths would rebuild over the 1 cm
+# data every existing run trains on.
+VOXEL_SIZE="${VOXEL_SIZE:-0.01}"
+GRID_SUFFIX=$(python3 -c "v=float('$VOXEL_SIZE'); print('' if abs(v-0.01)<1e-12 else '_g%gmm' % (v*1000))")
+CACHE_DIR="$BASE/replay_cache$GRID_SUFFIX"
 
 if [ ! -d "$BASE/lerobot" ]; then
     echo "ERROR: no source demos at $BASE/lerobot" >&2
@@ -116,6 +126,7 @@ nvidia-smi -L || true
 srun uv run --project "$SIM_ENV/envs/robocasa365" --no-sync \
   data_prep/robocasa365_to_lerobot/replay.py \
   --input-dir "$BASE/lerobot" \
-  --cache-dir "$BASE/replay_cache" \
+  --cache-dir "$CACHE_DIR" \
+  --voxel-size "$VOXEL_SIZE" \
   --resume \
   ${EPISODES:+--episodes $EPISODES}

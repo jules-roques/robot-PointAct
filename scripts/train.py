@@ -208,6 +208,28 @@ def preview_sample(trainer, processor, data_module) -> None:
     print(f"sample: {processor.tokenizer.decode(sample['input_ids'])}")
 
 
+def record_point_grid(model, dataset, training_args) -> None:
+    """Write the grid the training clouds were voxelized onto into the model config.
+
+    run_server downsamples the live cloud to config.point_voxel_size, so this is what keeps
+    eval on the training grid. It is read off the datasets rather than trusted from a yaml
+    field, because the effective grid is the cache's own when point_voxel_size is unset.
+    """
+    if not hasattr(model.config, "point_voxel_size"):
+        return
+    lerobot = getattr(dataset, "lerobot_dataset", None)
+    grids = {round(ds.point_voxel_size, 9) for ds in getattr(lerobot, "_datasets", [])
+             if hasattr(ds, "point_voxel_size")}
+    if len(grids) > 1:
+        raise ValueError(f"datasets disagree on point_voxel_size: {sorted(grids)}; one model "
+                         f"has one eval grid, so mixing grids is unsupported")
+    if grids:
+        model.config.point_voxel_size = grids.pop()
+    logger.info("point grid %.4g m, coord scale %.4g -> network voxel %.4g m",
+                model.config.point_voxel_size, training_args.ptv3_coord_scale,
+                0.01 / training_args.ptv3_coord_scale)
+
+
 def train():
     training_args = parse_training_args(logger=logger)
     recipe = resolve_recipe(training_args.model_class)
@@ -238,6 +260,7 @@ def train():
     data_module = create_data_module(processor=processor, args=training_args)
     # Configure the processor with robot dataset stats, chat template, etc.
     configure_processor(processor, data_module["train_dataset"], training_args, logger=logger)
+    record_point_grid(model, data_module["train_dataset"], training_args)
 
     model.config.use_cache = False
     if training_args.gradient_checkpointing:

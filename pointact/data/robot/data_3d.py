@@ -1,3 +1,4 @@
+import json
 import os
 import random
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from pointact.constants import OBS_POINTS
 
 from pointact.data.robot.base import LeRobotDatasetMixin
 from pointact.data.robot.registry import register_robot_dataset
+from pointact.data.robot.voxel import voxel_downsample
 from pointact.data.transforms.pointcloud import (
     augment_point_cloud_color,
     random_rotate_point_around_z,
@@ -61,6 +63,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         video_key_ids_for_vlm: list[int] | None = None,
         points_workspace: dict | None = None,
         max_npoints: int = 4096,
+        # Metric grid to re-voxelize onto before sampling; None keeps the cache's own grid.
+        # See pointact/data/schema.py.
+        point_voxel_size: float | None = None,
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
         # MolmoPoint-guided sampling (optional). When molmo_anchor_dirname is set, a
@@ -157,6 +162,31 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         assert point_cloud_dirname is not None
         self.point_cloud_dir = os.path.join(self.root, point_cloud_dirname)
+
+        # The grid the cache was rendered at, from the replay's own record of it. The order is
+        # voxelize -> sample, never the reverse: sampling first would let a later merge shrink
+        # the draw below max_npoints by an amount that differs per grid, which is the very
+        # variable a resolution study holds fixed.
+        cache_meta = Path(self.root) / "cache_meta.json"
+        self.cache_voxel_size = (
+            float(json.loads(cache_meta.read_text()).get("voxel_size", 0.01))
+            if cache_meta.is_file() else 0.01
+        )
+        self.point_voxel_size = (
+            self.cache_voxel_size if point_voxel_size is None else float(point_voxel_size)
+        )
+        if self.point_voxel_size < self.cache_voxel_size * (1 - 1e-6):
+            raise ValueError(
+                f"{repo_id}: point_voxel_size={self.point_voxel_size} is finer than the cache's "
+                f"{self.cache_voxel_size} m grid ({cache_meta}). Re-voxelizing can only merge "
+                f"points; a finer grid needs a finer replay."
+            )
+        self._revoxelize = self.point_voxel_size > self.cache_voxel_size * (1 + 1e-6)
+        if self._revoxelize and oracle_sampling and oracle_gt == "labels":
+            raise ValueError(
+                "point_voxel_size re-voxelizing is not supported with oracle_gt=labels: "
+                "per-point labels would need a majority vote per merged voxel. Use oracle_gt=geom."
+            )
         self._point_cloud_lmdb_env = None
         self._point_cloud_lmdb_txn = None
         self._point_cloud_lmdb_pid = None
@@ -325,6 +355,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         oracle_anchor = (self.load_oracle_geom_anchor(ep_idx, frame_idx)
                          if self.oracle_sampling and self.oracle_gt == "geom" else None)
         point_cloud, point_labels = self.filter_point_cloud_by_workspace(point_cloud, point_labels)
+        if self._revoxelize:
+            point_cloud = voxel_downsample(point_cloud, self.point_voxel_size)
         point_cloud = self.augment_point_cloud(point_cloud, item, molmo_anchors, point_labels,
                                                oracle_anchor)
         point_cloud = self.center_point_cloud(point_cloud, item)

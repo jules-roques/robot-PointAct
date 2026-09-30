@@ -65,6 +65,10 @@ class ServerArgs:
     # What an "anchor" policy does when no anchor arrives for a frame. Must equal the
     # `molmo_fallback` of the data config it was trained with.
     point_sampling_fallback: str = "uniform"   # "uniform" | "eef"
+    # Metric grid the live cloud is voxelized onto. Left unset it follows the checkpoint's own
+    # point_voxel_size (the grid its training clouds were on; 0.01 for every run before it was
+    # recorded), so a 5 mm policy cannot be silently evaluated at 1 cm. Set only to mismatch.
+    voxel_size: float | None = None
 
     # diffusion
     num_denoise_steps: int = 10
@@ -117,10 +121,16 @@ class Policy:
         self.processor.point_sampling_sigma = args.point_sampling_sigma
         self.processor.point_sampling_floor = args.point_sampling_floor
         self.processor.point_sampling_fallback = args.point_sampling_fallback
+        self.processor.voxel_size = (
+            args.voxel_size if args.voxel_size is not None
+            else float(model_config.get("point_voxel_size", 0.01))
+        )
         print(
             f"[server] point_sampling={args.point_sampling} "
             f"fallback={args.point_sampling_fallback} "
-            f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor}"
+            f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor} "
+            f"voxel_size={self.processor.voxel_size} "
+            f"coord_scale={model_config.get('ptv3_coord_scale', 1.0)}"
         )
 
         if model_config.get("context_source", "vlm") != "vlm":

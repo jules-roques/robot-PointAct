@@ -51,21 +51,34 @@ export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 TASK="${TASK:-OpenDrawer}"
 DATE="${DATE:-20250816}"
 BASE="$SCRATCH/datasets/robot_data/robocasa365/v1.0/target/atomic/$TASK/$DATE"
-OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb/$TASK"
+# VOXEL_SIZE (m) selects the render grid. Anything but the 1 cm default lands in its own
+# `_g<mm>` cache and dataset root, derived here rather than left to the caller: convert.slurm
+# runs --overwrite, so a finer grid pointed at the default paths would rebuild over the 1 cm
+# data every existing run trains on.
+VOXEL_SIZE="${VOXEL_SIZE:-0.01}"
+GRID_SUFFIX=$(python3 -c "v=float('$VOXEL_SIZE'); print('' if abs(v-0.01)<1e-12 else '_g%gmm' % (v*1000))")
+CACHE_DIR="$BASE/replay_cache$GRID_SUFFIX"
+OUT="$SCRATCH/datasets/robot_data/robocasa365/lerobot_point_lmdb$GRID_SUFFIX/$TASK"
 
-if [ ! -d "$BASE/replay_cache" ]; then
-    echo "ERROR: no replay cache at $BASE/replay_cache -- run replay.slurm first" >&2
+if [ ! -d "$CACHE_DIR" ]; then
+    echo "ERROR: no replay cache at $CACHE_DIR -- run replay.slurm (same VOXEL_SIZE) first" >&2
+    exit 1
+fi
+# The cache records the grid it was rendered at; refuse to file it under another one.
+CACHE_GRID=$(python3 -c "import json; print(json.load(open('$CACHE_DIR/cache_meta.json'))['voxel_size'])")
+if ! python3 -c "import sys; sys.exit(abs($CACHE_GRID - $VOXEL_SIZE) > 1e-12)"; then
+    echo "ERROR: $CACHE_DIR was rendered at voxel_size=$CACHE_GRID, not VOXEL_SIZE=$VOXEL_SIZE" >&2
     exit 1
 fi
 
 cd "$REPO"
-echo "host=$(hostname) cache=$BASE/replay_cache out=$OUT episodes=${EPISODES:+subset}"
+echo "host=$(hostname) cache=$CACHE_DIR out=$OUT episodes=${EPISODES:+subset}"
 
 # EPISODES (optional, space-separated) restricts conversion to a subset — e.g. only the
 # successful replays. Unset converts every cached episode.
 srun uv run --project "$POINTACT_ENV" --no-sync \
   data_prep/robocasa365_to_lerobot/convert.py \
-  --cache-dir "$BASE/replay_cache" \
+  --cache-dir "$CACHE_DIR" \
   --output-dir "$OUT" \
   --repo-id "$TASK" \
   --overwrite \

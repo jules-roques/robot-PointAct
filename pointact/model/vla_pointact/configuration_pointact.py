@@ -30,6 +30,8 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         flow_matching_loss="x-loss",    # v-loss, x-loss 
         time_embed_size=512,
         ptv3_patch_size=1024,
+        ptv3_coord_scale=1.0,
+        point_voxel_size=0.01,
         ptv3_enc_mode=True,
         ptv3_enc_channels=(32, 64, 128, 256, 512),
         ptv3_enc_depths=(2, 2, 2, 6, 2),
@@ -78,6 +80,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
 
         self.ctx_embed_size = ctx_embed_size
         self.ptv3_patch_size = ptv3_patch_size
+        # Both saved with the checkpoint so eval reproduces training without being told:
+        # the input scale the encoder was trained at, and the metric grid the training clouds
+        # were voxelized onto (run_server downsamples the live cloud to the same grid).
+        self.ptv3_coord_scale = ptv3_coord_scale
+        self.point_voxel_size = point_voxel_size
         self.ptv3_enc_mode = ptv3_enc_mode
         self.ptv3_enc_channels = ptv3_enc_channels
         self.ptv3_enc_depths = ptv3_enc_depths

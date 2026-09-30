@@ -53,6 +53,13 @@ class TrainPipelineConfig(TrainingArguments):
     ctx_embed_size: int = field(default=256)
     time_embed_size: int = field(default=256)
     ptv3_patch_size: int = field(default=1024)
+    # Multiplies point coordinates at the PTv3 input; grid_size stays 0.01. One network voxel
+    # is then 0.01 / s metres, which is how Utonia itself changes granularity (its transform's
+    # RandomScale sits in front of a hardcoded 0.01 grid). Scaling here rather than in the
+    # dataset keeps state, actions, sampling and centring metric, so the Gaussian's sigma stays
+    # physical for free. Pair s > 1 with a point cache fine enough to fill the finer voxels
+    # (data `point_voxel_size`), or the voxels are mostly empty.
+    ptv3_coord_scale: float = field(default=1.0)
     ptv3_enc_mode: bool = field(default=True)
     ptv3_enc_channels: List[int] = field(default_factory=lambda: [64, 128, 256, 384, 512])
     ptv3_enc_depths: List[int] = field(default_factory=lambda: [2, 2, 2, 6, 2])
@@ -148,6 +155,8 @@ class TrainPipelineConfig(TrainingArguments):
     exp_context: str | None = field(default=None)  # vlm, text_cache
     exp_seed: int | None = field(default=None)
     exp_stage: str | None = field(default=None)  # A (npoints sweep), B (task transfer)
+    exp_scale: float | None = field(default=None)  # ptv3_coord_scale, when a run varies it
+    exp_grid: float | None = field(default=None)   # point_voxel_size (m), when a run varies it
 
     def __post_init__(self):
         super().__post_init__()

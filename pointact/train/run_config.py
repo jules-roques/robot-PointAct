@@ -36,7 +36,23 @@ META_TO_EXP_FIELD = {
     "context": "exp_context",
     "seed": "exp_seed",
     "stage": "exp_stage",
+    "scale": "exp_scale",
+    "grid": "exp_grid",
 }
+
+
+def _resolution_tokens(meta: dict[str, Any]) -> list[str]:
+    """`x2`, `g5mm`: coordinate scale and point grid, only when off the 1.0 / 1 cm default.
+
+    Load-bearing, not cosmetic: output_dir derives from the run name, so without them a
+    rescaled arm would resume into the stock arm's directory and report its checkpoints.
+    """
+    tokens = []
+    if meta.get("scale") is not None and float(meta["scale"]) != 1.0:
+        tokens.append(f"x{float(meta['scale']):g}")
+    if meta.get("grid") is not None and float(meta["grid"]) != 0.01:
+        tokens.append(f"g{float(meta['grid']) * 1000:.3g}mm")
+    return tokens
 
 #: Short tokens used to build run names, e.g. OpenDrawer/eef/4096 -> od-eef-n4096-s0.
 TASK_ABBREV = {
@@ -122,22 +138,24 @@ def run_name_from_meta(meta: dict[str, Any]) -> str:
     if meta.get("context") and meta["context"] != "text_cache":
         # text_cache is the default for this grid, so only the exception is worth the chars.
         parts.append(str(meta["context"]))
+    parts.extend(_resolution_tokens(meta))
     parts.append(f"s{meta.get('seed', 0)}")
     return "-".join(parts)
 
 
 def group_from_meta(meta: dict[str, Any]) -> str:
     """W&B group: the arm identity, shared by its seeds and by its eval runs."""
-    return "/".join(
+    parts = [
         str(meta.get(key)) for key in ("task", "sampling", "npoints") if meta.get(key) is not None
-    )
+    ]
+    return "/".join(parts + _resolution_tokens(meta))
 
 
 def tags_from_meta(meta: dict[str, Any]) -> list[str]:
     tags = [str(meta[key]) for key in ("task", "sampling", "context", "stage") if meta.get(key)]
     if meta.get("npoints"):
         tags.append(f"n{meta['npoints']}")
-    return tags
+    return tags + _resolution_tokens(meta)
 
 
 def resolve_run_config(path: str | Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:

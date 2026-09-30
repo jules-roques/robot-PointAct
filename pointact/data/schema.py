@@ -51,6 +51,11 @@ class LerobotConfig:
     
     points_workspace: dict | None = None
     max_npoints: int = 4096
+    # Metric grid (m) the cloud is re-voxelized onto BEFORE sampling. None keeps the cache's
+    # own grid (cache_meta.json voxel_size). May only coarsen: a 2.5 mm cache can serve 5 mm
+    # or 7.1 mm, a 1 cm one cannot serve 5 mm. Recorded in the checkpoint, and eval voxelizes
+    # the live cloud to the same grid -- see ptv3_coord_scale for the matching model side.
+    point_voxel_size: float | None = None
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
     point_cloud_dirname: str | None = None
 

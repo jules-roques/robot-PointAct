@@ -287,6 +287,9 @@ class RobotPointProcessorBase(RobotProcessorBase):
     # and correspondingly harder to notice. eval_robocasa365.sh derives it from the
     # checkpoint's data_config.yaml rather than leaving it to the caller.
     point_sampling_fallback: str = "uniform"   # "uniform" | "eef"
+    # Grid the live cloud is voxelized onto; run_server sets it from the checkpoint's
+    # point_voxel_size so eval sees the grid training did.
+    voxel_size: float = 0.01
 
     def _sampling_anchor(self, mini_batch: dict) -> np.ndarray | None:
         """Centre of the sampling density for this frame, in the point-cloud (base) frame."""
@@ -388,7 +391,7 @@ class RobotPointProcessorBase(RobotProcessorBase):
         workspace: dict,
         *,
         remove_arm: bool = False,
-        voxel_size: float = 0.01,
+        voxel_size: float | None = None,
     ) -> np.ndarray:
         has_existing_point_cloud = "observation.points" in mini_batch
         if has_existing_point_cloud:
@@ -396,6 +399,8 @@ class RobotPointProcessorBase(RobotProcessorBase):
         else:
             point_cloud = self._build_point_cloud_from_cameras(mini_batch, repo_id, workspace)
 
+        if voxel_size is None:
+            voxel_size = self.voxel_size
         point_cloud = self._voxel_downsample_point_cloud(point_cloud, voxel_size=voxel_size)
         if remove_arm and (not has_existing_point_cloud or "observation.robot_joints_bbox" in mini_batch):
             point_cloud = self._remove_robot_arm_points(point_cloud, mini_batch)

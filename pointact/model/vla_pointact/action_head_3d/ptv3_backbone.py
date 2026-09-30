@@ -29,6 +29,17 @@ def get_ptv3_model_cls(ptv3_backend, with_action=False):
     )
 
 
+def scale_point_coords(pc_fts, coord_scale):
+    """Scale the xyz columns, which both `coord` and the stem's `feat` are read from.
+
+    Scaling them together is the point: the grid, RoPE and the pretrained stem then all see
+    the cloud at the same granularity, exactly as Utonia's own RandomScale presents it.
+    """
+    if coord_scale == 1.0:
+        return pc_fts
+    return torch.cat([pc_fts[:, :3] * coord_scale, pc_fts[:, 3:]], dim=1)
+
+
 class PointTransformerUnet(nn.Module):
     '''Point Transformer v3'''
 
@@ -37,6 +48,7 @@ class PointTransformerUnet(nn.Module):
         input_size, 
         ctx_embed_size, 
         voxel_size=0.01,
+        coord_scale=1.0,
         enc_channels=(32, 64, 128, 256, 512),
         enc_depths=(1, 1, 1, 1, 1),
         enc_num_head=(2, 4, 8, 16, 32),
@@ -79,9 +91,11 @@ class PointTransformerUnet(nn.Module):
         else:
             self.output_size = dec_channels[0]
         self.voxel_size = voxel_size
+        self.coord_scale = float(coord_scale)
 
     def prepare_ptv3_batch(self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens):
         device = pc_fts.device
+        pc_fts = scale_point_coords(pc_fts, self.coord_scale)
 
         point_offset = torch.cumsum(npoints_in_batch, dim=0).long()
         point_batch_idxs = torch.arange(
@@ -122,6 +136,7 @@ class PointTransformerUnetWithAction(nn.Module):
         input_size, 
         ctx_embed_size, 
         voxel_size=0.01,
+        coord_scale=1.0,
         enc_channels=(64, 128, 256, 512, 768),
         enc_depths=(1, 1, 1, 1, 1),
         enc_num_head=(2, 4, 8, 16, 32),
@@ -167,12 +182,14 @@ class PointTransformerUnetWithAction(nn.Module):
         else:
             self.output_size = dec_channels[0]
         self.voxel_size = voxel_size
+        self.coord_scale = float(coord_scale)
 
     def prepare_ptv3_batch(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_feat, 
         time_embeds=None,
     ):
         device = pc_fts.device
+        pc_fts = scale_point_coords(pc_fts, self.coord_scale)
 
         point_offset = torch.cumsum(npoints_in_batch, dim=0).long()
         point_batch_idxs = torch.arange(
