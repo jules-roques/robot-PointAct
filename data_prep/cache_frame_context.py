@@ -139,21 +139,40 @@ def frame_messages(processor, views: dict, video_keys: list[str], task: str, row
 
 @torch.no_grad()
 def context_batch(model, processor, batch_messages: list, device) -> list[np.ndarray]:
-    """Per-frame (L_i, hidden) fp16 context, via the same calls select_action makes."""
+    """Per-frame (L_i, hidden) fp16 context, via the same calls select_action makes.
+
+    Each frame is PREPROCESSED ALONE -- one `vlm_inputs` call per frame, exactly the batch-1
+    call eval makes -- and only the forward is batched. Measured 2026-09-30 (OpenDrawer, 32
+    frames): passing several multi-image chats to one apply_chat_template call hands some
+    frames the previous frame's image features (batch 4/12/16/24/32 wrong, 2/8 right,
+    same under flash_attention_2 and sdpa), which a cache would then silently train on.
+    Frames of equal token length are stacked for the forward; any other length runs alone.
+    """
     from pointact.model.vla_pointact.modeling_vla_pointact import encode_vlm_context
 
-    inputs = processor.vlm_inputs(batch_messages, device=device)
-    lens = inputs["attention_mask"].sum(dim=1).tolist()
-    outputs = encode_vlm_context(
-        model,
-        inputs["input_ids"],
-        attention_mask=inputs["attention_mask"].bool(),  # select_action passes it as bool
-        pixel_values=inputs.get("pixel_values"),
-        image_grid_thw=inputs.get("image_grid_thw"),
-        use_cache=False,
-    )
-    hidden = outputs.last_hidden_state.to(torch.float16).cpu().numpy()
-    return [hidden[i, :n] for i, n in enumerate(lens)]
+    per_frame = [processor.vlm_inputs([messages]) for messages in batch_messages]
+    groups: dict[int, list[int]] = {}
+    for i, inputs in enumerate(per_frame):
+        groups.setdefault(inputs["input_ids"].shape[1], []).append(i)
+
+    out: list[np.ndarray | None] = [None] * len(per_frame)
+    for idx in groups.values():
+        inputs = {
+            key: torch.cat([per_frame[i][key] for i in idx], dim=0).to(device)
+            for key in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw")
+        }
+        outputs = encode_vlm_context(
+            model,
+            inputs["input_ids"],
+            attention_mask=inputs["attention_mask"].bool(),  # select_action passes it as bool
+            pixel_values=inputs["pixel_values"],
+            image_grid_thw=inputs["image_grid_thw"],
+            use_cache=False,
+        )
+        hidden = outputs.last_hidden_state.to(torch.float16).cpu().numpy()
+        for row, i in enumerate(idx):
+            out[i] = hidden[row]
+    return out
 
 
 def load_vlm(vlm_path: str, attn: str, device):
@@ -212,7 +231,7 @@ def verify(args, processor, model, episodes, video_keys, out_dir: Path) -> None:
         raise SystemExit(f"verify: nothing built yet in {out_dir}")
     picked = rng.sample(built, min(args.verify, len(built)))
     frames = EpisodeFrames(args.dataset_dir, picked, video_keys)
-    worst_abs, cosines = 0.0, []
+    frame_means, frame_bad = [], []
     with env.begin() as txn:
         for i in range(len(picked)):
             ep_idx, task, frame_indices, views = frames[i]
@@ -227,15 +246,19 @@ def verify(args, processor, model, episodes, video_keys, out_dir: Path) -> None:
             )[0].astype(np.float32)
             if fresh.shape != stored.shape:
                 raise ValueError(f"shape {fresh.shape} != stored {stored.shape} at {ep_idx}-{r}")
-            worst_abs = max(worst_abs, float(np.abs(fresh - stored).max()))
             num = (fresh * stored).sum(-1)
             den = np.linalg.norm(fresh, axis=-1) * np.linalg.norm(stored, axis=-1) + 1e-6
-            cosines.append(float((num / den).min()))
+            cos = num / den
+            frame_means.append(float(cos.mean()))
+            frame_bad.append(float((cos < 0.99).mean()))
     env.close()
-    print(f"verify: {len(cosines)} frames, worst per-token cosine {min(cosines):.5f}, "
-          f"max |diff| {worst_abs:.4f}")
-    if min(cosines) < 0.999:
-        raise SystemExit("verify FAILED: stored context does not match a fresh forward")
+    # Judged per frame, not by the single worst token: bf16 alone puts the odd token near 0.91
+    # between two correct forwards (batch 2 vs 1), while a frame given another frame's image
+    # features shows up as a mean ~0.98 with 10-30% of its tokens below 0.99.
+    print(f"verify: {len(frame_means)} frames, worst frame mean cosine {min(frame_means):.5f}, "
+          f"worst share of tokens < 0.99: {max(frame_bad):.3%}")
+    if min(frame_means) < 0.999 or max(frame_bad) > 0.01:
+        raise SystemExit("verify FAILED: stored context does not match a fresh batch-1 forward")
 
 
 def main() -> None:
