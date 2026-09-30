@@ -1,0 +1,36 @@
+# Three camera views (left, right, wrist) through the frozen VLM, from a per-frame cache.
+#
+# Stage 7's arms condition on a cached TEXT-only VLM context. These condition on what the
+# frozen VLM makes of the three camera images plus the instruction -- but read from a
+# per-frame cache (data_prep/cache_frame_context.py) instead of a live forward, so training
+# costs what an image-free arm costs. Exact, not an approximation: the VLM is frozen, so its
+# hidden states are a fixed function of (frame, instruction) and recomputing them every step
+# was pure waste. Inference has no cache; run_server.py re-attaches the same frozen base VLM
+# and computes the context live through the same code the cache was built with.
+#
+# Recipe differences from stage 0's live-VLM image arms (_base_2views.yaml), all deliberate:
+#   - 3 views, not 2: the wrist camera too, matching the 3-view point cloud.
+#   - no image augmentation: a cache holds one context per frame. Stage 7's text-only arms
+#     had none either, so the comparison this stage exists for stays clean.
+#   - the chat template's system prompt ("You are a helpful assistant."), in training as at
+#     eval. Stage 0 trained on a hand-built prompt with a different system message and was
+#     evaluated through the chat template, a small train/eval mismatch this removes.
+#   - Utonia encoder, 30K cosine, as stage 7.
+
+extends: _base.yaml
+
+train:
+  context_source: frame_cache
+  max_steps: 30000
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage9
+
+data:
+  lerobot_datasets:
+    - select_video_keys:
+        [observation.images.left_image, observation.images.right_image, observation.images.wrist_image]
+      # Prompt order, and so the order eval sends them in (select_video_keys_for_vlm). Must
+      # equal the order the cache was built with (cache_frame_context.py --video-keys).
+      video_key_ids_for_vlm: [0, 1, 2]
+      # Null the text cache: frame_context_lmdb replaces it, and the dataset refuses both.
+      text_context_file: null
+      frame_context_lmdb: frame_context/qwen2.5-vl-3b-3views

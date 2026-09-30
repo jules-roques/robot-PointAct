@@ -34,6 +34,89 @@ from .configuration_pointact import VLAEncDec3DModelConfig
 logger = logging.get_logger(__name__)
 
 
+def encode_vlm_context(
+    vlm_backbone: Qwen2_5_VLForConditionalGeneration,
+    input_ids: torch.LongTensor,
+    attention_mask: torch.Tensor | None = None,
+    pixel_values: torch.Tensor | None = None,
+    image_grid_thw: torch.LongTensor | None = None,
+    position_ids: torch.LongTensor | None = None,
+    inputs_embeds: torch.FloatTensor | None = None,
+    past_key_values=None,
+    cache_position: torch.LongTensor | None = None,
+    use_cache: bool = True,
+    image_token_id: int | None = None,
+    video_token_id: int | None = None,
+):
+    """The frozen VLM's forward over an image+text prompt, as the action head consumes it.
+
+    This is the one definition of "the VLM context" shared by inference (`sample_actions`)
+    and the frame-context cache builder (data_prep/cache_frame_context.py). The cache is
+    only valid if it holds exactly what inference would compute, so both call this rather
+    than each keeping a copy of the position-id / image-embedding / forward sequence.
+    Returns the backbone's output; the context is its `last_hidden_state`.
+    """
+    image_token_id = vlm_backbone.config.image_token_id if image_token_id is None else image_token_id
+    video_token_id = vlm_backbone.config.video_token_id if video_token_id is None else video_token_id
+
+    if position_ids is None:
+        # position_ids: (3, batch, seq_len): denoting temporal, height, width position ids
+        mm_token_type_ids = create_mm_token_type_ids(input_ids, image_token_id, video_token_id)
+        position_ids = vlm_backbone.model.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=None,
+            inputs_embeds=None,
+            past_key_values=None,
+            attention_mask=attention_mask,
+            mm_token_type_ids=mm_token_type_ids,
+        )
+
+    if inputs_embeds is None:
+        inputs_embeds = vlm_backbone.get_input_embeddings()(input_ids)
+        if pixel_values is not None:
+            image_embeds = vlm_backbone.get_image_features(
+                pixel_values, image_grid_thw, return_dict=True
+            ).pooler_output
+            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask, _ = vlm_backbone.model.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+    return vlm_backbone.model(
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        cache_position=cache_position,
+    )
+
+
+def attach_frozen_vlm(model, vlm_path: str, dtype: torch.dtype = torch.bfloat16,
+                      attn_implementation: str | None = None):
+    """Give a `frame_cache` checkpoint the frozen VLM it was trained against, for inference.
+
+    A frame_cache run trains on precomputed hidden states of the *base* Qwen2.5-VL (frozen,
+    never updated), so its checkpoint holds no VLM weights. At inference there is no cache
+    -- the simulator renders new frames -- so the same base weights are loaded here and the
+    model switches to the live-VLM path, which calls `encode_vlm_context` exactly as the
+    cache builder did. The original source is kept in `config.trained_context_source`.
+    """
+    vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        vlm_path,
+        dtype=dtype,
+        attn_implementation=attn_implementation or getattr(model.config, "_attn_implementation", "sdpa"),
+    )
+    vlm.requires_grad_(False)
+    vlm.to(model.device).eval()
+    model.vlm_backbone = vlm
+    model.config.trained_context_source = model.config.context_source
+    model.config.context_source = "vlm"
+    return model
+
+
 
 class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
     config_class = VLAEncDec3DModelConfig
@@ -341,37 +424,19 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
     ) -> Tensor:
         """Sample actions from the model."""
 
-        # prepare position_ids and kv_cache
-        if position_ids is None:
-            # position_ids: (3, batch, seq_len): denoting temporal, height, width position ids
-            mm_token_type_ids = create_mm_token_type_ids(
-                input_ids, self.config.image_token_id, self.config.video_token_id
-            )
-            position_ids = self.vlm_backbone.model.compute_3d_position_ids(
-                input_ids=input_ids,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=None,
-                inputs_embeds=None,
-                past_key_values=None,
-                attention_mask=attention_mask,
-                mm_token_type_ids=mm_token_type_ids,
-            )
-
-        # embed prefix
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_prefix(
-                input_ids,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-            )
-
-        outputs = self.vlm_backbone.model(
-            position_ids=position_ids,
+        outputs = encode_vlm_context(
+            self.vlm_backbone,
+            input_ids,
             attention_mask=attention_mask,
-            past_key_values=past_key_values,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
             use_cache=True,
-            cache_position=cache_position if cache_position is not None else None,
+            image_token_id=self.config.image_token_id,
+            video_token_id=self.config.video_token_id,
         )
         hidden_states = outputs.last_hidden_state
 

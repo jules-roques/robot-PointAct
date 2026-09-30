@@ -45,7 +45,10 @@ class TrainPipelineConfig(TrainingArguments):
     # "vlm": live Qwen2.5-VL forward (images + text). "text_cache": no VLM, no images -- the
     # cross-attention context is a cached text-only embedding per instruction. The point
     # branch is identical either way; only where `context` comes from changes.
-    context_source: str = field(default="vlm")  # vlm, text_cache
+    # "frame_cache": no VLM at training time either, but the cached context is per frame and
+    # includes the camera images (data_prep/cache_frame_context.py); inference re-attaches
+    # the frozen VLM and computes it live.
+    context_source: str = field(default="vlm")  # vlm, text_cache, frame_cache
     # Build the text-context cache at startup when it is missing or does not cover every
     # instruction in the dataset, instead of requiring data_prep/cache_text_context.py to have
     # been run first. Costs one VLM load (~1 min) only when something is actually missing.

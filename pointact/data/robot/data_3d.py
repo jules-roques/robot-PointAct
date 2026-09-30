@@ -96,6 +96,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # Cached text-only context (optional). When set, images are never decoded and the
         # frame carries the precomputed VLM text embedding for its instruction instead.
         text_context_file: str | None = None,
+        # Cached per-frame context (optional): the frozen VLM's hidden states over this
+        # frame's images + instruction, read from an LMDB (data_prep/cache_frame_context.py).
+        # Like text_context_file, no image is decoded when it is set.
+        frame_context_lmdb: str | None = None,
         # Oracle sampling (optional): the upper bound on what any learned sampler could buy.
         # Uses the SAME Gaussian-with-floor density as eef_sampling above, so the two arms
         # differ only in where the bump is centred: the gripper (eef_sampling) vs. the handle
@@ -126,7 +130,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # below -- so the flag has to be on the instance already. A cached-text-context run
         # never decodes a frame (add_video_frames returns early), so it must not be made to
         # depend on the mp4s. See LeRobotDatasetMixin.get_episodes_file_paths.
-        self._require_video_files = text_context_file is None
+        if text_context_file is not None and frame_context_lmdb is not None:
+            raise ValueError("set text_context_file OR frame_context_lmdb, not both")
+        self._require_video_files = text_context_file is None and frame_context_lmdb is None
         super().__init__(
             repo_id=repo_id,
             root=root,
@@ -230,6 +236,40 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             # is forked into every dataloader worker rather than reopened per process.
             self.text_context = torch.load(path, map_location="cpu", weights_only=True)
 
+        # ~1.2 MB per frame (~290 tokens x 2048 in fp16), ~150 GB per task: opened lazily per
+        # worker process, like the point LMDB, never loaded.
+        self.frame_context_dir = (
+            os.path.join(self.root, frame_context_lmdb) if frame_context_lmdb is not None else None
+        )
+        self._frame_ctx_lmdb_env = None
+        self._frame_ctx_lmdb_txn = None
+        self._frame_ctx_lmdb_pid = None
+        if self.frame_context_dir is not None and not os.path.isdir(self.frame_context_dir):
+            raise FileNotFoundError(
+                f"no frame-context LMDB at {self.frame_context_dir}. Build it with "
+                f"data_prep/cache_frame_context.py."
+            )
+
+    def load_frame_context(self, ep_idx: int, frame_idx: int) -> torch.Tensor:
+        """Cached VLM hidden states for one frame, as (L, hidden_size) fp16."""
+        current_pid = os.getpid()
+        if self._frame_ctx_lmdb_pid != current_pid:
+            self._frame_ctx_lmdb_env = None
+            self._frame_ctx_lmdb_txn = None
+            self._frame_ctx_lmdb_pid = current_pid
+        if self._frame_ctx_lmdb_env is None:
+            self._frame_ctx_lmdb_env = lmdb.open(
+                self.frame_context_dir, readonly=True, lock=False, readahead=False,
+                max_spare_txns=1,
+            )
+            self._frame_ctx_lmdb_txn = self._frame_ctx_lmdb_env.begin(buffers=True)
+
+        key = f"{ep_idx}-{frame_idx}"
+        value = self._frame_ctx_lmdb_txn.get(key.encode("ascii"))
+        if value is None:
+            raise KeyError(f"frame context '{key}' not found in {self.frame_context_dir}")
+        return torch.from_numpy(msgpack.unpackb(value).copy())
+
     def lookup_text_context(self, task: str) -> torch.Tensor:
         """Cached text-only VLM hidden states for one instruction, as (L, hidden_size)."""
         embed = self.text_context.get(task)
@@ -246,7 +286,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # the frames. Worth doing explicitly because LeRobot decodes *every* key in
         # meta.video_keys (three here: left, right, wrist), not just select_video_keys, so
         # this removes three video decodes per sample rather than one.
-        if self.text_context is not None:
+        if self.text_context is not None or self.frame_context_dir is not None:
             return item
         return super().add_video_frames(item, ep_idx, query_indices)
 
@@ -274,6 +314,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         state["_roi_lmdb_env"] = None
         state["_roi_lmdb_txn"] = None
         state["_roi_lmdb_pid"] = None
+        state["_frame_ctx_lmdb_env"] = None
+        state["_frame_ctx_lmdb_txn"] = None
+        state["_frame_ctx_lmdb_pid"] = None
         return state
 
     def set_feature_keys(
@@ -337,6 +380,11 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         # Must follow select_task_text, which is what resolves item["task"].
         if self.text_context is not None:
             item["ctx_embeds"] = self.lookup_text_context(item["task"])
+        elif self.frame_context_dir is not None:
+            # The cache was built with each episode's own instruction, which is the only
+            # string select_task_text can return here (meta/tasks.jsonl has no "<br>"
+            # variants for these tasks). cache_frame_context.py refuses a task that has.
+            item["ctx_embeds"] = self.load_frame_context(ep_idx, frame_idx)
 
         return self.post_process(item)
 

@@ -19,7 +19,8 @@ from pointact.model.vla_pointact.modeling_vla_pointact import (
     VLAEncDec3DClassificationModel,
     VLAEncDec3DWithActionClassificationModel,
     VLAEncDec3DRegressionModel,
-    VLAEncDec3DWithActionRegressionModel
+    VLAEncDec3DWithActionRegressionModel,
+    attach_frozen_vlm,
 )
 from pointact.model.vla_pointact.processing_vla_pointact import (
     VLAEncDec3DProcessor,
@@ -74,6 +75,11 @@ class ServerArgs:
     # eval_robocasa365.sh derives this from the run's data config.
     text_context_file: str = ""
 
+    # Required for checkpoints trained with context_source="frame_cache": the base
+    # Qwen2.5-VL those cached hidden states came from. It was frozen, so the checkpoint does
+    # not carry it; it is re-attached here and run live. Defaults to $POINTACT_VLM_PATH.
+    vlm_path: str = ""
+
     save_data: bool = False
     save_dir: str = "/scratch/shichen/datasets/VLA3D_exprs/server_test_data"
 
@@ -123,7 +129,17 @@ class Policy:
             f"sigma={args.point_sampling_sigma} floor={args.point_sampling_floor}"
         )
 
-        if model_config.get("context_source", "vlm") != "vlm":
+        if model_config.get("context_source") == "frame_cache":
+            vlm_path = args.vlm_path or os.environ.get("POINTACT_VLM_PATH", "")
+            if not vlm_path:
+                raise ValueError(
+                    f"{args.pretrained_path} was trained with context_source='frame_cache'; "
+                    "pass --args.vlm_path (or set POINTACT_VLM_PATH) to the base "
+                    "Qwen2.5-VL its frame-context cache was built from."
+                )
+            attach_frozen_vlm(self.model, vlm_path)
+            print(f"[server] frame_cache checkpoint: attached frozen VLM from {vlm_path}")
+        elif model_config.get("context_source", "vlm") != "vlm":
             if not args.text_context_file:
                 raise ValueError(
                     f"{args.pretrained_path} was trained with "

@@ -1,0 +1,27 @@
+# OpenDrawer / oracle / 1024 points / 3 camera views via cached frozen-VLM context -- stage 9.
+# GT-oracle sampling: the same density centred on the simulator's handle position. Stage 7 twin: 67.4%.
+# Identical to s7-od-oracle-n1024-s0 except for the context: see _base_3views_framecache.yaml.
+extends: _base_3views_framecache.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: oracle
+  npoints: 1024
+  context: frame_cache
+  seed: 0
+  stage: "Stage 9: Cached image context (3 views)"
+
+train:
+  run_name: s9-od-oracle-n1024-img3-s0
+
+data:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+      max_npoints: 1024
+      oracle_sampling: true
+      oracle_gt: geom
+      oracle_gt_npz: roi_meta/target_positions.npz
+      oracle_gt_set: handle
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05

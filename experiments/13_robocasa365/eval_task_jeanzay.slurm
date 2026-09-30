@@ -91,6 +91,11 @@ module load ffmpeg/6.1.1
 REPO="${SLURM_SUBMIT_DIR:-$WORK/code/robot-PointAct}"
 cd "$REPO"
 
+# frame_cache checkpoints (stage 9) carry no VLM weights: run_server.py re-attaches this
+# frozen base VLM and runs it live. Unused by every other arm. Each such server holds a
+# ~7.5 GB bf16 VLM on top of the policy, so pack them at CONCURRENCY=16 (4 per H100), not 24.
+export POINTACT_VLM_PATH="${POINTACT_VLM_PATH:-$DSDIR/HuggingFace_Models/Qwen/Qwen2.5-VL-3B-Instruct}"
+
 RUNS="${RUNS:?set RUNS=\"run-a run-b ...\" (all on the SAME task) via --export}"
 EXPRS_DIR="${EXPRS_DIR:-$SCRATCH/PointAct_exprs/robocasa365/stage5}"
 read -r -a STEPS <<< "${EVAL_STEPS:-5000 10000 15000 20000 25000 30000}"

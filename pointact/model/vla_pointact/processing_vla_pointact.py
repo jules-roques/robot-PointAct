@@ -82,6 +82,33 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         return robot_inputs
 
     @torch.no_grad
+    @staticmethod
+    def vlm_messages(images: list, task: str) -> list[dict]:
+        """The chat the VLM sees for one frame: every camera image, then the instruction.
+
+        Shared with data_prep/cache_frame_context.py, which must build byte-identical input
+        for its cached context to be what inference computes live.
+        """
+        content = [{"type": "image", "image": image} for image in images]
+        content.append({"type": "text", "text": f"{task}"})
+        return [{"role": "user", "content": content}]
+
+    def vlm_inputs(self, batch_messages: list, device=None, states=None):
+        """Tokenise + preprocess a batch of `vlm_messages`; `select_action` goes through here.
+
+        Right-padded (the processor is loaded with padding_side="right"), so under the
+        causal mask a frame's hidden states do not depend on what it was batched with.
+        """
+        inputs = self.apply_chat_template(
+            batch_messages,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs={"states": states, "padding": True},
+        )
+        return inputs.to(device) if device is not None else inputs
+
     def _prepare_robot_inputs(self, batch: dict, points_workspace: dict=None, remove_arm: bool=False):
         """Prepare model inputs from raw robot batch"""
         batch_messages = []
@@ -98,16 +125,8 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
             select_video_keys = self.robot_config["select_video_keys_for_vlm"][repo_id]
             select_state_keys = self.robot_config["select_state_keys"][repo_id]
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        *({"type": "image", "image": mini_batch[k]} for k in select_video_keys),
-                    ],
-                }
-            ]
-            messages[0]["content"].append(
-                {"type": "text", "text": f"{mini_batch['task']}"},
+            messages = self.vlm_messages(
+                [mini_batch[k] for k in select_video_keys], mini_batch["task"]
             )
 
             state = None
@@ -225,7 +244,16 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         )
         device = model.device
 
-        if getattr(model.config, "context_source", "vlm") != "vlm":
+        context_source = getattr(model.config, "context_source", "vlm")
+        if context_source == "frame_cache":
+            # Trained on cached per-frame VLM states, but a live frame has no cache entry.
+            # scripts/run_server.py attaches the frozen VLM (attach_frozen_vlm), which also
+            # flips context_source to "vlm" -- reaching here means that step was skipped.
+            raise RuntimeError(
+                "context_source='frame_cache' needs the frozen VLM attached for inference "
+                "(pointact.model.vla_pointact.modeling_vla_pointact.attach_frozen_vlm)."
+            )
+        if context_source != "vlm":
             actions = self._sample_actions_cached_context(
                 model, batch_tasks, batch_states, batch_points, device
             )
@@ -235,14 +263,7 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                     outs.action[i, :, :3] += batch_point_centers[i][None, :]
             return outs
 
-        inputs = self.apply_chat_template(
-            batch_messages,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            processor_kwargs={"states": batch_states},
-        ).to(device)
+        inputs = self.vlm_inputs(batch_messages, device=device, states=batch_states)
         # print(inputs['input_ids'])
 
         inputs["input_id_lens"] = inputs["attention_mask"].sum(dim=1).long().to(device)

@@ -344,6 +344,43 @@ the profiler's `step_total` to sit below pilot_throughput's s/step — it has no
 accumulation, no DDP all-reduce and no checkpoint writes. Ten repetitions is enough for a mean
 and thin for a standard deviation, which is half of what is being reported; 30 is the default.
 
+### Stage 9 — three camera views through a cached frozen VLM
+
+Stage 7 conditions on a cached *text-only* VLM context. Stage 9 asks what the three camera
+views (left, right, wrist) add at **1024 points**, where Stage 7's samplers are furthest apart
+(uniform 45.6% vs eef 65.0% / oracle 67.4%, n=500). Stage 0 found images and good sampling to
+be substitutes on Concerto; this re-asks it on Utonia, at the budget where the gap lives.
+
+**Why a cache is exact, not an approximation.** The action expert reads the VLM only through
+its `last_hidden_state`, and the VLM is frozen, so that tensor is a fixed function of (frame,
+instruction). `data_prep/cache_frame_context.py` computes it once per frame (~290 tokens x
+2048, fp16, ~1.2 MB/frame, ~150 GB for OpenDrawer's 130K frames) into an LMDB keyed like the
+point cache, and `context_source: frame_cache` trains from it with no VLM built: the cost of an
+image-free arm, against ~3x that for a live-VLM step (stage 0: 1.54 vs 0.51 s/step).
+
+**Eval has no cache**, so `run_server.py` re-attaches the same frozen base VLM
+(`attach_frozen_vlm`) and runs it live. The cache builder does not reimplement that input: it
+calls the eval processor's `vlm_messages`/`vlm_inputs` and the model's `encode_vlm_context`,
+which is exactly what `select_action` -> `sample_actions` run. The remaining train/eval gap is
+the pixels themselves (AV1-decoded vs rendered) -- the same one every image arm has.
+
+What a cache gives up, recorded in `runs/_base_3views_framecache.yaml`: no image augmentation
+(one context per frame), and the chat template's system prompt in training as at eval (stage 0
+trained on a different, hand-built one). Arms: `s9-od-{uniform,eef,oracle}-n1024-img3-s0`,
+each identical to its `s7-` twin except for the context.
+
+```bash
+# 1. the cache (resumable; smoke with LIMIT_EPISODES=4 on the dev QoS first)
+sbatch --export=ALL,TASK=OpenDrawer experiments/13_robocasa365/build_frame_context_jeanzay.slurm
+sbatch --qos=qos_gpu_h100-dev --time=00:20:00 --export=ALL,TASK=OpenDrawer,VERIFY=64 \
+       experiments/13_robocasa365/build_frame_context_jeanzay.slurm
+# 2. train (same wrapper as every arm)
+sbatch --job-name=s9-od-eef-n1024-img3-s0 --qos=qos_gpu_h100-t3 --time=10:00:00 --constraint=h100 \
+       --export=ALL,RUN_CONFIG=experiments/13_robocasa365/runs/s9-od-eef-n1024-img3-s0.yaml \
+       experiments/13_robocasa365/train_jeanzay.slurm
+# 3. eval: CONCURRENCY=16, not 24 -- every server now holds a ~7.5 GB VLM
+```
+
 ### W&B conventions
 
 Run names are short (`od-eef-n4096-s0`); identity lives in config columns. Group the runs

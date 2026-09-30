@@ -97,6 +97,13 @@ class LerobotConfig:
     # and token ids, and no video is decoded at all. Pair with `context_source=text_cache`.
     text_context_file: str | None = None
 
+    # Cached per-FRAME context (optional). Path (under `root`) of the LMDB written by
+    # data_prep/cache_frame_context.py: the frozen VLM's hidden states over this frame's
+    # camera images + instruction, keyed "{episode}-{frame}" like the point LMDB. Training
+    # then never runs (or even builds) the VLM; inference re-attaches it and computes the same
+    # thing live. Pair with `context_source=frame_cache`. Mutually exclusive with the above.
+    frame_context_lmdb: str | None = None
+
     # Oracle point sampling (optional): the upper bound on what any learned sampler could buy.
     # Same Gaussian-with-floor density as eef_sampling above, but centred on the handle the
     # gripper is reaching for rather than on the gripper, so the two arms differ only in the

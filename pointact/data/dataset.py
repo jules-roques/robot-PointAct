@@ -238,7 +238,7 @@ class SupervisedDataset(Dataset):
             sources = self.mm_dataset[i]
         else:
             item = self.lerobot_dataset[i - len(self.mm_dataset)]
-            if self.args.context_source == "text_cache":
+            if self.args.context_source in ("text_cache", "frame_cache"):
                 return self.build_cached_context_example(item)
             sources = self.prompt.build_robot_source(item, self.args)
 
