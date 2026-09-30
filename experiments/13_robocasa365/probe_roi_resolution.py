@@ -69,7 +69,9 @@ def main() -> None:
     arms = [("1cm", args.coarse_root, 0.01)]
     if args.fine_root is not None:
         arms += [(f"{g * 1000:.3g}mm", args.fine_root, g) for g in args.fine_grids]
-    txns = {root: open_txn(root) for _, root, _ in arms}
+    # One environment per root: LMDB refuses to open the same one twice in a process, and the
+    # fine root serves every fine grid.
+    txns = {root: open_txn(root) for root in {root for _, root, _ in arms}}
 
     coarse = txns[args.coarse_root]
     keys = [k for k in coarse.cursor().iternext(values=False)]
