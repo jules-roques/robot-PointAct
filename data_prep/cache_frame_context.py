@@ -264,10 +264,13 @@ def verify(args, processor, model, episodes, video_keys, out_dir: Path) -> None:
     env.close()
     # Judged per frame, not by the single worst token: bf16 alone puts the odd token near 0.91
     # between two correct forwards (batch 2 vs 1), while a frame given another frame's image
-    # features shows up as a mean ~0.98 with 10-30% of its tokens below 0.99.
+    # features shows up as a mean ~0.98 with 10-30% of its tokens below 0.99. The token-share
+    # bar is 3%, not 1%: the full OpenDrawer build's correct cache measured a worst frame of
+    # 1.1% over 64 frames (mean 0.9994) -- bf16 noise in the batched LM, an order of magnitude
+    # below the failure it exists to catch.
     print(f"verify: {len(frame_means)} frames, worst frame mean cosine {min(frame_means):.5f}, "
           f"worst share of tokens < 0.99: {max(frame_bad):.3%}")
-    if min(frame_means) < 0.999 or max(frame_bad) > 0.01:
+    if min(frame_means) < 0.999 or max(frame_bad) > 0.03:
         raise SystemExit("verify FAILED: stored context does not match a fresh batch-1 forward")
 
 
