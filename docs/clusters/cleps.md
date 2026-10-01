@@ -23,6 +23,28 @@ because dev jobs there can have internet access; Jean Zay is kept for large runs
 - [ ] Max walltime per partition, and whether requeue/checkpointing is needed for a full
       training run.
 
+## Verified 2026-10-01 (placing stage 8/9 trainings)
+
+- **Ampere+ GPU nodes:** `gpu015`/`gpu016`/`gpu017` = 4x H100 (128 cpus, feature `h100`),
+  `gpu012` = 4x A100 (64 cpus, feature `a100`); `gpu013` (A100) was down. All are shared with
+  other groups' partitions (`willow`, `astra`, `almanach`), so they are often fully allocated.
+- **Submit with** `--account=willow --partition=gpu` (what `train.slurm` does). QoS `normal`
+  caps a user at **8 GPUs** (two 4-GPU trainings at once); partition max walltime **2 days**.
+  `train.slurm` pins `--gres=gpu:h100:4`; to accept either tier, override on the command line
+  with `--gres=gpu:4 --constraint="h100|a100"` (plain `gpu:4` would also match pre-Ampere nodes).
+- **`/scratch` has no per-user quota**, but the shared filesystem was **96% full (1.4 TB
+  free)** -- check `df -h /scratch` before pulling hundreds of GB.
+- **Jean Zay -> CLEPS** over `ssh jean-zay`: ~55 MB/s per stream, ~100 MB/s with four rsync
+  streams in parallel. Run transfers as a `cpu_devel` batch job (the login node kills long
+  transfers); compute nodes can ssh to Jean Zay.
+- **Training needs no `--export` of model paths:** `train.sh` falls back to
+  `$SCRATCH/models/Qwen2.5-VL-3B-Instruct`, and `_base.yaml` reads
+  `$SCRATCH/models/Pointcept-Utonia/utonia.pth`. Both present.
+- **The CLEPS OpenDrawer dataset predated the 2026-09-21 Jean Zay rebuild** (496 renumbered
+  episodes vs 514). Every post-stage-7 artifact (frame cache, oracle targets, baselines) uses the
+  514-episode numbering, so the Jean Zay copy replaced it; the old one is at
+  `lerobot_point_lmdb/OpenDrawer.stale-496ep`.
+
 ## Environment setup
 
 The three uv environments in `docs/envs.md` must be rebuilt here — they are not portable
