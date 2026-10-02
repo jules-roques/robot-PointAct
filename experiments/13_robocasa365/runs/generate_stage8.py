@@ -25,8 +25,13 @@ network units) -- the Gaussian scales with the cloud without being touched.
 
 **Two families, and the second is what makes the first readable.**
 
-* *fine* -- s in {sqrt 2, 2, 2 sqrt 2} on the 2.5 mm render: new points in the ROI (grid
-  7.1 / 5 / 3.5 mm). s = 1 is stage 7's ``s7-od-oracle-n8192-s0``. The top arm was s = 4
+* *fine* -- s in {sqrt 2, 2, 2 sqrt 2}, each RENDERED DIRECTLY at its own grid (7.1 / 5 /
+  3.5 mm): new points in the ROI. s = 1 is stage 7's ``s7-od-oracle-n8192-s0``. Until
+  2026-10-02 all three re-voxelized one 2.5 mm render instead; that is raw -> 2.5 mm -> grid in
+  training against raw -> grid in eval (run_server voxelizes the live cloud once), a
+  train/eval gap only the fine arms had, so it confounded fine vs control. With a render per
+  grid, point_voxel_size equals the cache's own grid and the dataset re-voxelization is a
+  no-op: training and eval both voxelize raw camera points once. The top arm was s = 4
   (2.5 mm) until 2026-10-02, before anything trained: 2 sqrt 2 keeps the axis on even sqrt 2
   steps, and s = 4 was the arm furthest off Utonia's single pretraining granularity (coarsest
   level 4 cm, 1 cm context points 4 voxels apart) for little expected gain -- at 8192 points
@@ -50,13 +55,17 @@ from pathlib import Path
 
 STAGE = "Stage 8: ROI resolution at fixed budget (Utonia scale)"
 NPOINTS = 8192
-FINE_ROOT = "robot_data/robocasa365/lerobot_point_lmdb_g2.5mm"
+def render_root(grid: float) -> str:
+    """The dataset root convert.slurm writes for VOXEL_SIZE=grid ('_g%gmm' % (grid * 1000))."""
+    return f"robot_data/robocasa365/lerobot_point_lmdb_g{grid * 1000:g}mm"
 
-# (scale, metric point grid, dataset root or None for _base's 1 cm root)
+
+# (scale, metric point grid, dataset root or None for _base's 1 cm root). Fine arms read the
+# render made AT their grid: replay/convert with VOXEL_SIZE=<grid>, the same float as here.
 ARMS = [
-    (math.sqrt(2), 0.01 / math.sqrt(2), FINE_ROOT),
-    (2.0, 0.005, FINE_ROOT),
-    (2 * math.sqrt(2), 0.01 / (2 * math.sqrt(2)), FINE_ROOT),
+    (math.sqrt(2), 0.01 / math.sqrt(2), render_root(0.01 / math.sqrt(2))),
+    (2.0, 0.005, render_root(0.005)),
+    (2 * math.sqrt(2), 0.01 / (2 * math.sqrt(2)), render_root(0.01 / (2 * math.sqrt(2)))),
     (2.0, 0.01, None),
     (2 * math.sqrt(2), 0.01, None),
 ]

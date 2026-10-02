@@ -23,7 +23,7 @@ train:
 data:
   lerobot_datasets:
     - repo_id: OpenDrawer
-      root: robot_data/robocasa365/lerobot_point_lmdb_g2.5mm
+      root: robot_data/robocasa365/lerobot_point_lmdb_g5mm
       state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
       text_context_file: text_context/qwen2.5-vl-3b.pt
       max_npoints: 8192

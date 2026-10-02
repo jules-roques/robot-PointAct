@@ -368,9 +368,9 @@ Everything upstream of the encoder stays metric, so σ = 8 cm is physical at eve
 | arm | s | grid | data | network voxel | coarsest level |
 |---|---|---|---|---|---|
 | `s7-od-oracle-n8192-s0` (stage 7) | 1 | 10 mm | 1 cm | 10 mm | 16 cm |
-| `…-x1.41-g7.07mm` | √2 | 7.1 mm | 2.5 mm render | 7.1 mm | 11 cm |
-| `…-x2-g5mm` | 2 | 5 mm | 2.5 mm render | 5 mm | 8 cm |
-| `…-x2.83-g3.54mm` | 2√2 | 3.5 mm | 2.5 mm render | 3.5 mm | 5.7 cm |
+| `…-x1.41-g7.07mm` | √2 | 7.1 mm | 7.07 mm render | 7.1 mm | 11 cm |
+| `…-x2-g5mm` | 2 | 5 mm | 5 mm render | 5 mm | 8 cm |
+| `…-x2.83-g3.54mm` | 2√2 | 3.5 mm | 3.54 mm render | 3.5 mm | 5.7 cm |
 | `…-x2` (control) | 2 | 10 mm | 1 cm | 5 mm | 8 cm |
 | `…-x2.83` (control) | 2√2 | 10 mm | 1 cm | 3.5 mm | 5.7 cm |
 
@@ -385,7 +385,11 @@ data, so they get every side effect of scaling (smaller receptive field, context
 apart) and no new points. Fine wins and control does not → resolution helped. Both lose → the
 rescale costs more than the detail buys. Both win → it was the rescale.
 
-**Data.** One 2.5 mm render serves all three fine grids: `VOXEL_SIZE=0.0025` to `replay.slurm`
+**Data: one render per fine grid (since 2026-10-02).** Re-voxelizing one 2.5 mm render onto
+each grid made training raw -> 2.5 mm -> grid while eval voxelizes the live cloud once (raw ->
+grid), a train/eval gap only the fine arms had, which confounds fine vs control. Each grid is now
+rendered directly (`VOXEL_SIZE=<grid>`, see submit_stage8.sh), so the dataset's
+re-voxelization is a no-op and both sides voxelize raw camera points once. Originally: one 2.5 mm render served all three fine grids: `VOXEL_SIZE=0.0025` to `replay.slurm`
 and `convert.slurm` writes `replay_cache_g2.5mm` and `lerobot_point_lmdb_g2.5mm/` beside, never
 over, the 1 cm data. Smoke (episodes 0-2): 66-94K points/frame (~4× the 1 cm cloud), ~1 min per
 episode on a V100, ~0.6 GB per episode of cache. Link the 1 cm root's `text_context/` and

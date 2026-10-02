@@ -1,15 +1,19 @@
 #!/bin/bash
 # Submit the stage-8 trainings: OpenDrawer x oracle x 8192 points at coordinate scale
-# s in {sqrt2, 2, 2sqrt2} on the 2.5 mm render (fine) and s in {2, 2sqrt2} on the 1 cm data (control).
+# s in {sqrt2, 2, 2sqrt2}, each rendered at its own grid (fine), and s in {2, 2sqrt2} on the 1 cm data (control).
 # See runs/generate_stage8.py for the design; s = 1 is stage 7's s7-od-oracle-n8192-s0.
 #
 #   DRY_RUN=1 bash experiments/13_robocasa365/submit_stage8.sh   # print what it would submit
 #   bash experiments/13_robocasa365/submit_stage8.sh             # all five arms
 #   S8_FAMILY=control bash .../submit_stage8.sh                  # only the 1 cm controls
 #
-# The fine arms need the 2.5 mm dataset, built on V100 + CPU (no H100) by:
-#   sbatch --array=0-7 --export=ALL,VOXEL_SIZE=0.0025,REPO=$PWD data_prep/robocasa365_to_lerobot/replay.slurm
-#   sbatch --export=ALL,VOXEL_SIZE=0.0025,REPO=$PWD data_prep/robocasa365_to_lerobot/convert.slurm
+# Each fine arm needs a dataset rendered AT its grid, built on V100 + CPU (no H100); G is the
+# exact float generate_stage8.py writes as point_voxel_size (0.0070710678118654745, 0.005,
+# 0.0035355339059327372), so the derived _g<mm> root is the one the config reads:
+#   sbatch --array=0-7 --export=ALL,VOXEL_SIZE=$G,REPO=$PWD data_prep/robocasa365_to_lerobot/replay.slurm
+#   sbatch --export=ALL,VOXEL_SIZE=$G,REPO=$PWD data_prep/robocasa365_to_lerobot/convert.slurm
+# then link the 1 cm root's text_context/, roi_meta/, robot_state_action_stats/ and copy its
+# meta/source_episode_map.json in (same 514 episodes, identity map).
 # then link the 1 cm root's text_context/, roi_meta/ and robot_state_action_stats/ into it, and build
 # meta/source_episode_map.json (python -m data_prep.robocasa365_to_lerobot.episode_index_map
 # --source-dir <src>/lerobot --dataset-dir <root>/OpenDrawer; the geom oracle needs it). Same 514 episodes, identity
@@ -26,7 +30,6 @@ cd "$REPO"
 RUNS_DIR=experiments/13_robocasa365/runs
 TRAIN_SLURM=experiments/13_robocasa365/train_jeanzay.slurm
 TRAIN_EXTRA=${TRAIN_EXTRA:---qos=qos_gpu_h100-t3 --time=20:00:00 --constraint=h100}
-FINE_ROOT="robot_data/robocasa365/lerobot_point_lmdb_g2.5mm/OpenDrawer"
 
 submit() {
     if [ -n "${DRY_RUN:-}" ]; then
@@ -52,10 +55,12 @@ QUEUED=$(squeue -u "$USER" -h -o "%j" 2>/dev/null || true)
 for run in "${RUN_LIST[@]}"; do
     config="$RUNS_DIR/$run.yaml"
     [ -f "$config" ] || { echo "no such run config: $config" >&2; exit 1; }
-    if grep -q "lerobot_point_lmdb_g2.5mm" "$config"; then
+    # Each fine arm reads the render made at its own grid (lerobot_point_lmdb_g<mm>).
+    fine_root=$(sed -n 's/^ *root: \(robot_data\/robocasa365\/lerobot_point_lmdb_g[^ ]*\)$/\1/p' "$config")
+    if [ -n "$fine_root" ]; then
         for need in points_3views cache_meta.json text_context roi_meta/target_positions.npz meta/source_episode_map.json; do
-            if [ ! -e "$FINE_ROOT/$need" ]; then
-                echo "refusing $run: $FINE_ROOT/$need missing (build the 2.5 mm dataset first)" >&2
+            if [ ! -e "$fine_root/OpenDrawer/$need" ]; then
+                echo "refusing $run: $fine_root/OpenDrawer/$need missing (render that grid first)" >&2
                 exit 1
             fi
         done
