@@ -25,9 +25,14 @@ network units) -- the Gaussian scales with the cloud without being touched.
 
 **Two families, and the second is what makes the first readable.**
 
-* *fine* -- s in {sqrt 2, 2, 4} on the 2.5 mm render: new points in the ROI (grid 7.1 / 5 /
-  2.5 mm). s = 1 is stage 7's ``s7-od-oracle-n8192-s0``.
-* *control* -- s in {2, 4} on the existing 1 cm data: the same rescale, NO new points. Scaling
+* *fine* -- s in {sqrt 2, 2, 2 sqrt 2} on the 2.5 mm render: new points in the ROI (grid
+  7.1 / 5 / 3.5 mm). s = 1 is stage 7's ``s7-od-oracle-n8192-s0``. The top arm was s = 4
+  (2.5 mm) until 2026-10-02, before anything trained: 2 sqrt 2 keeps the axis on even sqrt 2
+  steps, and s = 4 was the arm furthest off Utonia's single pretraining granularity (coarsest
+  level 4 cm, 1 cm context points 4 voxels apart) for little expected gain -- at 8192 points
+  with sigma 8 cm / floor 0.05 the sampler's share of the ROI caps it near ~1K points, which
+  the 5 mm grid already roughly fills (estimate, not measured).
+* *control* -- s in {2, 2 sqrt 2} on the existing 1 cm data: the same rescale, NO new points. Scaling
   has side effects of its own -- the coarsest encoder level covers 16/s cm, and context points
   1 cm apart sit s voxels apart, off Utonia's convention. Fine wins and control does not ->
   resolution helped. Both lose -> the rescale costs more than the detail buys (the 5 mm result
@@ -51,9 +56,9 @@ FINE_ROOT = "robot_data/robocasa365/lerobot_point_lmdb_g2.5mm"
 ARMS = [
     (math.sqrt(2), 0.01 / math.sqrt(2), FINE_ROOT),
     (2.0, 0.005, FINE_ROOT),
-    (4.0, 0.0025, FINE_ROOT),
+    (2 * math.sqrt(2), 0.01 / (2 * math.sqrt(2)), FINE_ROOT),
     (2.0, 0.01, None),
-    (4.0, 0.01, None),
+    (2 * math.sqrt(2), 0.01, None),
 ]
 
 BLOCK = {
