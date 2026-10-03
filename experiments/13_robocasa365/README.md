@@ -371,6 +371,7 @@ Everything upstream of the encoder stays metric, so σ = 8 cm is physical at eve
 | `…-x1.41-g7.07mm` | √2 | 7.1 mm | 7.07 mm render | 7.1 mm | 11 cm |
 | `…-x2-g5mm` | 2 | 5 mm | 5 mm render | 5 mm | 8 cm |
 | `…-x2.83-g3.54mm` | 2√2 | 3.5 mm | 3.54 mm render | 3.5 mm | 5.7 cm |
+| `…-x4-g2.5mm` | 4 | 2.5 mm | 2.5 mm render | 2.5 mm | 4 cm |
 | `…-x2` (control) | 2 | 10 mm | 1 cm | 5 mm | 8 cm |
 | `…-x2.83` (control) | 2√2 | 10 mm | 1 cm | 3.5 mm | 5.7 cm |
 
@@ -378,7 +379,9 @@ The top arm was s = 4 (2.5 mm, coarsest level 4 cm) until 2026-10-02, changed be
 trained: 2√2 keeps the axis on even √2 steps and stays nearer Utonia's single pretraining
 granularity. Estimate, not measured: at 8192 points with σ 8 cm / floor 0.05 the sampler gives
 the ROI ~13% of the budget (~1K points), which the 5 mm grid already roughly fills, so the
-finest arm buys spacing more than count.
+finest arm buys spacing more than count. The s = 4 fine arm was re-added on 2026-10-03 as the far end of the
+axis, to test whether the policy collapses when the encoder sees clouds that far from Utonia's
+pretraining granularity.
 
 **The controls are what make the fine arms readable.** They apply the same rescale to the 1 cm
 data, so they get every side effect of scaling (smaller receptive field, context points s voxels

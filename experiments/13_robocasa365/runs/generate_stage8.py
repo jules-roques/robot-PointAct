@@ -66,6 +66,11 @@ ARMS = [
     (math.sqrt(2), 0.01 / math.sqrt(2), render_root(0.01 / math.sqrt(2))),
     (2.0, 0.005, render_root(0.005)),
     (2 * math.sqrt(2), 0.01 / (2 * math.sqrt(2)), render_root(0.01 / (2 * math.sqrt(2)))),
+    # Re-added 2026-10-03 at the user's request, as the far end of the axis: s = 4 puts the
+    # cloud furthest off Utonia's single pretraining granularity (coarsest level 4 cm), and the
+    # question is whether the policy collapses there. Its 2.5 mm render was made at this grid,
+    # so it has no train/eval voxelization gap either.
+    (4.0, 0.0025, render_root(0.0025)),
     (2.0, 0.01, None),
     (2 * math.sqrt(2), 0.01, None),
 ]
