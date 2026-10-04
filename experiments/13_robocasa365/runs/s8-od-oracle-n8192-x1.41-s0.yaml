@@ -1,0 +1,35 @@
+# OpenDrawer / oracle / 8192 points / scale 1.414 on a 10 mm grid -- stage 8.
+# control: same rescale on the 1 cm data, no new points. Network voxel = 0.01 / 1.414 = 7.07 mm; coarsest encoder level
+# covers 11.3 cm. See generate_stage8.py for the design.
+extends: _base.yaml
+
+meta:
+  task: OpenDrawer
+  sampling: oracle
+  npoints: 8192
+  context: text_cache
+  seed: 0
+  stage: "Stage 8: ROI resolution at fixed budget (Utonia scale)"
+  scale: 1.4142135623730951
+  grid: 0.01
+
+train:
+  max_steps: 30000
+  run_name: s8-od-oracle-n8192-x1.41-s0
+  output_base: $SCRATCH/PointAct_exprs/robocasa365/stage8
+  per_device_train_batch_size: 16
+  ptv3_coord_scale: 1.4142135623730951
+
+data:
+  lerobot_datasets:
+    - repo_id: OpenDrawer
+      state_action_norm_file: robot_data/robocasa365/lerobot_point_lmdb/OpenDrawer/robot_state_action_stats/rot6d.json
+      text_context_file: text_context/qwen2.5-vl-3b.pt
+      max_npoints: 8192
+      point_voxel_size: 0.01
+      oracle_sampling: true
+      oracle_gt: geom
+      oracle_gt_npz: roi_meta/target_positions.npz
+      oracle_gt_set: handle
+      oracle_sampling_sigma: 0.08
+      oracle_sampling_floor: 0.05

@@ -71,8 +71,13 @@ ARMS = [
     # question is whether the policy collapses there. Its 2.5 mm render was made at this grid,
     # so it has no train/eval voxelization gap either.
     (4.0, 0.0025, render_root(0.0025)),
+    # Controls at every fine scale (√2 and 4 added 2026-10-04): the frozen-feature study
+    # (Utonia scale-only artifact) showed scaling the 1 cm cloud alone already moves the
+    # features as much as scale + resolution, so each fine arm needs its own-scale control.
+    (math.sqrt(2), 0.01, None),
     (2.0, 0.01, None),
     (2 * math.sqrt(2), 0.01, None),
+    (4.0, 0.01, None),
 ]
 
 BLOCK = {

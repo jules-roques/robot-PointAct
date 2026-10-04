@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submit the stage-8 trainings: OpenDrawer x oracle x 8192 points at coordinate scale
-# s in {sqrt2, 2, 2sqrt2, 4}, each rendered at its own grid (fine), and s in {2, 2sqrt2} on the 1 cm data (control).
+# s in {sqrt2, 2, 2sqrt2, 4}, each rendered at its own grid (fine), and the same scales on the 1 cm data (control).
 # See runs/generate_stage8.py for the design; s = 1 is stage 7's s7-od-oracle-n8192-s0.
 #
 #   DRY_RUN=1 bash experiments/13_robocasa365/submit_stage8.sh   # print what it would submit
@@ -40,7 +40,8 @@ submit() {
     sbatch --parsable "$@"
 }
 
-CONTROL=(s8-od-oracle-n8192-x2-s0 s8-od-oracle-n8192-x2.83-s0)
+CONTROL=(s8-od-oracle-n8192-x1.41-s0 s8-od-oracle-n8192-x2-s0 s8-od-oracle-n8192-x2.83-s0
+         s8-od-oracle-n8192-x4-s0)
 FINE=(s8-od-oracle-n8192-x1.41-g7.07mm-s0 s8-od-oracle-n8192-x2-g5mm-s0
       s8-od-oracle-n8192-x2.83-g3.54mm-s0 s8-od-oracle-n8192-x4-g2.5mm-s0)
 case "${S8_FAMILY:-all}" in
@@ -80,7 +81,7 @@ Eval needs nothing stage-specific: run_server reads ptv3_coord_scale (model) and
 point_voxel_size (live-cloud grid) off each checkpoint. Look for
 "voxel_size=... coord_scale=..." in the server log of the smoke eval to confirm.
 
-   ARMS="s8-od-oracle-n8192-x2-s0 s8-od-oracle-n8192-x2.83-s0 s8-od-oracle-n8192-x1.41-g7.07mm-s0 s8-od-oracle-n8192-x2-g5mm-s0 s8-od-oracle-n8192-x2.83-g3.54mm-s0 s8-od-oracle-n8192-x4-g2.5mm-s0"
+   ARMS="s8-od-oracle-n8192-x1.41-s0 s8-od-oracle-n8192-x2-s0 s8-od-oracle-n8192-x2.83-s0 s8-od-oracle-n8192-x4-s0 s8-od-oracle-n8192-x1.41-g7.07mm-s0 s8-od-oracle-n8192-x2-g5mm-s0 s8-od-oracle-n8192-x2.83-g3.54mm-s0 s8-od-oracle-n8192-x4-g2.5mm-s0"
    sbatch --job-name=eval-s8-od-curve \
      --export=ALL,EXPRS_DIR=$SCRATCH/PointAct_exprs/robocasa365/stage8,\
 EVAL_STEPS="5000 10000 15000 20000 25000 30000",EVAL_SEEDS="7",NUM_TRIALS=100,RUNS="$ARMS" \
